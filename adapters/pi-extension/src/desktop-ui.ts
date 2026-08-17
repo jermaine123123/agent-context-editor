@@ -117,7 +117,6 @@ function reasonLabel(reason: ToolOutputProtectionReason | undefined): string {
       return "当前消息受安全策略保护";
   }
 }
-
 function visibleAtoms(
   atoms: readonly ContextAtom[],
   state: ContextEditorStateV1,
