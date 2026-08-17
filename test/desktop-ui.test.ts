@@ -64,6 +64,21 @@ function atom(
 }
 
 describe("desktop context editor", () => {
+  it("uses English labels for a non-Chinese host locale", async () => {
+    const ui = new ScriptedUI((_title, options) => options.find((option) => option === "Close") ?? "Back");
+    await runDesktopContextEditor({
+      ui,
+      atoms: [atom("u-en", "user", "u-en", "English content")],
+      initialState: undefined,
+      locale: "en",
+      persistState: () => undefined,
+    });
+
+    expect(ui.selectCalls[0]?.options[0]).toContain("Browse conversation records");
+    expect(ui.selectCalls[0]?.options[1]).toBe("Search conversation records");
+    expect(ui.selectCalls[0]?.options.at(-1)).toBe("Close");
+  });
+
   it("applies Chinese keyword search before opening the message list", async () => {
     const atoms = [
       atom("u1", "user", "u1", "目标内容"),
@@ -86,6 +101,7 @@ describe("desktop context editor", () => {
       ui,
       atoms,
       initialState: undefined,
+      locale: "zh",
       persistState: (state) => {
         savedState = state;
       },
@@ -111,7 +127,7 @@ describe("desktop context editor", () => {
         const message = options.find((option) => option.startsWith("#"));
         return message;
       }
-      if (title.startsWith("User")) {
+      if (title.startsWith("用户")) {
         if (options.some((option) => option.startsWith("从记录管理器中隐藏"))) {
           return options.find((option) => option.startsWith("从记录管理器中隐藏"));
         }
@@ -124,6 +140,7 @@ describe("desktop context editor", () => {
       ui: controlledUi,
       atoms,
       initialState: undefined,
+      locale: "zh",
       sourceLeafId: "leaf-1",
       persistState: (state) => persisted.push(state),
     });
@@ -132,7 +149,7 @@ describe("desktop context editor", () => {
     expect(persisted[0]?.items.u1?.viewState).toBe("hide");
   });
 
-  it("supports type filtering, Tool Output Replace, and restore state persistence", async () => {
+  it("supports type filtering while keeping Tool Output visual-only", async () => {
     const atoms = [
       atom("u1", "user", "u1", "old request"),
       atom("call1", "tool_call", "u1", "read {}", { toolCallId: "call-1", toolName: "read" }),
@@ -144,7 +161,6 @@ describe("desktop context editor", () => {
     let typeVisits = 0;
     let mainVisits = 0;
     let messageVisits = 0;
-    let replaced = false;
     const ui = new ScriptedUI((title, options) => {
       if (title === "Pi Context Editor") {
         mainVisits += 1;
@@ -154,21 +170,15 @@ describe("desktop context editor", () => {
       }
       if (title.startsWith("筛选对话记录类型")) {
         typeVisits += 1;
-        if (typeVisits === 1) return "✓ User";
-        if (typeVisits === 2) return "○ Tool Output";
+        if (typeVisits === 1) return "✓ 用户";
+        if (typeVisits === 2) return "○ 工具输出";
         return "完成";
       }
       if (title.startsWith("对话记录 ")) {
         messageVisits += 1;
         return messageVisits === 1 ? options.find((option) => option.startsWith("#")) : "返回";
       }
-      if (title.startsWith("Tool Output")) {
-        if (!replaced) {
-          replaced = true;
-          return options.find((option) => option.startsWith("精简这条工具输出"));
-        }
-        return "返回";
-      }
+      if (title.startsWith("工具输出")) return "返回";
       return "返回";
     });
 
@@ -176,13 +186,13 @@ describe("desktop context editor", () => {
       ui,
       atoms,
       initialState: undefined,
+      locale: "zh",
       sourceLeafId: "leaf-1",
       persistState: (state) => persisted.push(state),
-      validateAtom: () => true,
     });
 
-    expect(persisted.at(-1)?.items.out1?.contextState).toBe("replace");
-    expect(ui.selectCalls.some((call) => call.options.some((option) => option.startsWith("暂不可精简")))).toBe(false);
+    expect(persisted.at(-1)?.items.out1?.contextState ?? "keep").toBe("keep");
+    expect(ui.selectCalls.some((call) => call.options.some((option) => option.startsWith("精简这条工具输出")))).toBe(false);
   });
 
   it("opens long content in a capped detail preview without persisting edits", async () => {
@@ -200,11 +210,11 @@ describe("desktop context editor", () => {
         messageVisits += 1;
         return messageVisits === 1 ? options.find((option) => option.startsWith("#")) : "返回";
       }
-      if (title.startsWith("User") && options.includes("查看完整记录（只读）") && !detailShown) {
+      if (title.startsWith("用户") && options.includes("查看完整记录（只读）") && !detailShown) {
         detailShown = true;
         return "查看完整记录（只读）";
       }
-      if (title.startsWith("User")) return "返回";
+      if (title.startsWith("用户")) return "返回";
       return "返回";
     });
 
@@ -212,6 +222,7 @@ describe("desktop context editor", () => {
       ui,
       atoms,
       initialState: undefined,
+      locale: "zh",
       persistState: () => undefined,
     });
 

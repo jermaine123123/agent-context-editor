@@ -55,4 +55,17 @@ describe("Pi sidecar", () => {
     appendSidecarEvent(sessionFile, "session-1", "leaf-1", event("tx-1"), parsed.revision);
     expect(() => JSON.parse(readFileSync(sidecarPath(sessionFile), "utf8"))).not.toThrow();
   });
+
+  it("fails open when a sidecar belongs to another Session", () => {
+    const sessionFile = fixture();
+    writeFileSync(sidecarPath(sessionFile), JSON.stringify({
+      schemaVersion: 1,
+      sessionId: "other-session",
+      prefs: { version: 2, enabledKinds: ["ai"], showHidden: true },
+      events: [],
+    }), "utf8");
+    const parsed = readSidecar(sessionFile, "session-1");
+    expect(parsed.document.sessionId).toBe("session-1");
+    expect(parsed.document.prefs.enabledKinds).toEqual(["user", "ai", "tool"]);
+  });
 });

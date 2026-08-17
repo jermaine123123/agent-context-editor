@@ -26,13 +26,14 @@
     "build:pi": "node ./scripts/build-pi.mjs",
     "build:client": "node ./adapters/deepseek-harness/scripts/build-client.mjs",
     "scan": "node ./scripts/scan-sensitive.mjs",
+    "scan:i18n": "node ./scripts/check-i18n.mjs",
     "pack:pi": "npm pack --workspace adapters/pi-extension --pack-destination ./release",
     "pack:deepseek": "npm pack --workspace adapters/deepseek-harness --pack-destination ./release",
     "pack": "npm run pack:pi && npm run pack:deepseek",
     "verify:pack": "node ./scripts/check-pack.mjs",
     "release:assets": "node ./scripts/make-release-assets.mjs",
     "release:desktop-assets": "node ./scripts/make-release-assets.mjs --desktop",
-    "verify": "npm run build:pi-core && npm run check && npm test && npm run scan && npm run build:pi && npm run build:deepseek && npm run build:client && npm run verify:pack"
+  "verify": "npm run build:pi-core && npm run check && npm test && npm run scan && npm run scan:i18n && npm run build:pi && npm run build:deepseek && npm run build:client && npm run verify:pack"
   },
   "devDependencies": {
     "@earendil-works/pi-agent-core": "0.84.2",

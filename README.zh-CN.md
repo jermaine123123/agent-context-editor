@@ -6,7 +6,7 @@ English 首页：[README.md](README.md)
 
 ## 当前发布内容
 
-- Pi 扩展 `pi-context-editor@0.3.0`：在 Pi TUI / Pi Desktop 中使用 `/ctx`，并保留原有 Tool Output 安全处理。
+- Pi 扩展 `pi-context-editor@0.4.0-alpha.1`：在 Pi TUI / Pi Desktop 中使用 `/ctx`，共享 Record/Unit Core，并把隐藏限定为视觉状态。
 - DeepSeek Harness 适配器 `context-editor-deepseek-harness@0.1.1`：在同一 Session 的 Context Editor 视图中，reasoning 与 answer 可以独立搜索、选择、隐藏、恢复和持久化。
 - Pi Context Desktop `0.1.4`：位于独立 fork [jermaine123123/pi-app](https://github.com/jermaine123123/pi-app) 的 Windows x64 社区构建。
 
@@ -14,13 +14,25 @@ DeepSeek 适配器把隐藏状态写入 `context_editor` sidecar，不改写原�
 Session 日志和模型输入。当前隐藏只是视图操作，不会减少 Token 消耗。项目与
 DeepSeek、Pi 官方及其维护团队没有隶属或赞助关系。
 
+## 界面语言
+
+Context Editor 会自动跟随宿主语言：`zh-*` 中文环境使用中文界面，其他
+系统或浏览器语言使用英文。Pi Context Desktop 如果已有应用语言设置会
+跟随该设置，否则使用系统语言。Pi TUI、Pi 原生 `/ctx` 对话框和 DeepSeek
+Harness 视图会在打开时识别语言。只翻译编辑器控件和状态提示，不会翻译
+Session 中的原始内容。
+
+Pi TUI 把 V2 视觉事件写入 Session 旁的 sidecar；Pi Desktop/RPC 仅保留旧的
+V1 视觉 CustomEntry 兼容路径。Pi 不注册上下文替换 hook，Tool Output 不会被
+替换，主聊天时间线也不支持原位隐藏。
+
 ## 安装
 
-从 [v0.1.0-alpha.1 Release](https://github.com/jermaine123123/agent-context-editor/releases/tag/v0.1.0-alpha.1)
+从 [Release assets](https://github.com/jermaine123123/agent-context-editor/releases)
 下载两个 tarball：
 
 ```sh
-pi install ./pi-context-editor-0.3.0.tgz
+pi install ./pi-context-editor-0.4.0-alpha.1.tgz
 dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.1.1.tgz
 ```
 
@@ -52,8 +64,8 @@ npm ci
 npm run verify
 ```
 
-检查会运行 TypeScript、通用 Core、Pi 与 DeepSeek fixtures，重新生成 DeepSeek
-Core/client，并确认 tarball 不含本地路径、模板或其他非发布文件。
+检查会运行 TypeScript、通用 Core、Pi 与 DeepSeek fixtures，重新生成 Pi vendored
+Core 和 bundle、重新生成 DeepSeek Core/client，并确认 tarball 不含本地路径、模板或其他非发布文件。
 
 ## 限制与路线图
 

@@ -55,6 +55,25 @@ describe("filter and state", () => {
     expect(atomState(restored, { ...atom, text: "changed", fingerprint: "changed" }).viewState).toBe("show");
   });
 
+  it("migrates only V1 visual state and ignores model-context flags", () => {
+    const atom = normalizeSessionEntries([userEntry])[0]!;
+    const restored = readLatestState([{
+      type: "custom",
+      id: "s-context",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      customType: STATE_ENTRY_TYPE,
+      data: {
+        version: 1,
+        updatedAt: new Date().toISOString(),
+        items: {
+          [atom.id]: { fingerprint: atom.fingerprint, viewState: "hide", contextState: "exclude" },
+        },
+      },
+    } as never]);
+    expect(atomState(restored, atom)).toEqual({ viewState: "hide", contextState: "keep" });
+  });
+
   it("restores optional desktop browser preferences from older-compatible V1 state", () => {
     const atom = normalizeSessionEntries([userEntry])[0]!;
     const state = stateWithViewFilter(

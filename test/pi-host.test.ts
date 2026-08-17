@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { sessionEntryToContextMessages, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { PiContextEditorHost } from "../adapters/pi-extension/src/host.js";
 
@@ -30,7 +31,12 @@ function fixture() {
       getLeafId: () => (branch.at(-1) as { id?: string } | undefined)?.id ?? null,
     },
   } as never;
-  return { sessionFile, ctx: ctx as never, setBranch: (next: unknown[]) => { branch = next; } };
+  return {
+    sessionFile,
+    ctx: ctx as never,
+    setBranch: (next: unknown[]) => { branch = next; },
+    modelProjection: () => JSON.stringify(branch.flatMap((entry) => sessionEntryToContextMessages(entry as SessionEntry))),
+  };
 }
 
 function sha256(path: string): string {
@@ -39,8 +45,9 @@ function sha256(path: string): string {
 
 describe("Pi context host", () => {
   it("persists visual unit events in sidecar and isolates sibling branches", () => {
-    const { sessionFile, ctx, setBranch } = fixture();
+    const { sessionFile, ctx, setBranch, modelProjection } = fixture();
     const before = sha256(sessionFile);
+    const beforeModelProjection = modelProjection();
     const host = new PiContextEditorHost(ctx);
     const ai = host.records().find((record) => record.kind === "ai");
     const reasoning = ai?.units.find((unit) => unit.kind === "reasoning");
@@ -50,6 +57,11 @@ describe("Pi context host", () => {
     expect(result.ok).toBe(true);
     expect(host.records().find((record) => record.kind === "ai")?.units.find((unit) => unit.kind === "reasoning")?.viewState).toBe("hide");
     expect(sha256(sessionFile)).toBe(before);
+    expect(modelProjection()).toBe(beforeModelProjection);
+
+    const viewRevision = host.snapshot().revision;
+    host.setPrefs({ version: 2, enabledKinds: ["ai"], showHidden: true });
+    expect(host.snapshot().revision).toBe(viewRevision);
 
     // A sibling branch created from u1 does not contain the mutation anchor a1.
     setBranch([{ id: "u1", type: "message", parentId: null, timestamp: new Date(1).toISOString(), message: { role: "user", content: "检查" } }]);
