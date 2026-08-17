@@ -2039,6 +2039,47 @@ window.__ModuleLoader__.load({
     	descriptors
     });
     //#endregion
+    //#region adapters/deepseek-harness/locale.js
+    function detectHarnessLocale(source = globalThis) {
+    	return [...source.navigator?.languages ?? [], source.navigator?.language].filter((value) => typeof value === "string" && value.length > 0).some((value) => value.toLowerCase().startsWith("zh")) ? "zh" : "en";
+    }
+    function createHarnessText(locale) {
+    	const zh = locale === "zh";
+    	const kind = (value) => zh ? value === "ai" ? "AI" : value === "tool" ? "工具" : "用户" : value === "ai" ? "AI" : value === "tool" ? "Tool" : "User";
+    	const unitKind = (value) => zh ? value === "reasoning" ? "思考" : value === "answer" ? "回答" : value === "tool" ? "工具" : "用户" : value === "reasoning" ? "Reasoning" : value === "answer" ? "Answer" : value === "tool" ? "Tool" : "User";
+    	return {
+    		locale,
+    		kind,
+    		unitKind,
+    		empty: zh ? "（空记录）" : "(empty record)",
+    		mixedPlaceholder: zh ? "部分内容不可用（原位置占位）" : "Part of this content is unavailable (placeholder at original position)",
+    		hiddenPlaceholder: (unit) => zh ? `${unitKind(unit)}已隐藏（原位置占位）` : `${unitKind(unit)} hidden (placeholder at original position)`,
+    		partiallyHidden: zh ? "部分隐藏" : "Partially hidden",
+    		hidden: zh ? "隐藏" : "Hidden",
+    		restore: zh ? "恢复" : "Restore",
+    		showHidden: zh ? "显示隐藏内容" : "Show hidden content",
+    		searchPlaceholder: zh ? "搜索完整会话历史…" : "Search complete session history…",
+    		searchAria: zh ? "搜索上下文" : "Search context",
+    		searchFailed: (error) => zh ? `搜索失败：${error}` : `Search failed: ${error}`,
+    		searchSummary: (total, occurrences, current, index, active = false) => {
+    			if (!active) return zh ? "搜索覆盖完整持久化历史" : "Search covers the complete persisted history";
+    			if (!total) return zh ? "0 个单元 · 0 次出现" : "0 units · 0 matches";
+    			const currentPart = current === void 0 ? "" : zh ? ` · 当前单元 ${current} 次` : ` · ${current} matches in current unit`;
+    			const indexPart = zh ? ` · ${index + 1}/${total}` : ` · ${index + 1}/${total}`;
+    			return zh ? `${total} 个单元 · ${occurrences} 次出现${currentPart}${indexPart}` : `${total} units · ${occurrences} matches${currentPart}${indexPart}`;
+    		},
+    		previous: zh ? "上一条" : "Previous",
+    		next: zh ? "下一条" : "Next",
+    		hideSelected: (count) => zh ? `隐藏选中${count ? `（${count}）` : ""}` : `Hide selected${count ? ` (${count})` : ""}`,
+    		restoreSelected: zh ? "恢复选中" : "Restore selected",
+    		restoreAll: zh ? "恢复全部" : "Restore all",
+    		undo: zh ? "撤销" : "Undo",
+    		running: zh ? "Agent 运行中：仅可读取和搜索" : "Agent running: only reading and searching are available",
+    		loading: zh ? "正在读取完整会话…" : "Reading the complete session…",
+    		noRecords: zh ? "没有符合当前筛选的可编辑记录。" : "No editable records match the current filters."
+    	};
+    }
+    //#endregion
     //#region \0context-editor-client-css
     const style = document.createElement("style");
     style.textContent = ".context-editor {\n  display: flex;\n  flex-direction: column;\n  gap: 0.65rem;\n  height: 100%;\n  min-height: 0;\n  padding: 0.85rem 1rem 1.25rem;\n  color: var(--dsh-fg, var(--foreground, inherit));\n}\n\n.context-editor__toolbar,\n.context-editor__searchbar,\n.context-editor__actions {\n  display: flex;\n  align-items: center;\n  gap: 0.45rem;\n  flex-wrap: wrap;\n}\n\n.context-editor__filters { display: flex; gap: 0.35rem; }\n.context-editor__filter,\n.context-editor__actions button,\n.context-editor__searchbar button,\n.context-editor__row button {\n  border: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  border-radius: 0.45rem;\n  background: var(--dsh-control-bg, var(--background, transparent));\n  color: inherit;\n  padding: 0.28rem 0.55rem;\n  cursor: pointer;\n}\n.context-editor__filter.is-active { background: var(--dsh-accent-soft, #e8efff); border-color: var(--dsh-accent, #7190e8); }\n.context-editor button:disabled { cursor: not-allowed; opacity: 0.45; }\n.context-editor__toggle { display: inline-flex; align-items: center; gap: 0.3rem; margin-left: auto; }\n.context-editor__searchbar input { flex: 1 1 20rem; min-width: 12rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.38rem 0.55rem; background: var(--dsh-input-bg, transparent); color: inherit; }\n.context-editor__search-summary { color: var(--dsh-muted, #687386); font-size: 0.82rem; }\n.context-editor__actions { border-bottom: 1px solid var(--dsh-border, var(--border, #d7dbe2)); padding-bottom: 0.5rem; }\n.context-editor__running { color: var(--dsh-muted, #687386); font-size: 0.82rem; }\n.context-editor__error { color: var(--dsh-danger, #b42318); font-size: 0.82rem; }\n.context-editor__list { overflow: auto; min-height: 0; display: flex; flex-direction: column; gap: 0.5rem; padding-right: 0.2rem; }\n.context-editor__row { display: flex; align-items: flex-start; gap: 0.6rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.55rem; padding: 0.65rem; background: var(--dsh-card-bg, transparent); }\n.context-editor__row.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }\n.context-editor__row.is-hidden { opacity: 0.82; }\n.context-editor__row--placeholder { align-items: center; min-height: 2.4rem; border-style: dashed; }\n.context-editor__row--placeholder input { margin-top: 0.2rem; }\n.context-editor__placeholder-text { flex: 1; color: var(--dsh-muted, #687386); font-size: 0.9rem; }\n.context-editor__row-content { flex: 1; min-width: 0; }\n.context-editor__row-meta { display: flex; align-items: center; gap: 0.45rem; color: var(--dsh-muted, #687386); font-size: 0.75rem; margin-bottom: 0.35rem; }\n.context-editor__kind { font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }\n.context-editor__hidden-badge { color: var(--dsh-warning, #996b00); }\n.context-editor__units { display: grid; gap: 0.45rem; }\n.context-editor__unit { border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.45rem 0.55rem; }\n.context-editor__unit.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }\n.context-editor__unit.is-hidden { opacity: 0.82; }\n.context-editor__unit-header { display: flex; align-items: center; gap: 0.45rem; min-height: 1.65rem; color: var(--dsh-muted, #687386); font-size: 0.78rem; }\n.context-editor__unit-select { display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer; }\n.context-editor__unit-kind { font-weight: 600; }\n.context-editor__unit-header button { margin-left: auto; }\n.context-editor__unit-body { min-width: 0; }\n.context-editor__unit-placeholder { color: var(--dsh-muted, #687386); padding: 0.35rem 0; font-size: 0.9rem; }\n.context-editor__record-body { display: grid; gap: 0.25rem; }\n.context-editor__atom { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }\n.context-editor__atom--reasoning { color: var(--dsh-muted, #687386); }\n.context-editor__tool-name { font-weight: 600; }\n.context-editor__hit { border-radius: 0.18rem; background: var(--dsh-highlight, #ffe28a); color: inherit; padding: 0 0.08rem; }\n.context-editor__state { color: var(--dsh-muted, #687386); padding: 2rem 0; text-align: center; }\n.context-editor__empty { color: var(--dsh-muted, #687386); }\n";
@@ -2092,12 +2133,6 @@ window.__ModuleLoader__.load({
     	try {
     		globalThis.localStorage?.setItem(PREFS_KEY, JSON.stringify(value));
     	} catch {}
-    }
-    function displayKind(kind) {
-    	return kind === "ai" ? "AI" : kind === "tool" ? "Tool" : "User";
-    }
-    function displayUnitKind(kind) {
-    	return kind === "reasoning" ? "思考" : kind === "answer" ? "回答" : displayKind(kind);
     }
     function unitsForRecord(record) {
     	const atoms = Array.isArray(record?.atoms) ? record.atoms : [];
@@ -2199,17 +2234,17 @@ window.__ModuleLoader__.load({
     		return this.call("undoView", { baseRevision });
     	}
     };
-    function FilterButton({ kind, enabled, onClick }) {
+    function FilterButton({ kind, enabled, onClick, text }) {
     	return h("button", {
     		type: "button",
     		className: `context-editor__filter ${enabled ? "is-active" : ""}`,
     		onClick,
     		"aria-pressed": enabled
-    	}, displayKind(kind));
+    	}, text.kind(kind));
     }
-    function UnitBody({ unit, match }) {
+    function UnitBody({ unit, match, text }) {
     	const atoms = unit.atoms ?? [];
-    	if (!atoms.length) return h("span", { className: "context-editor__empty" }, "（空记录）");
+    	if (!atoms.length) return h("span", { className: "context-editor__empty" }, text.empty);
     	return h("div", { className: "context-editor__record-body" }, atoms.map((atom) => {
     		const atomMatch = match?.atomId === atom.id && match?.field !== "tool_name";
     		const toolName = atom.toolName ? h("span", { className: "context-editor__tool-name" }, `${atom.toolName}: `) : null;
@@ -2219,12 +2254,13 @@ window.__ModuleLoader__.load({
     		}, toolName, h("span", null, atomMatch ? highlight(atom.text ?? "", match) : atom.text ?? ""));
     	}));
     }
-    function UnitSection({ unit, selected, onSelect, focused, showHidden, match, disabled, onRestore }) {
+    function UnitSection({ unit, selected, onSelect, focused, showHidden, match, disabled, onRestore, text }) {
     	const hidden = unit.viewState === "hide" || unit.viewState === "mixed";
     	const mixed = unit.viewState === "mixed";
-    	const body = hidden && !showHidden ? h("div", { className: "context-editor__unit-placeholder" }, mixed ? "部分内容不可用（原位置占位）" : `${displayUnitKind(unit.kind)}已隐藏（原位置占位）`) : h(UnitBody, {
+    	const body = hidden && !showHidden ? h("div", { className: "context-editor__unit-placeholder" }, mixed ? text.mixedPlaceholder : text.hiddenPlaceholder(unit.kind)) : h(UnitBody, {
     		unit,
-    		match
+    		match,
+    		text
     	});
     	return h("div", {
     		className: `context-editor__unit ${focused ? "is-focused" : ""} ${hidden ? "is-hidden" : ""}`,
@@ -2234,19 +2270,19 @@ window.__ModuleLoader__.load({
     		checked: selected,
     		disabled,
     		onChange: (event) => onSelect(event)
-    	}), h("span", { className: "context-editor__unit-kind" }, displayUnitKind(unit.kind))), mixed ? h("span", { className: "context-editor__hidden-badge" }, "部分隐藏") : null, hidden && !mixed ? h("span", { className: "context-editor__hidden-badge" }, "隐藏") : null, hidden ? h("button", {
+    	}), h("span", { className: "context-editor__unit-kind" }, text.unitKind(unit.kind))), mixed ? h("span", { className: "context-editor__hidden-badge" }, text.partiallyHidden) : null, hidden && !mixed ? h("span", { className: "context-editor__hidden-badge" }, text.hidden) : null, hidden ? h("button", {
     		type: "button",
     		disabled,
     		onClick: onRestore
-    	}, "恢复") : null), h("div", { className: "context-editor__unit-body" }, body));
+    	}, text.restore) : null), h("div", { className: "context-editor__unit-body" }, body));
     }
-    function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, match, disabled, onRestore }) {
+    function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, match, disabled, onRestore, text }) {
     	const units = unitsForRecord(record);
     	const focused = units.some((unit) => unit.id === focusedUnitId);
     	return h("article", {
     		className: `context-editor__row ${focused ? "is-focused" : ""}`,
     		"data-record-id": record.id
-    	}, h("div", { className: "context-editor__row-content" }, h("div", { className: "context-editor__row-meta" }, h("span", { className: "context-editor__kind" }, displayKind(record.kind)), record.toolCallId ? h("code", null, record.toolCallId) : null), h("div", { className: "context-editor__units" }, units.map((unit) => h(UnitSection, {
+    	}, h("div", { className: "context-editor__row-content" }, h("div", { className: "context-editor__row-meta" }, h("span", { className: "context-editor__kind" }, text.kind(record.kind)), record.toolCallId ? h("code", null, record.toolCallId) : null), h("div", { className: "context-editor__units" }, units.map((unit) => h(UnitSection, {
     		key: unit.id,
     		unit,
     		selected: selected.has(unit.id),
@@ -2255,11 +2291,14 @@ window.__ModuleLoader__.load({
     		showHidden,
     		match: focusedUnitId === unit.id ? match : null,
     		disabled,
-    		onRestore: () => onRestore(unit.id)
+    		onRestore: () => onRestore(unit.id),
+    		text
     	})))));
     }
     /** Context Editor tab body.  The parent ConversationSession keeps the shared composer. */
     function ContextEditorView({ sessionId, controller, useSession }) {
+    	const [locale] = (0, react.useState)(() => detectHarnessLocale());
+    	const text = (0, react.useMemo)(() => createHarnessText(locale), [locale]);
     	const running = useSession((snapshot) => Boolean(snapshot?.running));
     	const [prefs, setPrefs] = (0, react.useState)(safePreferences);
     	const [loaded, setLoaded] = (0, react.useState)({
@@ -2419,42 +2458,43 @@ window.__ModuleLoader__.load({
     		key: kind,
     		kind,
     		enabled: prefs.enabledKinds.includes(kind),
-    		onClick: () => toggleKind(kind)
+    		onClick: () => toggleKind(kind),
+    		text
     	}))), h("label", { className: "context-editor__toggle" }, h("input", {
     		type: "checkbox",
     		checked: prefs.showHidden,
     		onChange: (event) => updatePrefs({ showHidden: event.target.checked })
-    	}), "显示隐藏内容")), h("div", { className: "context-editor__searchbar" }, h("input", {
+    	}), text.showHidden)), h("div", { className: "context-editor__searchbar" }, h("input", {
     		type: "search",
     		value: query,
-    		placeholder: "搜索完整会话历史…",
+    		placeholder: text.searchPlaceholder,
     		onChange: (event) => setQuery(event.target.value),
-    		"aria-label": "搜索上下文"
-    	}), h("span", { className: "context-editor__search-summary" }, search?.error ? `搜索失败：${errorText(search.error)}` : search ? `${search.total} 个单元 · ${search.totalOccurrences} 次出现${match?.occurrenceCount === void 0 ? "" : ` · 当前单元 ${match.occurrenceCount} 次`}${search.total ? ` · ${searchIndex + 1}/${search.total}` : ""}` : "搜索覆盖完整持久化历史"), h("button", {
+    		"aria-label": text.searchAria
+    	}), h("span", { className: "context-editor__search-summary" }, search?.error ? text.searchFailed(errorText(search.error)) : search ? text.searchSummary(search.total, search.totalOccurrences, match?.occurrenceCount, searchIndex, true) : text.searchSummary(0, 0, void 0, 0)), h("button", {
     		type: "button",
     		disabled: !search || search.total < 1,
     		onClick: () => void moveMatch(-1)
-    	}, "上一条"), h("button", {
+    	}, text.previous), h("button", {
     		type: "button",
     		disabled: !search || search.total < 1,
     		onClick: () => void moveMatch(1)
-    	}, "下一条")), h("div", { className: "context-editor__actions" }, h("button", {
+    	}, text.next)), h("div", { className: "context-editor__actions" }, h("button", {
     		type: "button",
     		disabled: readOnly || selectedCount === 0,
     		onClick: () => void mutate("hide", [...selected])
-    	}, `隐藏选中${selectedCount ? `（${selectedCount}）` : ""}`), h("button", {
+    	}, text.hideSelected(selectedCount)), h("button", {
     		type: "button",
     		disabled: readOnly || selectedCount === 0,
     		onClick: () => void mutate("restore", [...selected])
-    	}, "恢复选中"), h("button", {
+    	}, text.restoreSelected), h("button", {
     		type: "button",
     		disabled: readOnly,
     		onClick: () => void mutate("reset")
-    	}, "恢复全部"), h("button", {
+    	}, text.restoreAll), h("button", {
     		type: "button",
     		disabled: readOnly || !loaded.snapshot?.canUndo,
     		onClick: () => void undo()
-    	}, "撤销"), running ? h("span", { className: "context-editor__running" }, "Agent 运行中：仅可读取和搜索") : null, loaded.status === "error" ? h("span", { className: "context-editor__error" }, errorText(loaded.error)) : null), h("div", { className: "context-editor__list" }, visibleRecords.map((record) => h(RecordRow, {
+    	}, text.undo), running ? h("span", { className: "context-editor__running" }, text.running) : null, loaded.status === "error" ? h("span", { className: "context-editor__error" }, errorText(loaded.error)) : null), h("div", { className: "context-editor__list" }, visibleRecords.map((record) => h(RecordRow, {
     		key: record.id,
     		record,
     		selected,
@@ -2463,8 +2503,9 @@ window.__ModuleLoader__.load({
     		showHidden: prefs.showHidden,
     		match: matchUnitId === match?.unitId ? match : null,
     		disabled: readOnly,
-    		onRestore: (unitId) => void mutate("restore", [unitId])
-    	}))), loaded.status === "loading" ? h("div", { className: "context-editor__state" }, "正在读取完整会话…") : null, loaded.status !== "loading" && visibleRecords.length === 0 ? h("div", { className: "context-editor__state" }, "没有符合当前筛选的可编辑记录。") : null);
+    		onRestore: (unitId) => void mutate("restore", [unitId]),
+    		text
+    	}))), loaded.status === "loading" ? h("div", { className: "context-editor__state" }, text.loading) : null, loaded.status !== "loading" && visibleRecords.length === 0 ? h("div", { className: "context-editor__state" }, text.noRecords) : null);
     }
     async function apply(ctx) {
     	const disposeRemote = await ctx.remote.$mount(contextEditorRemote);

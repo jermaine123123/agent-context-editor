@@ -1,5 +1,5 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import { ATOM_KINDS, type AtomKind, type ContextAtom, type ContextEditorStateV1, type ContextState, type ContextViewFilterState, type ViewState } from "./types.js";
+import { ATOM_KINDS, type AtomKind, type ContextAtom, type ContextEditorStateV1, type ContextViewFilterState, type ViewState } from "./types.js";
 
 export const STATE_ENTRY_TYPE = "context-editor-state";
 
@@ -14,10 +14,6 @@ export function emptyState(sourceLeafId?: string): ContextEditorStateV1 {
 
 function isViewState(value: unknown): value is ViewState {
   return value === "show" || value === "collapse" || value === "hide";
-}
-
-function isContextState(value: unknown): value is ContextState {
-  return value === "keep" || value === "replace" || value === "summarize" || value === "exclude";
 }
 
 function isAtomKind(value: unknown): value is AtomKind {
@@ -44,15 +40,11 @@ function parseState(value: unknown): ContextEditorStateV1 | undefined {
   for (const [id, raw] of Object.entries(record.items as Record<string, unknown>)) {
     if (!raw || typeof raw !== "object") continue;
     const item = raw as Record<string, unknown>;
-    if (
-      typeof item.fingerprint === "string" &&
-      isViewState(item.viewState) &&
-      isContextState(item.contextState)
-    ) {
+    if (typeof item.fingerprint === "string" && isViewState(item.viewState)) {
       items[id] = {
         fingerprint: item.fingerprint,
         viewState: item.viewState,
-        contextState: item.contextState,
+        contextState: "keep",
       };
     }
   }
@@ -79,12 +71,12 @@ export function readLatestState(entries: readonly SessionEntry[]): ContextEditor
 export function atomState(
   state: ContextEditorStateV1 | undefined,
   atom: ContextAtom,
-): { viewState: ViewState; contextState: ContextState } {
+): { viewState: ViewState; contextState: "keep" } {
   const item = state?.items[atom.id];
   if (!item || item.fingerprint !== atom.fingerprint) {
     return { viewState: "show", contextState: "keep" };
   }
-  return { viewState: item.viewState, contextState: item.contextState };
+  return { viewState: item.viewState, contextState: "keep" };
 }
 
 export function stateWithAtom(
@@ -103,7 +95,7 @@ export function stateWithAtom(
       [atom.id]: {
         fingerprint: atom.fingerprint,
         viewState: patch.viewState ?? previous.viewState,
-        contextState: patch.contextState ?? previous.contextState,
+        contextState: "keep",
       },
     },
     ...(state?.viewFilter ? { viewFilter: state.viewFilter } : {}),
@@ -118,7 +110,7 @@ export function stateForAtoms(
   const items: ContextEditorStateV1["items"] = {};
   for (const atom of atoms) {
     const current = state?.items[atom.id];
-    if (current?.fingerprint === atom.fingerprint) items[atom.id] = current;
+    if (current?.fingerprint === atom.fingerprint) items[atom.id] = { ...current, contextState: "keep" };
   }
   return {
     version: 1,
@@ -138,7 +130,7 @@ export function stateWithViewFilter(
     version: 1,
     updatedAt: new Date().toISOString(),
     ...(sourceLeafId ? { sourceLeafId } : state?.sourceLeafId ? { sourceLeafId: state.sourceLeafId } : {}),
-    items: state?.items ?? {},
+    items: Object.fromEntries(Object.entries(state?.items ?? {}).map(([id, item]) => [id, { ...item, contextState: "keep" }])),
     viewFilter: {
       enabledKinds: [...viewFilter.enabledKinds],
       query: viewFilter.query,

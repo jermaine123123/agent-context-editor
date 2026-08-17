@@ -25,6 +25,8 @@ export interface SidecarReadResult {
   path: string;
   document: PiContextEditorSidecar;
   revision: string;
+  /** Revision of the view event stream; preferences do not invalidate CAS. */
+  viewRevision: string;
 }
 
 function defaultDocument(sessionId: string): PiContextEditorSidecar {
@@ -39,17 +41,30 @@ function defaultDocument(sessionId: string): PiContextEditorSidecar {
 function isEvent(value: unknown): value is ContextEditorViewEventV2 {
   if (!value || typeof value !== "object") return false;
   const row = value as Record<string, unknown>;
+  const changes = Array.isArray(row.changes) ? row.changes : [];
+  const validChanges = changes.length > 0 && changes.every((change) => {
+    if (!change || typeof change !== "object") return false;
+    const item = change as Record<string, unknown>;
+    return typeof item.atomId === "string" &&
+      typeof item.fingerprint === "string" &&
+      (item.before === "show" || item.before === "collapse" || item.before === "hide") &&
+      (item.after === "show" || item.after === "collapse" || item.after === "hide");
+  });
   return row.version === 2 &&
     typeof row.transactionId === "string" &&
     typeof row.createdAt === "string" &&
     typeof row.baseRevision === "string" &&
     (row.action === "hide" || row.action === "restore" || row.action === "reset" || row.action === "undo") &&
-    Array.isArray(row.changes);
+    validChanges;
 }
 
 function parseDocument(raw: unknown, sessionId: string): PiContextEditorSidecar {
   if (!raw || typeof raw !== "object") return defaultDocument(sessionId);
   const row = raw as Record<string, unknown>;
+  if (row.schemaVersion !== SIDECAR_SCHEMA_VERSION ||
+      (typeof row.sessionId === "string" && row.sessionId !== sessionId)) {
+    return defaultDocument(sessionId);
+  }
   const events = Array.isArray(row.events)
     ? row.events.flatMap((candidate) => {
         if (!candidate || typeof candidate !== "object") return [];
@@ -81,6 +96,10 @@ function revisionOf(path: string, document: PiContextEditorSidecar): string {
   return stableFingerprint([path, stat, JSON.stringify(document)]);
 }
 
+function viewRevisionOf(document: PiContextEditorSidecar): string {
+  return stableFingerprint([document.sessionId, JSON.stringify(document.events)]);
+}
+
 export function readSidecar(sessionFile: string, sessionId: string): SidecarReadResult {
   const path = sidecarPath(sessionFile);
   let raw: unknown;
@@ -94,7 +113,12 @@ export function readSidecar(sessionFile: string, sessionId: string): SidecarRead
     }
   }
   const document = parseDocument(raw, sessionId);
-  return { path, document, revision: revisionOf(path, document) };
+  return {
+    path,
+    document,
+    revision: revisionOf(path, document),
+    viewRevision: viewRevisionOf(document),
+  };
 }
 
 function withLock<T>(path: string, fn: () => T): T {

@@ -1,0 +1,30 @@
+export type HarnessLocale = 'zh' | 'en'
+
+export interface HarnessText {
+  locale: HarnessLocale
+  kind(kind: string): string
+  unitKind(kind: string): string
+  empty: string
+  mixedPlaceholder: string
+  hiddenPlaceholder(kind: string): string
+  partiallyHidden: string
+  hidden: string
+  restore: string
+  showHidden: string
+  searchPlaceholder: string
+  searchAria: string
+  searchFailed(error: string): string
+  searchSummary(total: number, occurrences: number, current: number | undefined, index: number, active?: boolean): string
+  previous: string
+  next: string
+  hideSelected(count: number): string
+  restoreSelected: string
+  restoreAll: string
+  undo: string
+  running: string
+  loading: string
+  noRecords: string
+}
+
+export declare function detectHarnessLocale(source?: unknown): HarnessLocale
+export declare function createHarnessText(locale: HarnessLocale): HarnessText

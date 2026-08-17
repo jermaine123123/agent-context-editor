@@ -62,12 +62,13 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
       .filter((envelope) => envelope.anchorEntryId.length === 0 || branchIds.has(envelope.anchorEntryId))
       .map((envelope) => envelope.event);
     const branchParts = contextEditorBranchRevisionParts(entries);
-    const revision = branchRevision(leafId, atoms, [...branchParts, sidecar.revision]);
+    const revision = branchRevision(leafId, atoms, [...branchParts, sidecar.viewRevision]);
     const revisionProbe = stableFingerprint([
       this.sessionFile,
       this.sessionId,
       leafId ?? "",
-      sidecar.revision,
+      sidecar.viewRevision,
+      revision,
       ...branchParts,
     ]);
     return { entries, atoms, leafId, revision, revisionProbe, viewEvents };
@@ -78,6 +79,12 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
     const current = this.read();
     if (current.revision !== event.baseRevision) throw new Error("CONTEXT_EDITOR_CONFLICT");
     const sidecar = readSidecar(this.sessionFile, this.sessionId);
+    // Re-read the active branch immediately before taking the sidecar lock.
+    // This closes the normal race where a Session append lands while the TUI
+    // is preparing a view event; the sidecar writer then fails closed instead
+    // of attaching a stale event to a new branch revision.
+    const latest = this.read();
+    if (latest.revision !== current.revision) throw new Error("CONTEXT_EDITOR_CONFLICT");
     return appendSidecarEvent(
       this.sessionFile,
       this.sessionId,

@@ -10,6 +10,7 @@
 | Build | Prebuilt JavaScript package; no install-time build hook |
 | Independent units | Reasoning and answer units supported in `0.1.1` |
 | Persistence | `context_editor` storage-domain sidecar; Session log unchanged |
+| UI language | `zh-*` Chinese; all other browser locales English |
 | Recorded at | `2026-08-18 00:51:39 +08:00` |
 
 The adapter intentionally does not claim compatibility with later Harness

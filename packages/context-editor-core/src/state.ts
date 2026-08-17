@@ -29,15 +29,13 @@ function parseLegacyState(value: unknown): ContextEditorStateV1 | undefined {
   for (const [id, candidate] of Object.entries(raw.items as Record<string, unknown>)) {
     if (!candidate || typeof candidate !== 'object') continue
     const item = candidate as Record<string, unknown>
-    if (
-      typeof item.fingerprint === 'string' &&
-      isViewState(item.viewState) &&
-      ['keep', 'replace', 'summarize', 'exclude'].includes(String(item.contextState))
-    ) {
+    if (typeof item.fingerprint === 'string' && isViewState(item.viewState)) {
       items[id] = {
         fingerprint: item.fingerprint,
         viewState: item.viewState,
-        contextState: item.contextState as 'keep' | 'replace' | 'summarize' | 'exclude',
+        // V1 contextState was a model-input control. V2 is visual-only, so
+        // migrate only the view state and deliberately discard that field.
+        contextState: 'keep',
       }
     }
   }

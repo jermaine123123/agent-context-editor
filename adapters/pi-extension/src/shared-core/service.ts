@@ -301,6 +301,7 @@ export function contextEditorBranchRevisionParts(entries: readonly unknown[]): s
         : ''
     return [
       value.id,
+      value.parentId,
       value.type,
       value.customType,
       data?.transactionId,

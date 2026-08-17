@@ -9,6 +9,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { contextEditorRemote } from './remote.js'
+import { createHarnessText, detectHarnessLocale } from './locale.js'
 import './client.css'
 
 export const inject = ['remote']
@@ -52,14 +53,6 @@ function savePreferences(value) {
   } catch {
     // Private browsing/storage-disabled pages keep the preference in memory.
   }
-}
-
-function displayKind(kind) {
-  return kind === 'ai' ? 'AI' : kind === 'tool' ? 'Tool' : 'User'
-}
-
-function displayUnitKind(kind) {
-  return kind === 'reasoning' ? '思考' : kind === 'answer' ? '回答' : displayKind(kind)
 }
 
 function unitsForRecord(record) {
@@ -169,18 +162,18 @@ export class ContextEditorController {
   }
 }
 
-function FilterButton({ kind, enabled, onClick }) {
+function FilterButton({ kind, enabled, onClick, text }) {
   return h('button', {
     type: 'button',
     className: `context-editor__filter ${enabled ? 'is-active' : ''}`,
     onClick,
     'aria-pressed': enabled,
-  }, displayKind(kind))
+  }, text.kind(kind))
 }
 
-function UnitBody({ unit, match }) {
+function UnitBody({ unit, match, text }) {
   const atoms = unit.atoms ?? []
-  if (!atoms.length) return h('span', { className: 'context-editor__empty' }, '（空记录）')
+  if (!atoms.length) return h('span', { className: 'context-editor__empty' }, text.empty)
   return h('div', { className: 'context-editor__record-body' }, atoms.map(atom => {
     const atomMatch = match?.atomId === atom.id && match?.field !== 'tool_name'
     const toolName = atom.toolName
@@ -193,12 +186,12 @@ function UnitBody({ unit, match }) {
   }))
 }
 
-function UnitSection({ unit, selected, onSelect, focused, showHidden, match, disabled, onRestore }) {
+function UnitSection({ unit, selected, onSelect, focused, showHidden, match, disabled, onRestore, text }) {
   const hidden = unit.viewState === 'hide' || unit.viewState === 'mixed'
   const mixed = unit.viewState === 'mixed'
   const body = hidden && !showHidden
-    ? h('div', { className: 'context-editor__unit-placeholder' }, mixed ? '部分内容不可用（原位置占位）' : `${displayUnitKind(unit.kind)}已隐藏（原位置占位）`)
-    : h(UnitBody, { unit, match })
+    ? h('div', { className: 'context-editor__unit-placeholder' }, mixed ? text.mixedPlaceholder : text.hiddenPlaceholder(unit.kind))
+    : h(UnitBody, { unit, match, text })
   return h('div', {
     className: `context-editor__unit ${focused ? 'is-focused' : ''} ${hidden ? 'is-hidden' : ''}`,
     'data-unit-id': unit.id,
@@ -206,17 +199,17 @@ function UnitSection({ unit, selected, onSelect, focused, showHidden, match, dis
   h('div', { className: 'context-editor__unit-header' },
     h('label', { className: 'context-editor__unit-select' },
       h('input', { type: 'checkbox', checked: selected, disabled, onChange: event => onSelect(event) }),
-      h('span', { className: 'context-editor__unit-kind' }, displayUnitKind(unit.kind)),
+      h('span', { className: 'context-editor__unit-kind' }, text.unitKind(unit.kind)),
     ),
-    mixed ? h('span', { className: 'context-editor__hidden-badge' }, '部分隐藏') : null,
-    hidden && !mixed ? h('span', { className: 'context-editor__hidden-badge' }, '隐藏') : null,
-    hidden ? h('button', { type: 'button', disabled, onClick: onRestore }, '恢复') : null,
+    mixed ? h('span', { className: 'context-editor__hidden-badge' }, text.partiallyHidden) : null,
+    hidden && !mixed ? h('span', { className: 'context-editor__hidden-badge' }, text.hidden) : null,
+    hidden ? h('button', { type: 'button', disabled, onClick: onRestore }, text.restore) : null,
   ),
   h('div', { className: 'context-editor__unit-body' }, body),
   )
 }
 
-function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, match, disabled, onRestore }) {
+function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, match, disabled, onRestore, text }) {
   const units = unitsForRecord(record)
   const focused = units.some(unit => unit.id === focusedUnitId)
   return h('article', {
@@ -225,7 +218,7 @@ function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, matc
   },
   h('div', { className: 'context-editor__row-content' },
     h('div', { className: 'context-editor__row-meta' },
-      h('span', { className: 'context-editor__kind' }, displayKind(record.kind)),
+      h('span', { className: 'context-editor__kind' }, text.kind(record.kind)),
       record.toolCallId ? h('code', null, record.toolCallId) : null,
     ),
     h('div', { className: 'context-editor__units' }, units.map(unit => h(UnitSection, {
@@ -238,6 +231,7 @@ function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, matc
       match: focusedUnitId === unit.id ? match : null,
       disabled,
       onRestore: () => onRestore(unit.id),
+      text,
     }))),
   ),
   )
@@ -245,6 +239,8 @@ function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, matc
 
 /** Context Editor tab body.  The parent ConversationSession keeps the shared composer. */
 export function ContextEditorView({ sessionId, controller, useSession }) {
+  const [locale] = useState(() => detectHarnessLocale())
+  const text = useMemo(() => createHarnessText(locale), [locale])
   const running = useSession(snapshot => Boolean(snapshot?.running))
   const [prefs, setPrefs] = useState(safePreferences)
   const [loaded, setLoaded] = useState({ status: 'loading', snapshot: null, records: [], error: null })
@@ -396,35 +392,36 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
         kind,
         enabled: prefs.enabledKinds.includes(kind),
         onClick: () => toggleKind(kind),
+        text,
       }))),
       h('label', { className: 'context-editor__toggle' },
         h('input', {
           type: 'checkbox', checked: prefs.showHidden,
           onChange: event => updatePrefs({ showHidden: event.target.checked }),
         }),
-        '显示隐藏内容',
+        text.showHidden,
       ),
     ),
     h('div', { className: 'context-editor__searchbar' },
       h('input', {
-        type: 'search', value: query, placeholder: '搜索完整会话历史…',
+        type: 'search', value: query, placeholder: text.searchPlaceholder,
         onChange: event => setQuery(event.target.value),
-        'aria-label': '搜索上下文',
+        'aria-label': text.searchAria,
       }),
       h('span', { className: 'context-editor__search-summary' }, search?.error
-        ? `搜索失败：${errorText(search.error)}`
+        ? text.searchFailed(errorText(search.error))
         : search
-          ? `${search.total} 个单元 · ${search.totalOccurrences} 次出现${match?.occurrenceCount === undefined ? '' : ` · 当前单元 ${match.occurrenceCount} 次`}${search.total ? ` · ${searchIndex + 1}/${search.total}` : ''}`
-          : '搜索覆盖完整持久化历史'),
-      h('button', { type: 'button', disabled: !search || search.total < 1, onClick: () => void moveMatch(-1) }, '上一条'),
-      h('button', { type: 'button', disabled: !search || search.total < 1, onClick: () => void moveMatch(1) }, '下一条'),
+          ? text.searchSummary(search.total, search.totalOccurrences, match?.occurrenceCount, searchIndex, true)
+          : text.searchSummary(0, 0, undefined, 0)),
+      h('button', { type: 'button', disabled: !search || search.total < 1, onClick: () => void moveMatch(-1) }, text.previous),
+      h('button', { type: 'button', disabled: !search || search.total < 1, onClick: () => void moveMatch(1) }, text.next),
     ),
     h('div', { className: 'context-editor__actions' },
-      h('button', { type: 'button', disabled: readOnly || selectedCount === 0, onClick: () => void mutate('hide', [...selected]) }, `隐藏选中${selectedCount ? `（${selectedCount}）` : ''}`),
-      h('button', { type: 'button', disabled: readOnly || selectedCount === 0, onClick: () => void mutate('restore', [...selected]) }, '恢复选中'),
-      h('button', { type: 'button', disabled: readOnly, onClick: () => void mutate('reset') }, '恢复全部'),
-      h('button', { type: 'button', disabled: readOnly || !loaded.snapshot?.canUndo, onClick: () => void undo() }, '撤销'),
-      running ? h('span', { className: 'context-editor__running' }, 'Agent 运行中：仅可读取和搜索') : null,
+      h('button', { type: 'button', disabled: readOnly || selectedCount === 0, onClick: () => void mutate('hide', [...selected]) }, text.hideSelected(selectedCount)),
+      h('button', { type: 'button', disabled: readOnly || selectedCount === 0, onClick: () => void mutate('restore', [...selected]) }, text.restoreSelected),
+      h('button', { type: 'button', disabled: readOnly, onClick: () => void mutate('reset') }, text.restoreAll),
+      h('button', { type: 'button', disabled: readOnly || !loaded.snapshot?.canUndo, onClick: () => void undo() }, text.undo),
+      running ? h('span', { className: 'context-editor__running' }, text.running) : null,
       loaded.status === 'error' ? h('span', { className: 'context-editor__error' }, errorText(loaded.error)) : null,
     ),
     h('div', { className: 'context-editor__list' }, visibleRecords.map(record => h(RecordRow, {
@@ -437,9 +434,10 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
       match: matchUnitId === match?.unitId ? match : null,
       disabled: readOnly,
       onRestore: unitId => void mutate('restore', [unitId]),
+      text,
     }))),
-    loaded.status === 'loading' ? h('div', { className: 'context-editor__state' }, '正在读取完整会话…') : null,
-    loaded.status !== 'loading' && visibleRecords.length === 0 ? h('div', { className: 'context-editor__state' }, '没有符合当前筛选的可编辑记录。') : null,
+    loaded.status === 'loading' ? h('div', { className: 'context-editor__state' }, text.loading) : null,
+    loaded.status !== 'loading' && visibleRecords.length === 0 ? h('div', { className: 'context-editor__state' }, text.noRecords) : null,
   )
 }
 

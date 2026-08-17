@@ -1,56 +1,22 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { normalizeSessionEntries } from "./normalize.js";
 import { readLatestState, STATE_ENTRY_TYPE } from "./state.js";
-import {
-  buildToolOutputActions,
-  projectToolOutputs,
-  toolOutputProtection,
-} from "./projection.js";
 import { runDesktopContextEditor } from "./desktop-ui.js";
 import { ContextEditorComponent } from "./ui.js";
 import { PiContextEditorHost } from "./host.js";
 import type { ContextEditorStateV1 } from "./types.js";
+import { createPiText, detectPiLocale } from "./locale.js";
 
 function sourceLeafId(ctx: ExtensionContext): string | undefined {
   return ctx.sessionManager.getLeafId() ?? undefined;
 }
 
 export default function contextEditorExtension(pi: ExtensionAPI): void {
-  let activeState: ContextEditorStateV1 | undefined;
-
-  const restoreState = (ctx: ExtensionContext): void => {
-    activeState = readLatestState(ctx.sessionManager.getBranch());
-  };
-
-  pi.on("session_start", async (_event, ctx) => {
-    restoreState(ctx);
-  });
-
-  pi.on("session_tree", async (_event, ctx) => {
-    restoreState(ctx);
-  });
-
-  pi.on("context", async (event, ctx) => {
-    if (!activeState) return;
-
-    const currentAtoms = normalizeSessionEntries(ctx.sessionManager.buildContextEntries());
-    const actions = buildToolOutputActions(currentAtoms, activeState, 2);
-    if (actions.length === 0) return;
-
-    const result = projectToolOutputs(event.messages, actions);
-    if (result.skippedToolCallIds.length > 0) {
-      ctx.ui.notify(
-        `Context Editor skipped ${result.skippedToolCallIds.length} changed Tool Output(s) to preserve safety.`,
-        "warning",
-      );
-    }
-    if (result.appliedToolCallIds.length === 0) return;
-    return { messages: result.messages };
-  });
-
   pi.registerCommand("ctx", {
     description: "Inspect the active Pi context (usage: /ctx)",
     handler: async (_args, ctx) => {
+      const locale = detectPiLocale();
+      const text = createPiText(locale);
       if (ctx.mode === "json" || ctx.mode === "print") {
         ctx.ui.notify("/ctx requires interactive Pi TUI or Pi Desktop mode.", "warning");
         return;
@@ -65,7 +31,6 @@ export default function contextEditorExtension(pi: ExtensionAPI): void {
 
       const leafId = sourceLeafId(ctx);
       const state = readLatestState(ctx.sessionManager.getBranch());
-      activeState = state;
 
       if (ctx.mode === "rpc") {
         await runDesktopContextEditor({
@@ -73,19 +38,9 @@ export default function contextEditorExtension(pi: ExtensionAPI): void {
           atoms,
           initialState: state,
           sourceLeafId: leafId,
+          locale,
           persistState: (nextState: ContextEditorStateV1) => {
-            activeState = nextState;
             pi.appendEntry(STATE_ENTRY_TYPE, nextState);
-          },
-          validateAtom: (atom) => {
-            const freshAtoms = normalizeSessionEntries(ctx.sessionManager.buildContextEntries());
-            const fresh = freshAtoms.find((candidate) => candidate.id === atom.id);
-            return Boolean(
-              fresh &&
-                fresh.fingerprint === atom.fingerprint &&
-                fresh.sourceRef.entryId === atom.sourceRef.entryId &&
-                fresh.sourceRef.blockIndex === atom.sourceRef.blockIndex,
-            );
           },
         });
         return;
@@ -98,6 +53,10 @@ export default function contextEditorExtension(pi: ExtensionAPI): void {
 
       const host = new PiContextEditorHost(ctx);
       const records = host.records();
+      if (records.length === 0) {
+        ctx.ui.notify("There are no editable context records in the active branch.", "info");
+        return;
+      }
       const snapshot = host.snapshot();
       const prefs = host.getPrefs();
       await ctx.ui.custom((tui, theme, _keybindings, done) =>
@@ -114,6 +73,8 @@ export default function contextEditorExtension(pi: ExtensionAPI): void {
             undo: (baseRevision) => host.undo(baseRevision),
             persistPrefs: (nextPrefs) => host.setPrefs(nextPrefs),
             notify: (message, type = "info") => ctx.ui.notify(message, type),
+            locale,
+            confirm: () => ctx.ui.confirm(text.restoreAllConfirmTitle(), text.restoreAllConfirmMessage()),
           },
           () => done(undefined),
         ),

@@ -1,5 +1,5 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { decodeKittyPrintable, matchesKey, truncateToWidth, type Component, type TUI } from "@earendil-works/pi-tui";
+import { decodeKittyPrintable, matchesKey, truncateToWidth, wrapTextWithAnsi, type Component, type TUI } from "@earendil-works/pi-tui";
 import {
   searchRecords,
   type ContextEditableUnit,
@@ -10,6 +10,7 @@ import {
   type ContextRecordKind,
   type ContextSearchMatch,
 } from "./shared-core/index.js";
+import { createPiText, detectPiLocale, type PiLocale, type PiText } from "./locale.js";
 
 type FlatUnit = { record: ContextRecord; unit: ContextEditableUnit };
 type PersistPrefs = (prefs: ContextEditorPrefsV2) => void;
@@ -18,16 +19,9 @@ type LoadSnapshot = () => ContextEditorSnapshot;
 type Mutate = (input: { baseRevision: string; action: "hide" | "restore" | "reset"; unitIds?: readonly string[] }) => ContextMutationResult;
 type Undo = (baseRevision: string) => ContextMutationResult;
 type Notify = (message: string, type?: "info" | "warning" | "error") => void;
+type Confirm = (message: string) => Promise<boolean>;
 
 const RECORD_KINDS: readonly ContextRecordKind[] = ["user", "ai", "tool"];
-
-function kindLabel(kind: ContextRecordKind): string {
-  return kind === "ai" ? "AI" : kind === "tool" ? "Tool" : "User";
-}
-
-function unitLabel(unit: ContextEditableUnit): string {
-  return unit.kind === "reasoning" ? "Reasoning" : unit.kind === "answer" ? "Answer" : unit.kind === "tool" ? "Tool" : "User";
-}
 
 function colorForKind(kind: ContextRecordKind): Parameters<Theme["fg"]>[0] {
   return kind === "user" ? "accent" : kind === "ai" ? "text" : "toolOutput";
@@ -35,17 +29,6 @@ function colorForKind(kind: ContextRecordKind): Parameters<Theme["fg"]>[0] {
 
 function visiblePad(text: string, width: number): string {
   return truncateToWidth(text, Math.max(1, width), "…", true);
-}
-
-function bodyLines(text: string, width: number, maxLines = 8): string[] {
-  const available = Math.max(8, width - 8);
-  const source = text.split(/\r?\n/);
-  const output = source.slice(0, maxLines).map((line) => truncateToWidth(line || " ", available));
-  if (source.length > maxLines) {
-    const last = output.length - 1;
-    if (last >= 0) output[last] = truncateToWidth(`${output[last]} …`, available);
-  }
-  return output.length > 0 ? output : [" "];
 }
 
 export class ContextEditorComponent implements Component {
@@ -57,7 +40,9 @@ export class ContextEditorComponent implements Component {
   private readonly undoMutation: Undo;
   private readonly persistPrefs: PersistPrefs;
   private readonly notify: Notify;
+  private readonly confirm: Confirm;
   private readonly done: () => void;
+  private readonly text: PiText;
 
   private records: ContextRecord[];
   private prefs: ContextEditorPrefsV2;
@@ -66,12 +51,14 @@ export class ContextEditorComponent implements Component {
   private canUndo: boolean;
   private selectedIndex = 0;
   private scrollOffset = 0;
+  private manualScroll = false;
   private selected = new Set<string>();
   private rangeAnchor: number | null = null;
   private expanded = new Set<string>();
   private searchMode = false;
   private matches: ContextSearchMatch[] = [];
   private matchIndex = -1;
+  private readonly bodyCache = new Map<string, { width: number; text: string; lines: string[] }>();
 
   constructor(
     tui: TUI,
@@ -86,6 +73,8 @@ export class ContextEditorComponent implements Component {
       undo: Undo;
       persistPrefs: PersistPrefs;
       notify: Notify;
+      confirm?: Confirm;
+      locale?: PiLocale;
     },
     done: () => void,
   ) {
@@ -101,7 +90,9 @@ export class ContextEditorComponent implements Component {
     this.undoMutation = deps.undo;
     this.persistPrefs = deps.persistPrefs;
     this.notify = deps.notify;
+    this.confirm = deps.confirm ?? (async () => true);
     this.done = done;
+    this.text = createPiText(deps.locale ?? detectPiLocale());
   }
 
   private flatUnits(): FlatUnit[] {
@@ -124,22 +115,47 @@ export class ContextEditorComponent implements Component {
     return unit.atoms.map((atom) => atom.text).filter(Boolean).join("\n");
   }
 
-  private unitRows(width: number): { item: FlatUnit; lines: string[] }[] {
+  private unitIsHidden(unit: ContextEditableUnit): boolean {
+    return unit.viewState === "hide" || unit.viewState === "mixed";
+  }
+
+  private bodyLinesFor(unit: ContextEditableUnit, width: number): string[] {
+    const text = this.contentText(unit);
+    const available = Math.max(8, width - 8);
+    const cached = this.bodyCache.get(unit.id);
+    if (cached && cached.width === available && cached.text === text) return cached.lines;
+    const lines = wrapTextWithAnsi(text || " ", available);
+    const normalized = lines.length > 0 ? lines : [" "];
+    this.bodyCache.set(unit.id, { width: available, text, lines: normalized });
+    return normalized;
+  }
+
+  private unitLineCount(item: FlatUnit, width: number): number {
+    const { unit } = item;
+    if (this.unitIsHidden(unit) && !this.prefs.showHidden) return 2;
+    if (!this.expanded.has(unit.id) && !this.prefs.showHidden) return 1;
+    if (!this.expanded.has(unit.id) && this.unitIsHidden(unit)) return 1 + this.bodyLinesFor(unit, width).length;
+    if (!this.expanded.has(unit.id)) return 1;
+    return 1 + this.bodyLinesFor(unit, width).length;
+  }
+
+  private unitRows(width: number, start = 0, end = this.flatUnits().length): { item: FlatUnit; lines: string[] }[] {
     const units = this.flatUnits();
-    return units.map((item, index) => {
+    return units.slice(start, end).map((item, offset) => {
+      const index = start + offset;
       const { record, unit } = item;
       const selected = this.selected.has(unit.id);
       const cursor = index === this.selectedIndex ? "▶" : " ";
       const checkbox = selected ? "[x]" : "[ ]";
-      const hidden = unit.viewState === "hide" || unit.viewState === "mixed";
+      const hidden = this.unitIsHidden(unit);
       const state = hidden ? (unit.viewState === "mixed" ? "partial" : "hidden") : "shown";
-      const title = `${cursor} ${checkbox} ${unitLabel(unit)} · ${kindLabel(record.kind)} · ${state} · ${unit.atoms.reduce((sum, atom) => sum + atom.approxTokens, 0)} tok`;
+      const title = `${cursor} ${checkbox} ${this.text.unitKind(unit.kind)} · ${this.text.recordKind(record.kind)} · ${this.text.unitState(state)} · ${unit.atoms.reduce((sum, atom) => sum + atom.approxTokens, 0)} tok`;
       const titleLine = this.theme.fg(colorForKind(record.kind), title);
       const lines = [index === this.selectedIndex ? this.theme.bg("selectedBg", visiblePad(titleLine, width)) : visiblePad(titleLine, width)];
       if (hidden && !this.prefs.showHidden) {
-        lines.push(visiblePad(this.theme.fg("dim", `    ${unitLabel(unit)} hidden · press v to reveal`), width));
-      } else if (this.expanded.has(unit.id)) {
-        for (const line of bodyLines(this.contentText(unit), width)) {
+        lines.push(visiblePad(this.theme.fg("dim", this.text.hiddenUnit(this.text.unitKind(unit.kind))), width));
+      } else if (this.expanded.has(unit.id) || (hidden && this.prefs.showHidden)) {
+        for (const line of this.bodyLinesFor(unit, width)) {
           lines.push(visiblePad(this.theme.fg("dim", `    │ ${line}`), width));
         }
       }
@@ -151,22 +167,76 @@ export class ContextEditorComponent implements Component {
     return Math.max(5, this.tui.terminal.rows - 7);
   }
 
-  private ensureSelectionVisible(width = this.tui.terminal.columns): void {
-    const rows = this.unitRows(width);
-    let selectedLine = 0;
-    for (const row of rows) {
-      if (row.item.unit.id === this.currentUnit()?.unit.id) break;
-      selectedLine += row.lines.length;
+  private totalLineCount(width: number): number {
+    return this.flatUnits().reduce((sum, item) => sum + this.unitLineCount(item, width), 0);
+  }
+
+  private clampScroll(width = this.tui.terminal.columns): number {
+    const viewport = this.availableRows();
+    const maxOffset = Math.max(0, this.totalLineCount(width) - viewport);
+    this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxOffset));
+    return maxOffset;
+  }
+
+  private scrollByRows(delta: number): void {
+    const width = Math.max(24, this.tui.terminal.columns);
+    const maxOffset = this.clampScroll(width);
+    const next = Math.max(0, Math.min(maxOffset, this.scrollOffset + delta));
+    if (next === this.scrollOffset && maxOffset === 0) {
+      this.moveSelection(delta >= 0 ? this.availableRows() : -this.availableRows(), false);
+      return;
     }
+    this.scrollOffset = next;
+    this.manualScroll = true;
+    this.tui.requestRender();
+  }
+
+  private ensureSelectionVisible(width = this.tui.terminal.columns): void {
+    const units = this.flatUnits();
+    const selectedLine = units
+      .slice(0, this.selectedIndex)
+      .reduce((sum, item) => sum + this.unitLineCount(item, width), 0);
     const viewport = this.availableRows();
     if (selectedLine < this.scrollOffset) this.scrollOffset = selectedLine;
     if (selectedLine >= this.scrollOffset + viewport) this.scrollOffset = selectedLine - viewport + 1;
     this.scrollOffset = Math.max(0, this.scrollOffset);
   }
 
+  /** Build only rows intersecting the terminal viewport. Long bodies outside
+   * the viewport are never converted into strings during this frame. */
+  private renderWindow(width: number, start: number, end: number): string[] {
+    const units = this.flatUnits();
+    const output: string[] = [];
+    let lineOffset = 0;
+    for (let index = 0; index < units.length; index += 1) {
+      const item = units[index];
+      if (!item) continue;
+      const count = this.unitLineCount(item, width);
+      if (lineOffset + count > start && lineOffset < end) {
+        const row = this.unitRows(width, index, index + 1)[0];
+        if (row) {
+          const from = Math.max(0, start - lineOffset);
+          const to = Math.min(row.lines.length, end - lineOffset);
+          output.push(...row.lines.slice(from, to));
+        }
+      }
+      lineOffset += count;
+      if (lineOffset >= end) break;
+    }
+    return output;
+  }
+
   private resetSelection(): void {
     this.selected.clear();
     this.rangeAnchor = null;
+  }
+
+  private savePrefs(): void {
+    try {
+      this.persistPrefs(this.prefs);
+    } catch (error) {
+      this.notify(this.text.savePrefsFailed(error instanceof Error ? error.message : String(error)), "warning");
+    }
   }
 
   private refreshData(): void {
@@ -175,6 +245,7 @@ export class ContextEditorComponent implements Component {
     this.revision = snapshot.revision;
     this.canUndo = snapshot.canUndo;
     this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.flatUnits().length - 1));
+    this.manualScroll = false;
     this.resetSelection();
     this.matches = [];
     this.matchIndex = -1;
@@ -182,19 +253,34 @@ export class ContextEditorComponent implements Component {
     this.tui.requestRender();
   }
 
+  private syncExternalState(): void {
+    const snapshot = this.loadSnapshot();
+    if (snapshot.revision === this.revision) return;
+    this.records = this.loadRecords();
+    this.revision = snapshot.revision;
+    this.canUndo = snapshot.canUndo;
+    this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.flatUnits().length - 1));
+    this.scrollOffset = 0;
+    this.manualScroll = false;
+    this.resetSelection();
+    this.matches = [];
+    this.matchIndex = -1;
+    this.notify(this.text.sessionChanged(), "info");
+  }
+
   private applyMutation(action: "hide" | "restore" | "reset"): void {
     const unitIds = action === "reset" ? undefined : this.selectedUnitIds().length > 0 ? this.selectedUnitIds() : [this.currentUnit()?.unit.id].filter((id): id is string => !!id);
     try {
       const result = this.mutate({ baseRevision: this.revision, action, ...(unitIds ? { unitIds } : {}) });
       if (!result.ok || result.conflict) {
-        this.notify("会话或 sidecar 已变化，已刷新 Context Editor。", "warning");
+        this.notify(this.text.sidecarChanged(), "warning");
         this.refreshData();
         return;
       }
       this.refreshData();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.notify(message === "AGENT_RUNTIME_BUSY" ? "Agent 运行中，暂时不能修改隐藏状态。" : `Context Editor 操作失败：${message}`, "warning");
+      this.notify(message === "AGENT_RUNTIME_BUSY" ? this.text.busy() : this.text.operationFailed(message), "warning");
     }
   }
 
@@ -210,6 +296,7 @@ export class ContextEditorComponent implements Component {
     } else if (!extend) {
       this.resetSelection();
     }
+    this.manualScroll = false;
     this.ensureSelectionVisible();
     this.tui.requestRender();
   }
@@ -217,6 +304,7 @@ export class ContextEditorComponent implements Component {
   private refreshSearch(): void {
     this.matches = searchRecords(this.records, this.query, new Set(this.prefs.enabledKinds));
     this.matchIndex = this.matches.length > 0 ? 0 : -1;
+    this.resetSelection();
     this.focusMatch();
   }
 
@@ -243,15 +331,21 @@ export class ContextEditorComponent implements Component {
     if (enabled.has(kind)) enabled.delete(kind);
     else enabled.add(kind);
     this.prefs = { ...this.prefs, enabledKinds: RECORD_KINDS.filter((candidate) => enabled.has(candidate)) };
-    this.persistPrefs(this.prefs);
+    this.savePrefs();
     this.selectedIndex = 0;
     this.scrollOffset = 0;
+    this.manualScroll = false;
     this.resetSelection();
     this.refreshSearch();
   }
 
   private toggleAll(): void {
-    const units = this.flatUnits();
+    const allUnits = this.flatUnits();
+    const matchingIds = new Set(this.matches.map((match) => match.unitId));
+    const units = this.query.trim()
+      ? allUnits.filter(({ unit }) => matchingIds.has(unit.id))
+      : allUnits;
+    if (units.length === 0) return;
     if (units.length > 0 && units.every(({ unit }) => this.selected.has(unit.id))) this.resetSelection();
     else this.selected = new Set(units.map(({ unit }) => unit.id));
     this.tui.requestRender();
@@ -280,7 +374,13 @@ export class ContextEditorComponent implements Component {
     }
   }
 
+  private async resetAllWithConfirmation(): Promise<void> {
+    const confirmed = await this.confirm(this.text.restoreAllConfirmTitle());
+    if (confirmed) this.applyMutation("reset");
+  }
+
   handleInput(data: string): void {
+    this.syncExternalState();
     if (this.searchMode) {
       this.handleSearchInput(data);
       return;
@@ -302,17 +402,17 @@ export class ContextEditorComponent implements Component {
     if (data === "k" || matchesKey(data, "up")) { this.moveSelection(-1, false); return; }
     if (matchesKey(data, "shift+down")) { this.moveSelection(1, true); return; }
     if (matchesKey(data, "shift+up")) { this.moveSelection(-1, true); return; }
-    if (matchesKey(data, "pageDown")) { this.moveSelection(this.availableRows(), false); return; }
-    if (matchesKey(data, "pageUp")) { this.moveSelection(-this.availableRows(), false); return; }
-    if (data === "g") { this.selectedIndex = 0; this.ensureSelectionVisible(); this.tui.requestRender(); return; }
-    if (data === "G") { this.selectedIndex = Math.max(0, this.flatUnits().length - 1); this.ensureSelectionVisible(); this.tui.requestRender(); return; }
+    if (matchesKey(data, "pageDown")) { this.scrollByRows(this.availableRows()); return; }
+    if (matchesKey(data, "pageUp")) { this.scrollByRows(-this.availableRows()); return; }
+    if (data === "g") { this.selectedIndex = 0; this.manualScroll = false; this.ensureSelectionVisible(); this.tui.requestRender(); return; }
+    if (data === "G") { this.selectedIndex = Math.max(0, this.flatUnits().length - 1); this.manualScroll = false; this.ensureSelectionVisible(); this.tui.requestRender(); return; }
     if (data === "1") { this.toggleKind("user"); return; }
     if (data === "2") { this.toggleKind("ai"); return; }
     if (data === "3") { this.toggleKind("tool"); return; }
     if (data === "a" || data === "A") { this.toggleAll(); return; }
     if (data === "v" || data === "V") {
       this.prefs = { ...this.prefs, showHidden: !this.prefs.showHidden };
-      this.persistPrefs(this.prefs);
+      this.savePrefs();
       this.tui.requestRender();
       return;
     }
@@ -332,42 +432,43 @@ export class ContextEditorComponent implements Component {
       if (!unit) return;
       if (this.expanded.has(unit.id)) this.expanded.delete(unit.id);
       else this.expanded.add(unit.id);
+      this.manualScroll = false;
       this.ensureSelectionVisible();
       this.tui.requestRender();
       return;
     }
     if (data === "h" || data === "H") { this.applyMutation("hide"); return; }
     if (data === "r") { this.applyMutation("restore"); return; }
-    if (data === "R") { this.applyMutation("reset"); return; }
+    if (data === "R") { void this.resetAllWithConfirmation(); return; }
     if (data === "u") {
       if (!this.canUndo) return;
       try {
         const result = this.undoMutation(this.revision);
-        if (!result.ok || result.conflict) this.notify("撤销时发现 revision 冲突，已刷新。", "warning");
+        if (!result.ok || result.conflict) this.notify(this.text.undoConflict(), "warning");
         this.refreshData();
       } catch (error) {
-        this.notify(`撤销失败：${error instanceof Error ? error.message : String(error)}`, "warning");
+        this.notify(this.text.undoFailed(error instanceof Error ? error.message : String(error)), "warning");
       }
     }
   }
 
   render(width: number): string[] {
     const safeWidth = Math.max(24, width);
-    const rows = this.unitRows(safeWidth);
-    const content = rows.flatMap((row) => row.lines);
+    if (!this.manualScroll) this.ensureSelectionVisible(safeWidth);
+    const totalLines = this.totalLineCount(safeWidth);
     const viewport = this.availableRows();
-    const maxOffset = Math.max(0, content.length - viewport);
+    const maxOffset = Math.max(0, totalLines - viewport);
     this.scrollOffset = Math.min(this.scrollOffset, maxOffset);
-    const visible = content.slice(this.scrollOffset, this.scrollOffset + viewport);
+    const visible = this.renderWindow(safeWidth, this.scrollOffset, this.scrollOffset + viewport);
     while (visible.length < viewport) visible.push("");
 
-    const enabled = (kind: ContextRecordKind): string => this.prefs.enabledKinds.includes(kind) ? this.theme.fg("accent", kindLabel(kind)) : this.theme.fg("dim", kindLabel(kind));
-    const title = this.theme.fg("accent", "Pi Context Editor") + this.theme.fg("dim", `  ${this.flatUnits().length} units`);
+    const enabled = (kind: ContextRecordKind): string => this.prefs.enabledKinds.includes(kind) ? this.theme.fg("accent", this.text.recordKind(kind)) : this.theme.fg("dim", this.text.recordKind(kind));
+    const title = this.theme.fg("accent", "Pi Context Editor") + this.theme.fg("dim", `  ${this.text.unitCount(this.flatUnits().length)}`);
     const mode = this.searchMode
-      ? this.theme.fg("warning", `Search: ${this.query}▌  ${this.matches.length} units`)
-      : this.theme.fg("dim", `Search: ${this.query || "(press /)"}${this.matches.length > 0 ? ` · ${this.matchIndex + 1}/${this.matches.length}` : ""}`);
+      ? this.theme.fg("warning", this.text.tuiSearch(this.query, this.matches.length, this.matchIndex))
+      : this.theme.fg("dim", this.text.tuiSearchIdle(this.query, this.matches.length, this.matchIndex));
     const filterLine = `${enabled("user")} [1]  ${enabled("ai")} [2]  ${enabled("tool")} [3]`;
-    const status = this.theme.fg("dim", "j/k move · shift+↑/↓ range · space select · enter expand · h hide · r restore · u undo · v reveal · q close");
+    const status = this.theme.fg("dim", this.text.tuiStatus());
     return [
       visiblePad(title, safeWidth),
       visiblePad(filterLine, safeWidth),

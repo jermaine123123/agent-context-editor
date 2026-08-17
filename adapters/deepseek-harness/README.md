@@ -12,6 +12,10 @@ Harness Session log and model input are not rewritten. View state is kept in
 the `context_editor` storage-domain sidecar, and hiding currently does not
 reduce token usage.
 
+The browser view resolves `navigator.languages` when it opens: `zh-*` locales
+use Chinese labels and all other locales use English. Only editor controls and
+status messages are translated; Session content remains unchanged.
+
 ## Install the tarball
 
 From this directory, create the package and install the resulting file into a

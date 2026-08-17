@@ -1,9 +1,4 @@
-import { DEFAULT_ENABLED_KINDS, filterAtoms, kindLabel } from "./filter.js";
-import {
-  TOOL_OUTPUT_TOMBSTONE,
-  toolOutputProtection,
-  type ToolOutputProtectionReason,
-} from "./projection.js";
+import { DEFAULT_ENABLED_KINDS, filterAtoms } from "./filter.js";
 import { atomState, stateForAtoms, stateWithAtom, stateWithViewFilter } from "./state.js";
 import type {
   AtomFilter,
@@ -13,20 +8,10 @@ import type {
   ContextViewFilterState,
 } from "./types.js";
 import { ATOM_KINDS } from "./types.js";
+import { createPiText, detectPiLocale, type PiLocale, type PiText } from "./locale.js";
 
 const PAGE_SIZE = 50;
 const MAX_EDITOR_CHARS = 100_000;
-const BACK = "返回";
-const CLOSE = "关闭";
-const BROWSE = "浏览对话记录";
-const SEARCH = "搜索对话记录";
-const TYPES = "筛选对话记录类型";
-const HIDDEN = "已隐藏记录";
-const RESET = "重置当前对话状态";
-const SHOW_CONTENT = "查看完整记录（只读）";
-const OLDER = "← 更早记录";
-const NEWER = "更新记录 →";
-
 /** The subset of ExtensionUIContext that Pi Desktop supports natively. */
 export interface DesktopEditorUI {
   select(title: string, options: string[]): Promise<string | undefined>;
@@ -41,9 +26,8 @@ export interface DesktopEditorDeps {
   atoms: readonly ContextAtom[];
   initialState: ContextEditorStateV1 | undefined;
   sourceLeafId?: string;
+  locale?: PiLocale;
   persistState: (state: ContextEditorStateV1) => void;
-  /** Re-check the selected source atom immediately before a destructive action. */
-  validateAtom?: (atom: ContextAtom) => boolean | Promise<boolean>;
 }
 
 interface DesktopFilterState {
@@ -52,71 +36,46 @@ interface DesktopFilterState {
   showHidden: boolean;
 }
 
-function compactPreview(text: string, maxChars = 96): string {
-  const compact = text.replace(/\s+/g, " ").trim();
-  if (!compact) return "（空内容）";
+function compactPreview(text: PiText, value: string, maxChars = 96): string {
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (!compact) return text.emptyContent();
   return compact.length > maxChars ? `${compact.slice(0, maxChars - 1)}…` : compact;
 }
 
-function viewLabel(viewState: ReturnType<typeof atomState>["viewState"]): string {
-  return viewState === "hide" ? "已隐藏" : viewState === "collapse" ? "已折叠" : "正常显示";
+function viewLabel(text: PiText, viewState: ReturnType<typeof atomState>["viewState"]): string {
+  return text.viewState(viewState);
 }
 
-function contextLabel(contextState: ReturnType<typeof atomState>["contextState"]): string {
-  if (contextState === "replace") return "后续上下文已精简";
-  if (contextState === "summarize") return "后续上下文已摘要";
-  if (contextState === "exclude") return "已从后续上下文排除";
-  return "后续上下文完整保留";
-}
-
-function atomOption(atom: ContextAtom, index: number, state: ContextEditorStateV1): string {
+function atomOption(text: PiText, atom: ContextAtom, index: number, state: ContextEditorStateV1): string {
   const current = atomState(state, atom);
   const meta = [
-    kindLabel(atom.kind),
+    text.atomKind(atom.kind),
     atom.toolName,
-    viewLabel(current.viewState),
-    contextLabel(current.contextState),
+    viewLabel(text, current.viewState),
     `${atom.approxTokens} tok`,
   ]
     .filter(Boolean)
     .join(" · ");
-  return `#${String(index + 1).padStart(4, "0")} · ${meta} · ${compactPreview(atom.text)}`;
+  return `#${String(index + 1).padStart(4, "0")} · ${meta} · ${compactPreview(text, atom.text)}`;
 }
 
-function detailText(atom: ContextAtom): string {
-  const metadata = [
-    `类型：${kindLabel(atom.kind)}`,
-    `来源：${atom.sourceRef.entryId}:${atom.sourceRef.blockIndex}`,
-    `所属对话轮次：${atom.turnId}`,
-    `预估 Token：${atom.approxTokens}`,
-    atom.toolCallId ? `工具调用编号：${atom.toolCallId}` : undefined,
-    atom.toolName ? `工具：${atom.toolName}` : undefined,
-  ]
-    .filter(Boolean)
-    .join("\n");
-  const body = atom.text || "（空内容）";
+function detailText(text: PiText, atom: ContextAtom): string {
+  const metadata = text.detail({
+    kind: atom.kind,
+    entryId: atom.sourceRef.entryId,
+    blockIndex: atom.sourceRef.blockIndex,
+    turnId: atom.turnId,
+    approxTokens: atom.approxTokens,
+    toolCallId: atom.toolCallId,
+    toolName: atom.toolName,
+  });
+  const body = atom.text || text.emptyContent();
   const limited = body.length > MAX_EDITOR_CHARS
-    ? `${body.slice(0, MAX_EDITOR_CHARS)}\n\n[详情仅显示前 ${MAX_EDITOR_CHARS} 个字符；原始内容未修改]`
+    ? `${body.slice(0, MAX_EDITOR_CHARS)}\n\n${text.truncatedDetail(MAX_EDITOR_CHARS)}`
     : body;
   return `${metadata}\n\n${limited}`;
 }
 
-function reasonLabel(reason: ToolOutputProtectionReason | undefined): string {
-  switch (reason) {
-    case "missing-tool-call-id":
-      return "缺少 toolCallId";
-    case "missing-tool-call":
-      return "找不到配对 Tool Call";
-    case "recent-turn":
-      return "最近两个 User Turn 受保护";
-    case "error":
-      return "Error 结果受保护";
-    case "not-tool-output":
-      return "仅 Tool Output 支持此操作";
-    default:
-      return "当前消息受安全策略保护";
-  }
-}
 function visibleAtoms(
   atoms: readonly ContextAtom[],
   state: ContextEditorStateV1,
@@ -131,64 +90,43 @@ function visibleAtoms(
   );
 }
 
-function stateSummary(
-  atoms: readonly ContextAtom[],
-  state: ContextEditorStateV1,
-): { hidden: number; replaced: number } {
+function stateSummary(atoms: readonly ContextAtom[], state: ContextEditorStateV1): { hidden: number } {
   let hidden = 0;
-  let replaced = 0;
   for (const atom of atoms) {
     const current = atomState(state, atom);
     if (current.viewState === "hide") hidden += 1;
-    if (current.contextState === "replace") replaced += 1;
   }
-  return { hidden, replaced };
+  return { hidden };
 }
 
-function replacementTokenEstimate(): number {
-  return Math.max(1, Math.ceil(TOOL_OUTPUT_TOMBSTONE.length / 4));
-}
-
-async function viewAtom(ui: DesktopEditorUI, atom: ContextAtom): Promise<void> {
-  const prefill = detailText(atom);
-  const edited = await ui.editor(`查看 ${kindLabel(atom.kind)} 记录（只读）`, prefill);
+async function viewAtom(text: PiText, ui: DesktopEditorUI, atom: ContextAtom): Promise<void> {
+  const prefill = detailText(text, atom);
+  const edited = await ui.editor(text.readOnlyTitle(atom.kind), prefill);
   if (edited !== undefined && edited !== prefill) {
-    ui.notify("预览窗口中的修改不会保存，原始对话记录没有变化。", "info");
+    ui.notify(text.readOnlyChanged(), "info");
   }
 }
 
 async function editAtom(
+  text: PiText,
   deps: DesktopEditorDeps,
-  atoms: readonly ContextAtom[],
   state: ContextEditorStateV1,
   atom: ContextAtom,
 ): Promise<ContextEditorStateV1> {
   let currentState = state;
   while (true) {
     const current = atomState(currentState, atom);
-    const viewAction = current.viewState === "hide"
-      ? "恢复在记录管理器中显示"
-      : "从记录管理器中隐藏（不会隐藏主聊天窗口）";
-    const protection = toolOutputProtection(atoms, atom);
-    const contextAction = atom.kind === "tool_output"
-      ? current.contextState === "keep"
-        ? protection.eligible
-          ? "精简这条工具输出（影响后续上下文）"
-          : `暂不可精简：${reasonLabel(protection.reason)}`
-        : "恢复完整工具输出"
-      : undefined;
-    const options = [SHOW_CONTENT, viewAction];
-    if (contextAction) options.push(contextAction);
-    options.push(BACK);
+    const viewAction = text.viewAction(current.viewState === "hide");
+    const options = [text.showContent, viewAction, text.back];
 
     const selected = await deps.ui.select(
-      `${kindLabel(atom.kind)} · ${atom.toolName ?? "消息"}`,
+      `${text.atomKind(atom.kind)} · ${atom.toolName ?? text.messageLabel()}`,
       options,
     );
-    if (selected === undefined || selected === BACK) return currentState;
+    if (selected === undefined || selected === text.back) return currentState;
 
-    if (selected === SHOW_CONTENT) {
-      await viewAtom(deps.ui, atom);
+    if (selected === text.showContent) {
+      await viewAtom(text, deps.ui, atom);
       continue;
     }
 
@@ -203,48 +141,11 @@ async function editAtom(
       continue;
     }
 
-    if (!contextAction || selected !== contextAction) continue;
-    if (current.contextState !== "keep") {
-      const restore = await deps.ui.confirm(
-        "恢复完整工具输出？",
-        "后续模型调用将重新使用完整的工具输出；原始对话记录始终保留。",
-      );
-      if (restore) {
-        currentState = stateWithAtom(currentState, atom, { contextState: "keep" }, deps.sourceLeafId);
-        deps.persistState(currentState);
-      }
-      continue;
-    }
-
-    if (!protection.eligible) {
-      deps.ui.notify(`该工具输出暂不可精简：${reasonLabel(protection.reason)}。`, "warning");
-      continue;
-    }
-    if (deps.validateAtom && !(await deps.validateAtom(atom))) {
-      deps.ui.notify("消息内容或身份已变化，已跳过操作以保护原始上下文。", "warning");
-      continue;
-    }
-
-    const replacementTokens = replacementTokenEstimate();
-    const estimatedSavings = Math.max(0, atom.approxTokens - replacementTokens);
-    const confirmed = await deps.ui.confirm(
-      "精简这条工具输出？",
-      [
-        `工具：${atom.toolName ?? "unknown"}`,
-        "影响记录：1",
-        `Token 估算：${atom.approxTokens} → ${replacementTokens}`,
-        `预计减少：${estimatedSavings} tokens`,
-        "仅影响后续模型调用；原始对话记录不会修改。",
-      ].join("\n"),
-    );
-    if (confirmed) {
-      currentState = stateWithAtom(currentState, atom, { contextState: "replace" }, deps.sourceLeafId);
-      deps.persistState(currentState);
-    }
   }
 }
 
 async function browseAtoms(
+  text: PiText,
   deps: DesktopEditorDeps,
   atoms: readonly ContextAtom[],
   state: ContextEditorStateV1,
@@ -254,7 +155,7 @@ async function browseAtoms(
   while (true) {
     const matches = visibleAtoms(atoms, currentState, filter);
     if (matches.length === 0) {
-      deps.ui.notify("没有符合当前筛选条件的对话记录。", "info");
+      deps.ui.notify(text.noMatches(), "info");
       return currentState;
     }
 
@@ -263,50 +164,50 @@ async function browseAtoms(
     while (true) {
       const start = page * PAGE_SIZE;
       const pageAtoms = matches.slice(start, start + PAGE_SIZE);
-      const atomOptions = pageAtoms.map((atom, index) => atomOption(atom, start + index, currentState));
+      const atomOptions = pageAtoms.map((atom, index) => atomOption(text, atom, start + index, currentState));
       const optionToAtom = new Map(pageAtoms.map((atom, index) => [
-        atomOption(atom, start + index, currentState),
+        atomOption(text, atom, start + index, currentState),
         atom,
       ]));
       const options = [...atomOptions];
-      if (page > 0) options.push(OLDER);
-      if (page < pageCount - 1) options.push(NEWER);
-      options.push(BACK);
+      if (page > 0) options.push(text.older);
+      if (page < pageCount - 1) options.push(text.newer);
+      options.push(text.back);
 
       const selected = await deps.ui.select(
-        `对话记录 ${start + 1}-${start + pageAtoms.length}/${matches.length}`,
+        text.page(start + 1, start + pageAtoms.length, matches.length),
         options,
       );
-      if (selected === undefined || selected === BACK) return currentState;
-      if (selected === OLDER) {
+      if (selected === undefined || selected === text.back) return currentState;
+      if (selected === text.older) {
         page = Math.max(0, page - 1);
         continue;
       }
-      if (selected === NEWER) {
+      if (selected === text.newer) {
         page = Math.min(pageCount - 1, page + 1);
         continue;
       }
 
       const atom = optionToAtom.get(selected);
       if (!atom) continue;
-      currentState = await editAtom(deps, atoms, currentState, atom);
+      currentState = await editAtom(text, deps, currentState, atom);
       break;
     }
   }
 }
 
-async function editTypeFilter(ui: DesktopEditorUI, filter: DesktopFilterState): Promise<void> {
+async function editTypeFilter(text: PiText, ui: DesktopEditorUI, filter: DesktopFilterState): Promise<void> {
   while (true) {
     const options = ATOM_KINDS.map((kind) =>
-      `${filter.enabledKinds.has(kind) ? "✓" : "○"} ${kindLabel(kind)}`,
+      `${filter.enabledKinds.has(kind) ? "✓" : "○"} ${text.atomKind(kind)}`,
     );
     const optionToKind = new Map(ATOM_KINDS.map((kind) => [
-      `${filter.enabledKinds.has(kind) ? "✓" : "○"} ${kindLabel(kind)}`,
+      `${filter.enabledKinds.has(kind) ? "✓" : "○"} ${text.atomKind(kind)}`,
       kind,
     ]));
-    options.push("完成");
-    const selected = await ui.select("筛选对话记录类型（可多选）", options);
-    if (selected === undefined || selected === "完成") return;
+    options.push(text.done);
+    const selected = await ui.select(text.typeFilterTitle(), options);
+    if (selected === undefined || selected === text.done) return;
     const kind = optionToKind.get(selected);
     if (!kind) continue;
     if (filter.enabledKinds.has(kind)) filter.enabledKinds.delete(kind);
@@ -315,18 +216,19 @@ async function editTypeFilter(ui: DesktopEditorUI, filter: DesktopFilterState): 
 }
 
 async function resetState(
+  text: PiText,
   deps: DesktopEditorDeps,
   atoms: readonly ContextAtom[],
   state: ContextEditorStateV1,
 ): Promise<ContextEditorStateV1> {
   const summary = stateSummary(atoms, state);
-  if (summary.hidden === 0 && summary.replaced === 0) {
-    deps.ui.notify("当前对话没有需要重置的管理状态。", "info");
+  if (summary.hidden === 0) {
+    deps.ui.notify(text.resetEmpty(), "info");
     return state;
   }
   const confirmed = await deps.ui.confirm(
-    "重置当前对话状态？",
-    `将恢复 ${summary.hidden} 条已隐藏记录，并撤销 ${summary.replaced} 条工具输出的后续上下文精简；原始对话记录不会删除。`,
+    text.resetTitle(),
+    text.resetMessage(summary.hidden),
   );
   if (!confirmed) return state;
   const reset = stateForAtoms(undefined, atoms, deps.sourceLeafId);
@@ -366,6 +268,7 @@ function persistFilterState(
 
 /** Run the Pi Desktop-compatible, dialog-only Context Editor. */
 export async function runDesktopContextEditor(deps: DesktopEditorDeps): Promise<void> {
+  const text = createPiText(deps.locale ?? detectPiLocale());
   let state = stateForAtoms(deps.initialState, deps.atoms, deps.sourceLeafId);
   let changed = false;
   const flowDeps: DesktopEditorDeps = {
@@ -385,51 +288,51 @@ export async function runDesktopContextEditor(deps: DesktopEditorDeps): Promise<
   while (true) {
     const matches = visibleAtoms(deps.atoms, state, filter);
     const summary = stateSummary(deps.atoms, state);
-    const searchLabel = filter.query ? `：${compactPreview(filter.query, 24)}` : "";
+    const searchLabel = filter.query ? `${text.locale === "zh" ? "：" : ": "}${compactPreview(text, filter.query, 24)}` : "";
     const typeCount = `${filter.enabledKinds.size}/${ATOM_KINDS.length}`;
     const selected = await deps.ui.select("Pi Context Editor", [
-      `${BROWSE}（${matches.length}/${deps.atoms.length}）`,
-      `${SEARCH}${searchLabel}`,
-      `${TYPES}（${typeCount}）`,
-      `${HIDDEN}（${filter.showHidden ? "当前显示" : "当前不显示"}）`,
-      `${RESET}（已隐藏 ${summary.hidden} · 已精简 ${summary.replaced}）`,
-      CLOSE,
+      text.browseSummary(matches.length, deps.atoms.length),
+      `${text.search}${searchLabel}`,
+      text.typeSummary(filter.enabledKinds.size, ATOM_KINDS.length),
+      text.hiddenSummary(summary.hidden, filter.showHidden),
+      text.resetSummary(summary.hidden),
+      text.close,
     ]);
-    if (selected === undefined || selected === CLOSE) {
+    if (selected === undefined || selected === text.close) {
       if (changed) {
         deps.ui.notify(
-          `已保存当前对话状态：隐藏 ${summary.hidden} 条，精简工具输出 ${summary.replaced} 条。隐藏和筛选只影响对话记录管理器，不会改变主聊天窗口；下次打开时会恢复这些设置。`,
+          text.savedMessage(summary.hidden),
           "info",
         );
       }
       return;
     }
 
-    if (selected.startsWith(BROWSE)) {
-      state = await browseAtoms(flowDeps, deps.atoms, state, filter);
+    if (selected.startsWith(text.browse)) {
+      state = await browseAtoms(text, flowDeps, deps.atoms, state, filter);
       continue;
     }
-    if (selected.startsWith(SEARCH)) {
-      const query = await flowDeps.ui.input("搜索对话记录", filter.query || "输入关键词；留空清除");
+    if (selected.startsWith(text.search)) {
+      const query = await flowDeps.ui.input(text.searchTitle(), filter.query || text.searchPlaceholder());
       if (query !== undefined) {
         filter.query = query.trim();
         state = persistFilterState(flowDeps, state, filter);
       }
       continue;
     }
-    if (selected.startsWith(TYPES)) {
-      await editTypeFilter(flowDeps.ui, filter);
+    if (selected.startsWith(text.types)) {
+      await editTypeFilter(text, flowDeps.ui, filter);
       state = persistFilterState(flowDeps, state, filter);
       continue;
     }
-    if (selected.startsWith(HIDDEN)) {
+    if (selected.startsWith(text.hidden)) {
       filter.showHidden = !filter.showHidden;
       state = persistFilterState(flowDeps, state, filter);
       continue;
     }
-    if (selected.startsWith(RESET)) {
+    if (selected.startsWith(text.reset)) {
       const previousState = state;
-      state = await resetState(flowDeps, deps.atoms, state);
+      state = await resetState(text, flowDeps, deps.atoms, state);
       if (state !== previousState) {
         filter.enabledKinds = new Set(DEFAULT_ENABLED_KINDS);
         filter.query = "";

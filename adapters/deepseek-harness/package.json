@@ -20,6 +20,8 @@
     "index.js",
     "index.d.ts",
     "client.js",
+    "locale.js",
+    "locale.d.ts",
     "client.bundle.js",
     "client.css",
     "core-runtime.js",

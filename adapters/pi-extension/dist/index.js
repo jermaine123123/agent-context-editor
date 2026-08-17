@@ -1,11 +1,11 @@
 /* GENERATED FILE - rebuild with npm run build:pi. */
-/* Canonical Core source digest: fe1fda349590fa6ca92e7333953caa0e72060c2f4357e2ab7a17ef893be64741 */
-import { decodeKittyPrintable, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+/* Canonical Core source digest: 88c7f4a040e5ace3689ed76567ae5ace5124725753a4a1a7db2c3e57ca8270bc */
+import { decodeKittyPrintable, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 //#region adapters/pi-extension/src/shared-core/fingerprint.ts
 /** Deterministic identity check; this is not intended as a security hash. */
-function stableFingerprint$1(parts) {
+function stableFingerprint(parts) {
 	let hash = 2166136261;
 	for (const part of parts) {
 		for (let index = 0; index < part.length; index += 1) {
@@ -17,8 +17,8 @@ function stableFingerprint$1(parts) {
 	}
 	return (hash >>> 0).toString(16).padStart(8, "0");
 }
-function fingerprintBlock$1(kind, timestamp, toolCallId, text) {
-	return stableFingerprint$1([
+function fingerprintBlock(kind, timestamp, toolCallId, text) {
+	return stableFingerprint([
 		kind,
 		String(timestamp),
 		toolCallId ?? "",
@@ -34,7 +34,7 @@ function legacyAtomId(atom) {
 	return `${atom.sourceRef.entryId}:${atom.sourceRef.blockIndex}:${atom.kind}:${atom.fingerprint}`;
 }
 function branchRevision(leafId, atoms, extra = []) {
-	return stableFingerprint$1([
+	return stableFingerprint([
 		leafId ?? "",
 		...atoms.map((atom) => `${atom.id}:${atom.fingerprint}`),
 		...extra
@@ -234,15 +234,10 @@ function parseLegacyState(value) {
 	for (const [id, candidate] of Object.entries(raw.items)) {
 		if (!candidate || typeof candidate !== "object") continue;
 		const item = candidate;
-		if (typeof item.fingerprint === "string" && isViewState$1(item.viewState) && [
-			"keep",
-			"replace",
-			"summarize",
-			"exclude"
-		].includes(String(item.contextState))) items[id] = {
+		if (typeof item.fingerprint === "string" && isViewState$1(item.viewState)) items[id] = {
 			fingerprint: item.fingerprint,
 			viewState: item.viewState,
-			contextState: item.contextState
+			contextState: "keep"
 		};
 	}
 	const filter = raw.viewFilter;
@@ -593,6 +588,7 @@ function contextEditorBranchRevisionParts(entries) {
 		}).join(",") : typeof content === "string" ? String(content.length) : "";
 		return [
 			value.id,
+			value.parentId,
 			value.type,
 			value.customType,
 			data?.transactionId,
@@ -652,7 +648,7 @@ function addAtom(atoms, entry, turnId, blockIndex, kind, text, options = {}) {
 		turnId,
 		timestamp,
 		text,
-		fingerprint: fingerprintBlock$1(kind, timestamp, options.toolCallId, text),
+		fingerprint: fingerprintBlock(kind, timestamp, options.toolCallId, text),
 		approxTokens: approximateTokens(text),
 		...options
 	};
@@ -739,9 +735,6 @@ function normalizeSessionEntries(entries) {
 	}
 	return atoms;
 }
-function contentToSearchText(content) {
-	return contentToText(content);
-}
 //#endregion
 //#region adapters/pi-extension/src/types.ts
 const ATOM_KINDS = [
@@ -757,9 +750,6 @@ const ATOM_KINDS = [
 const STATE_ENTRY_TYPE = "context-editor-state";
 function isViewState(value) {
 	return value === "show" || value === "collapse" || value === "hide";
-}
-function isContextState(value) {
-	return value === "keep" || value === "replace" || value === "summarize" || value === "exclude";
 }
 function isAtomKind(value) {
 	return typeof value === "string" && ATOM_KINDS.includes(value);
@@ -783,10 +773,10 @@ function parseState(value) {
 	for (const [id, raw] of Object.entries(record.items)) {
 		if (!raw || typeof raw !== "object") continue;
 		const item = raw;
-		if (typeof item.fingerprint === "string" && isViewState(item.viewState) && isContextState(item.contextState)) items[id] = {
+		if (typeof item.fingerprint === "string" && isViewState(item.viewState)) items[id] = {
 			fingerprint: item.fingerprint,
 			viewState: item.viewState,
-			contextState: item.contextState
+			contextState: "keep"
 		};
 	}
 	return {
@@ -813,7 +803,7 @@ function atomState(state, atom) {
 	};
 	return {
 		viewState: item.viewState,
-		contextState: item.contextState
+		contextState: "keep"
 	};
 }
 function stateWithAtom(state, atom, patch, sourceLeafId) {
@@ -827,7 +817,7 @@ function stateWithAtom(state, atom, patch, sourceLeafId) {
 			[atom.id]: {
 				fingerprint: atom.fingerprint,
 				viewState: patch.viewState ?? previous.viewState,
-				contextState: patch.contextState ?? previous.contextState
+				contextState: "keep"
 			}
 		},
 		...state?.viewFilter ? { viewFilter: state.viewFilter } : {}
@@ -837,7 +827,10 @@ function stateForAtoms(state, atoms, sourceLeafId) {
 	const items = {};
 	for (const atom of atoms) {
 		const current = state?.items[atom.id];
-		if (current?.fingerprint === atom.fingerprint) items[atom.id] = current;
+		if (current?.fingerprint === atom.fingerprint) items[atom.id] = {
+			...current,
+			contextState: "keep"
+		};
 	}
 	return {
 		version: 1,
@@ -852,120 +845,15 @@ function stateWithViewFilter(state, viewFilter, sourceLeafId) {
 		version: 1,
 		updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
 		...sourceLeafId ? { sourceLeafId } : state?.sourceLeafId ? { sourceLeafId: state.sourceLeafId } : {},
-		items: state?.items ?? {},
+		items: Object.fromEntries(Object.entries(state?.items ?? {}).map(([id, item]) => [id, {
+			...item,
+			contextState: "keep"
+		}])),
 		viewFilter: {
 			enabledKinds: [...viewFilter.enabledKinds],
 			query: viewFilter.query,
 			showHidden: viewFilter.showHidden
 		}
-	};
-}
-//#endregion
-//#region adapters/pi-extension/src/fingerprint.ts
-/** Small deterministic hash; it is an identity check, not a security primitive. */
-function stableFingerprint(parts) {
-	let hash = 2166136261;
-	for (const part of parts) {
-		for (let index = 0; index < part.length; index++) {
-			hash ^= part.charCodeAt(index);
-			hash = Math.imul(hash, 16777619);
-		}
-		hash ^= 124;
-		hash = Math.imul(hash, 16777619);
-	}
-	return (hash >>> 0).toString(16).padStart(8, "0");
-}
-function fingerprintBlock(kind, timestamp, toolCallId, text) {
-	return stableFingerprint([
-		kind,
-		String(timestamp),
-		toolCallId ?? "",
-		text
-	]);
-}
-//#endregion
-//#region adapters/pi-extension/src/projection.ts
-const TOOL_OUTPUT_TOMBSTONE = "[Tool output excluded by Context Editor. Original remains recoverable.]";
-/**
-* Return the fail-closed safety decision shared by both the TUI and the
-* desktop dialog flow. Tool results without a visible matching call are not
-* safe to replace because their pairing cannot be verified.
-*/
-function toolOutputProtection(atoms, atom, protectedRecentUserTurns = 2) {
-	if (atom.kind !== "tool_output") return {
-		eligible: false,
-		reason: "not-tool-output"
-	};
-	if (!atom.toolCallId) return {
-		eligible: false,
-		reason: "missing-tool-call-id"
-	};
-	if (atom.isError) return {
-		eligible: false,
-		reason: "error"
-	};
-	if (new Set(atoms.filter((candidate) => candidate.kind === "user").slice(-protectedRecentUserTurns).map((candidate) => candidate.turnId)).has(atom.turnId)) return {
-		eligible: false,
-		reason: "recent-turn"
-	};
-	if (!atoms.some((candidate) => candidate.kind === "tool_call" && candidate.toolCallId === atom.toolCallId)) return {
-		eligible: false,
-		reason: "missing-tool-call"
-	};
-	return { eligible: true };
-}
-function buildToolOutputActions(atoms, state, protectedRecentUserTurns = 2) {
-	return atoms.flatMap((atom) => {
-		if (atomState(state, atom).contextState !== "replace") return [];
-		if (!toolOutputProtection(atoms, atom, protectedRecentUserTurns).eligible) return [];
-		if (!atom.toolCallId) return [];
-		return [{
-			toolCallId: atom.toolCallId,
-			expectedFingerprint: atom.fingerprint,
-			action: "replace"
-		}];
-	});
-}
-function isToolResult(message) {
-	return message.role === "toolResult";
-}
-function textContent(text) {
-	return [{
-		type: "text",
-		text
-	}];
-}
-/**
-* Safe V0.3 primitive: replace only a matching tool result body and retain its
-* envelope, call id, error flag, and timestamp. It is intentionally not wired
-* into the context hook until the UI has an explicit Apply/Preview flow.
-*/
-function projectToolOutputs(messages, actions) {
-	const byId = new Map(actions.map((action) => [action.toolCallId, action]));
-	const appliedToolCallIds = [];
-	const skippedToolCallIds = [];
-	return {
-		messages: messages.map((message) => {
-			if (!isToolResult(message)) return message;
-			const action = byId.get(message.toolCallId);
-			if (!action || action.action !== "replace") return message;
-			const currentText = contentToSearchText(message.content);
-			if (currentText === "[Tool output excluded by Context Editor. Original remains recoverable.]") {
-				appliedToolCallIds.push(message.toolCallId);
-				return message;
-			}
-			if (fingerprintBlock("tool_output", message.timestamp, message.toolCallId, currentText) !== action.expectedFingerprint) {
-				skippedToolCallIds.push(message.toolCallId);
-				return message;
-			}
-			appliedToolCallIds.push(message.toolCallId);
-			return {
-				...message,
-				content: textContent(TOOL_OUTPUT_TOMBSTONE)
-			};
-		}),
-		appliedToolCallIds,
-		skippedToolCallIds
 	};
 }
 //#endregion
@@ -984,76 +872,149 @@ function matchesFilter(atom, filter) {
 function filterAtoms(atoms, filter) {
 	return atoms.filter((atom) => matchesFilter(atom, filter));
 }
-function kindLabel$1(kind) {
-	switch (kind) {
-		case "user": return "User";
-		case "assistant_text": return "Assistant";
-		case "reasoning": return "Reasoning";
-		case "tool_call": return "Tool Call";
-		case "tool_output": return "Tool Output";
-		case "summary": return "Summary";
-	}
+//#endregion
+//#region adapters/pi-extension/src/locale.ts
+/** Resolve the host language without depending on Pi's optional UI settings API. */
+function detectPiLocale(source = globalThis) {
+	const candidates = [
+		...source.navigator?.languages ?? [],
+		source.navigator?.language,
+		source.process?.env?.LC_ALL,
+		source.process?.env?.LC_MESSAGES,
+		source.process?.env?.LANG
+	].filter((value) => typeof value === "string" && value.length > 0);
+	for (const value of candidates) if (value.toLowerCase().startsWith("zh")) return "zh";
+	return "en";
+}
+function kindLabel(locale, kind) {
+	return {
+		en: {
+			user: "User",
+			assistant_text: "Assistant",
+			reasoning: "Reasoning",
+			tool_call: "Tool Call",
+			tool_output: "Tool Output",
+			summary: "Summary"
+		},
+		zh: {
+			user: "用户",
+			assistant_text: "助手",
+			reasoning: "思考",
+			tool_call: "工具调用",
+			tool_output: "工具输出",
+			summary: "摘要"
+		}
+	}[locale][kind];
+}
+function createPiText(locale) {
+	const zh = locale === "zh";
+	return {
+		locale,
+		back: zh ? "返回" : "Back",
+		close: zh ? "关闭" : "Close",
+		browse: zh ? "浏览对话记录" : "Browse conversation records",
+		search: zh ? "搜索对话记录" : "Search conversation records",
+		types: zh ? "筛选对话记录类型" : "Filter record types",
+		hidden: zh ? "已隐藏记录" : "Hidden records",
+		reset: zh ? "重置当前对话状态" : "Reset current conversation state",
+		showContent: zh ? "查看完整记录（只读）" : "View full record (read-only)",
+		older: zh ? "← 更早记录" : "← Older records",
+		newer: zh ? "更新记录 →" : "Newer records →",
+		done: zh ? "完成" : "Done",
+		atomKind: (kind) => kindLabel(locale, kind),
+		recordKind: (kind) => zh ? kind === "ai" ? "AI" : kind === "tool" ? "工具" : "用户" : kind === "ai" ? "AI" : kind === "tool" ? "Tool" : "User",
+		unitKind: (kind) => zh ? kind === "reasoning" ? "思考" : kind === "answer" ? "回答" : kind === "tool" ? "工具" : "用户" : kind === "reasoning" ? "Reasoning" : kind === "answer" ? "Answer" : kind === "tool" ? "Tool" : "User",
+		unitState: (state) => zh ? state === "partial" ? "部分" : state === "hidden" ? "已隐藏" : "显示" : state === "partial" ? "Partial" : state === "hidden" ? "Hidden" : "Shown",
+		viewState: (state) => zh ? state === "hide" ? "已隐藏" : state === "collapse" ? "已折叠" : "正常显示" : state === "hide" ? "Hidden" : state === "collapse" ? "Collapsed" : "Shown",
+		emptyContent: () => zh ? "（空内容）" : "(empty content)",
+		detail: (atom) => {
+			return (zh ? [
+				`类型：${kindLabel(locale, atom.kind)}`,
+				`来源：${atom.entryId}:${atom.blockIndex}`,
+				`所属对话轮次：${atom.turnId}`,
+				`预估 Token：${atom.approxTokens}`,
+				atom.toolCallId ? `工具调用编号：${atom.toolCallId}` : void 0,
+				atom.toolName ? `工具：${atom.toolName}` : void 0
+			] : [
+				`Type: ${kindLabel(locale, atom.kind)}`,
+				`Source: ${atom.entryId}:${atom.blockIndex}`,
+				`Turn: ${atom.turnId}`,
+				`Estimated tokens: ${atom.approxTokens}`,
+				atom.toolCallId ? `Tool call ID: ${atom.toolCallId}` : void 0,
+				atom.toolName ? `Tool: ${atom.toolName}` : void 0
+			]).filter(Boolean).join("\n");
+		},
+		truncatedDetail: (maxChars) => zh ? `[详情仅显示前 ${maxChars} 个字符；原始内容未修改]` : `[Only the first ${maxChars} characters are shown; original content is unchanged]`,
+		readOnlyTitle: (kind) => zh ? `查看 ${kindLabel(locale, kind)} 记录（只读）` : `View ${kindLabel(locale, kind)} record (read-only)`,
+		readOnlyChanged: () => zh ? "预览窗口中的修改不会保存，原始对话记录没有变化。" : "Edits in the preview are not saved; the original conversation record is unchanged.",
+		viewAction: (hidden) => hidden ? zh ? "恢复在记录管理器中显示" : "Restore in record manager" : zh ? "从记录管理器中隐藏（不会隐藏主聊天窗口）" : "Hide from record manager (the main chat is unchanged)",
+		messageLabel: () => zh ? "消息" : "Message",
+		page: (start, end, total) => zh ? `对话记录 ${start}-${end}/${total}` : `Conversation records ${start}-${end}/${total}`,
+		noMatches: () => zh ? "没有符合当前筛选条件的对话记录。" : "No conversation records match the current filters.",
+		typeFilterTitle: () => zh ? "筛选对话记录类型（可多选）" : "Filter record types (multi-select)",
+		resetEmpty: () => zh ? "当前对话没有需要重置的管理状态。" : "There is no managed state to reset for this conversation.",
+		resetTitle: () => zh ? "重置当前对话状态？" : "Reset current conversation state?",
+		resetMessage: (hidden) => zh ? `将恢复 ${hidden} 条已隐藏记录；原始对话记录不会删除，也不会改变模型上下文。` : `This will restore ${hidden} hidden records; the original conversation and model context will not be changed.`,
+		savedMessage: (hidden) => zh ? `已保存当前对话状态：隐藏 ${hidden} 条。隐藏和筛选只影响记录管理器，不会改变主聊天窗口或模型上下文；下次打开时会恢复这些设置。` : `Conversation state saved: ${hidden} hidden. Hiding and filtering only affect the record manager; the main chat and model context are unchanged, and these settings will be restored next time.`,
+		searchTitle: () => zh ? "搜索对话记录" : "Search conversation records",
+		searchPlaceholder: () => zh ? "输入关键词；留空清除" : "Enter a keyword; leave blank to clear",
+		hiddenSummary: (hidden, shown) => zh ? `已隐藏记录（${shown ? "当前显示" : "当前不显示"}）` : `Hidden records (${shown ? "shown" : "hidden"})`,
+		resetSummary: (hidden) => zh ? `重置当前对话状态（已隐藏 ${hidden}）` : `Reset current conversation state (${hidden} hidden)`,
+		browseSummary: (matches, total) => zh ? `浏览对话记录（${matches}/${total}）` : `Browse conversation records (${matches}/${total})`,
+		searchSummary: (query) => query ? `${zh ? "搜索对话记录" : "Search conversation records"}${zh ? "：" : ": "}${query}` : zh ? "搜索对话记录" : "Search conversation records",
+		typeSummary: (count, total) => `${zh ? "筛选对话记录类型" : "Filter record types"} (${count}/${total})`,
+		unitTitle: (unitKind, recordKind, state, tokens) => `${unitKind} · ${recordKind} · ${state} · ${tokens} tok`,
+		hiddenUnit: (unitKind) => zh ? `    ${unitKind} 已隐藏 · 按 v 显示` : `    ${unitKind} hidden · press v to reveal`,
+		tuiTitle: (units) => `${zh ? "Pi Context Editor" : "Pi Context Editor"}  ${units} ${zh ? "单元" : "units"}`,
+		unitCount: (units) => `${units} ${zh ? "单元" : "units"}`,
+		tuiSearch: (query, count, index) => zh ? `搜索：${query}▌  ${count} 单元` : `Search: ${query}▌  ${count} units`,
+		tuiSearchIdle: (query, count, index) => `${zh ? "搜索" : "Search"}: ${query || (zh ? "（按 /）" : "(press /)")}${count > 0 ? ` · ${index + 1}/${count}` : ""}`,
+		tuiStatus: () => zh ? "j/k 移动 · shift+↑/↓ 区间选择 · 空格选择 · enter 展开 · h 隐藏 · r 恢复 · u 撤销 · v 显示 · q 关闭" : "j/k move · shift+↑/↓ range · space select · enter expand · h hide · r restore · u undo · v reveal · q close",
+		savePrefsFailed: (error) => zh ? `Context Editor 偏好保存失败：${error}` : `Context Editor preferences could not be saved: ${error}`,
+		sessionChanged: () => zh ? "Session 或分支已变化，已清空临时选择。" : "The Session or branch changed; temporary selection was cleared.",
+		sidecarChanged: () => zh ? "会话或 sidecar 已变化，已刷新 Context Editor。" : "The conversation or sidecar changed; Context Editor was refreshed.",
+		operationFailed: (error) => zh ? `Context Editor 操作失败：${error}` : `Context Editor operation failed: ${error}`,
+		busy: () => zh ? "Agent 运行中，暂时不能修改隐藏状态。" : "The Agent is running; hidden state cannot be changed yet.",
+		undoConflict: () => zh ? "撤销时发现 revision 冲突，已刷新。" : "A revision conflict occurred while undoing; the view was refreshed.",
+		undoFailed: (error) => zh ? `撤销失败：${error}` : `Undo failed: ${error}`,
+		restoreAllConfirmTitle: () => zh ? "恢复全部隐藏单元？" : "Restore all hidden units?",
+		restoreAllConfirmMessage: () => zh ? "这只会恢复 Context Editor 的视觉状态，不会修改 Session 或模型上下文。" : "This only restores the Context Editor view state; the Session and model context are unchanged."
+	};
 }
 //#endregion
 //#region adapters/pi-extension/src/desktop-ui.ts
 const PAGE_SIZE = 50;
 const MAX_EDITOR_CHARS = 1e5;
-const BACK = "返回";
-const CLOSE = "关闭";
-const BROWSE = "浏览对话记录";
-const SEARCH = "搜索对话记录";
-const TYPES = "筛选对话记录类型";
-const HIDDEN = "已隐藏记录";
-const RESET = "重置当前对话状态";
-const SHOW_CONTENT = "查看完整记录（只读）";
-const OLDER = "← 更早记录";
-const NEWER = "更新记录 →";
-function compactPreview(text, maxChars = 96) {
-	const compact = text.replace(/\s+/g, " ").trim();
-	if (!compact) return "（空内容）";
+function compactPreview(text, value, maxChars = 96) {
+	const compact = value.replace(/\s+/g, " ").trim();
+	if (!compact) return text.emptyContent();
 	return compact.length > maxChars ? `${compact.slice(0, maxChars - 1)}…` : compact;
 }
-function viewLabel(viewState) {
-	return viewState === "hide" ? "已隐藏" : viewState === "collapse" ? "已折叠" : "正常显示";
+function viewLabel(text, viewState) {
+	return text.viewState(viewState);
 }
-function contextLabel(contextState) {
-	if (contextState === "replace") return "后续上下文已精简";
-	if (contextState === "summarize") return "后续上下文已摘要";
-	if (contextState === "exclude") return "已从后续上下文排除";
-	return "后续上下文完整保留";
-}
-function atomOption(atom, index, state) {
+function atomOption(text, atom, index, state) {
 	const current = atomState(state, atom);
 	const meta = [
-		kindLabel$1(atom.kind),
+		text.atomKind(atom.kind),
 		atom.toolName,
-		viewLabel(current.viewState),
-		contextLabel(current.contextState),
+		viewLabel(text, current.viewState),
 		`${atom.approxTokens} tok`
 	].filter(Boolean).join(" · ");
-	return `#${String(index + 1).padStart(4, "0")} · ${meta} · ${compactPreview(atom.text)}`;
+	return `#${String(index + 1).padStart(4, "0")} · ${meta} · ${compactPreview(text, atom.text)}`;
 }
-function detailText(atom) {
-	const metadata = [
-		`类型：${kindLabel$1(atom.kind)}`,
-		`来源：${atom.sourceRef.entryId}:${atom.sourceRef.blockIndex}`,
-		`所属对话轮次：${atom.turnId}`,
-		`预估 Token：${atom.approxTokens}`,
-		atom.toolCallId ? `工具调用编号：${atom.toolCallId}` : void 0,
-		atom.toolName ? `工具：${atom.toolName}` : void 0
-	].filter(Boolean).join("\n");
-	const body = atom.text || "（空内容）";
-	return `${metadata}\n\n${body.length > MAX_EDITOR_CHARS ? `${body.slice(0, MAX_EDITOR_CHARS)}\n\n[详情仅显示前 ${MAX_EDITOR_CHARS} 个字符；原始内容未修改]` : body}`;
-}
-function reasonLabel(reason) {
-	switch (reason) {
-		case "missing-tool-call-id": return "缺少 toolCallId";
-		case "missing-tool-call": return "找不到配对 Tool Call";
-		case "recent-turn": return "最近两个 User Turn 受保护";
-		case "error": return "Error 结果受保护";
-		case "not-tool-output": return "仅 Tool Output 支持此操作";
-		default: return "当前消息受安全策略保护";
-	}
+function detailText(text, atom) {
+	const metadata = text.detail({
+		kind: atom.kind,
+		entryId: atom.sourceRef.entryId,
+		blockIndex: atom.sourceRef.blockIndex,
+		turnId: atom.turnId,
+		approxTokens: atom.approxTokens,
+		toolCallId: atom.toolCallId,
+		toolName: atom.toolName
+	});
+	const body = atom.text || text.emptyContent();
+	return `${metadata}\n\n${body.length > MAX_EDITOR_CHARS ? `${body.slice(0, MAX_EDITOR_CHARS)}\n\n${text.truncatedDetail(MAX_EDITOR_CHARS)}` : body}`;
 }
 function visibleAtoms(atoms, state, filter) {
 	return filterAtoms(atoms, {
@@ -1063,39 +1024,28 @@ function visibleAtoms(atoms, state, filter) {
 }
 function stateSummary(atoms, state) {
 	let hidden = 0;
-	let replaced = 0;
-	for (const atom of atoms) {
-		const current = atomState(state, atom);
-		if (current.viewState === "hide") hidden += 1;
-		if (current.contextState === "replace") replaced += 1;
-	}
-	return {
-		hidden,
-		replaced
-	};
+	for (const atom of atoms) if (atomState(state, atom).viewState === "hide") hidden += 1;
+	return { hidden };
 }
-function replacementTokenEstimate() {
-	return Math.max(1, Math.ceil(71 / 4));
+async function viewAtom(text, ui, atom) {
+	const prefill = detailText(text, atom);
+	const edited = await ui.editor(text.readOnlyTitle(atom.kind), prefill);
+	if (edited !== void 0 && edited !== prefill) ui.notify(text.readOnlyChanged(), "info");
 }
-async function viewAtom(ui, atom) {
-	const prefill = detailText(atom);
-	const edited = await ui.editor(`查看 ${kindLabel$1(atom.kind)} 记录（只读）`, prefill);
-	if (edited !== void 0 && edited !== prefill) ui.notify("预览窗口中的修改不会保存，原始对话记录没有变化。", "info");
-}
-async function editAtom(deps, atoms, state, atom) {
+async function editAtom(text, deps, state, atom) {
 	let currentState = state;
 	while (true) {
 		const current = atomState(currentState, atom);
-		const viewAction = current.viewState === "hide" ? "恢复在记录管理器中显示" : "从记录管理器中隐藏（不会隐藏主聊天窗口）";
-		const protection = toolOutputProtection(atoms, atom);
-		const contextAction = atom.kind === "tool_output" ? current.contextState === "keep" ? protection.eligible ? "精简这条工具输出（影响后续上下文）" : `暂不可精简：${reasonLabel(protection.reason)}` : "恢复完整工具输出" : void 0;
-		const options = [SHOW_CONTENT, viewAction];
-		if (contextAction) options.push(contextAction);
-		options.push(BACK);
-		const selected = await deps.ui.select(`${kindLabel$1(atom.kind)} · ${atom.toolName ?? "消息"}`, options);
-		if (selected === void 0 || selected === BACK) return currentState;
-		if (selected === SHOW_CONTENT) {
-			await viewAtom(deps.ui, atom);
+		const viewAction = text.viewAction(current.viewState === "hide");
+		const options = [
+			text.showContent,
+			viewAction,
+			text.back
+		];
+		const selected = await deps.ui.select(`${text.atomKind(atom.kind)} · ${atom.toolName ?? text.messageLabel()}`, options);
+		if (selected === void 0 || selected === text.back) return currentState;
+		if (selected === text.showContent) {
+			await viewAtom(text, deps.ui, atom);
 			continue;
 		}
 		if (selected === viewAction) {
@@ -1103,42 +1053,14 @@ async function editAtom(deps, atoms, state, atom) {
 			deps.persistState(currentState);
 			continue;
 		}
-		if (!contextAction || selected !== contextAction) continue;
-		if (current.contextState !== "keep") {
-			if (await deps.ui.confirm("恢复完整工具输出？", "后续模型调用将重新使用完整的工具输出；原始对话记录始终保留。")) {
-				currentState = stateWithAtom(currentState, atom, { contextState: "keep" }, deps.sourceLeafId);
-				deps.persistState(currentState);
-			}
-			continue;
-		}
-		if (!protection.eligible) {
-			deps.ui.notify(`该工具输出暂不可精简：${reasonLabel(protection.reason)}。`, "warning");
-			continue;
-		}
-		if (deps.validateAtom && !await deps.validateAtom(atom)) {
-			deps.ui.notify("消息内容或身份已变化，已跳过操作以保护原始上下文。", "warning");
-			continue;
-		}
-		const replacementTokens = replacementTokenEstimate();
-		const estimatedSavings = Math.max(0, atom.approxTokens - replacementTokens);
-		if (await deps.ui.confirm("精简这条工具输出？", [
-			`工具：${atom.toolName ?? "unknown"}`,
-			"影响记录：1",
-			`Token 估算：${atom.approxTokens} → ${replacementTokens}`,
-			`预计减少：${estimatedSavings} tokens`,
-			"仅影响后续模型调用；原始对话记录不会修改。"
-		].join("\n"))) {
-			currentState = stateWithAtom(currentState, atom, { contextState: "replace" }, deps.sourceLeafId);
-			deps.persistState(currentState);
-		}
 	}
 }
-async function browseAtoms(deps, atoms, state, filter) {
+async function browseAtoms(text, deps, atoms, state, filter) {
 	let currentState = state;
 	while (true) {
 		const matches = visibleAtoms(atoms, currentState, filter);
 		if (matches.length === 0) {
-			deps.ui.notify("没有符合当前筛选条件的对话记录。", "info");
+			deps.ui.notify(text.noMatches(), "info");
 			return currentState;
 		}
 		const pageCount = Math.max(1, Math.ceil(matches.length / PAGE_SIZE));
@@ -1146,49 +1068,49 @@ async function browseAtoms(deps, atoms, state, filter) {
 		while (true) {
 			const start = page * PAGE_SIZE;
 			const pageAtoms = matches.slice(start, start + PAGE_SIZE);
-			const atomOptions = pageAtoms.map((atom, index) => atomOption(atom, start + index, currentState));
-			const optionToAtom = new Map(pageAtoms.map((atom, index) => [atomOption(atom, start + index, currentState), atom]));
+			const atomOptions = pageAtoms.map((atom, index) => atomOption(text, atom, start + index, currentState));
+			const optionToAtom = new Map(pageAtoms.map((atom, index) => [atomOption(text, atom, start + index, currentState), atom]));
 			const options = [...atomOptions];
-			if (page > 0) options.push(OLDER);
-			if (page < pageCount - 1) options.push(NEWER);
-			options.push(BACK);
-			const selected = await deps.ui.select(`对话记录 ${start + 1}-${start + pageAtoms.length}/${matches.length}`, options);
-			if (selected === void 0 || selected === BACK) return currentState;
-			if (selected === OLDER) {
+			if (page > 0) options.push(text.older);
+			if (page < pageCount - 1) options.push(text.newer);
+			options.push(text.back);
+			const selected = await deps.ui.select(text.page(start + 1, start + pageAtoms.length, matches.length), options);
+			if (selected === void 0 || selected === text.back) return currentState;
+			if (selected === text.older) {
 				page = Math.max(0, page - 1);
 				continue;
 			}
-			if (selected === NEWER) {
+			if (selected === text.newer) {
 				page = Math.min(pageCount - 1, page + 1);
 				continue;
 			}
 			const atom = optionToAtom.get(selected);
 			if (!atom) continue;
-			currentState = await editAtom(deps, atoms, currentState, atom);
+			currentState = await editAtom(text, deps, currentState, atom);
 			break;
 		}
 	}
 }
-async function editTypeFilter(ui, filter) {
+async function editTypeFilter(text, ui, filter) {
 	while (true) {
-		const options = ATOM_KINDS.map((kind) => `${filter.enabledKinds.has(kind) ? "✓" : "○"} ${kindLabel$1(kind)}`);
-		const optionToKind = new Map(ATOM_KINDS.map((kind) => [`${filter.enabledKinds.has(kind) ? "✓" : "○"} ${kindLabel$1(kind)}`, kind]));
-		options.push("完成");
-		const selected = await ui.select("筛选对话记录类型（可多选）", options);
-		if (selected === void 0 || selected === "完成") return;
+		const options = ATOM_KINDS.map((kind) => `${filter.enabledKinds.has(kind) ? "✓" : "○"} ${text.atomKind(kind)}`);
+		const optionToKind = new Map(ATOM_KINDS.map((kind) => [`${filter.enabledKinds.has(kind) ? "✓" : "○"} ${text.atomKind(kind)}`, kind]));
+		options.push(text.done);
+		const selected = await ui.select(text.typeFilterTitle(), options);
+		if (selected === void 0 || selected === text.done) return;
 		const kind = optionToKind.get(selected);
 		if (!kind) continue;
 		if (filter.enabledKinds.has(kind)) filter.enabledKinds.delete(kind);
 		else filter.enabledKinds.add(kind);
 	}
 }
-async function resetState(deps, atoms, state) {
+async function resetState(text, deps, atoms, state) {
 	const summary = stateSummary(atoms, state);
-	if (summary.hidden === 0 && summary.replaced === 0) {
-		deps.ui.notify("当前对话没有需要重置的管理状态。", "info");
+	if (summary.hidden === 0) {
+		deps.ui.notify(text.resetEmpty(), "info");
 		return state;
 	}
-	if (!await deps.ui.confirm("重置当前对话状态？", `将恢复 ${summary.hidden} 条已隐藏记录，并撤销 ${summary.replaced} 条工具输出的后续上下文精简；原始对话记录不会删除。`)) return state;
+	if (!await deps.ui.confirm(text.resetTitle(), text.resetMessage(summary.hidden))) return state;
 	const nextState = {
 		...stateForAtoms(void 0, atoms, deps.sourceLeafId),
 		updatedAt: (/* @__PURE__ */ new Date()).toISOString()
@@ -1210,6 +1132,7 @@ function persistFilterState(deps, state, filter) {
 }
 /** Run the Pi Desktop-compatible, dialog-only Context Editor. */
 async function runDesktopContextEditor(deps) {
+	const text = createPiText(deps.locale ?? detectPiLocale());
 	let state = stateForAtoms(deps.initialState, deps.atoms, deps.sourceLeafId);
 	let changed = false;
 	const flowDeps = {
@@ -1228,45 +1151,45 @@ async function runDesktopContextEditor(deps) {
 	while (true) {
 		const matches = visibleAtoms(deps.atoms, state, filter);
 		const summary = stateSummary(deps.atoms, state);
-		const searchLabel = filter.query ? `：${compactPreview(filter.query, 24)}` : "";
-		const typeCount = `${filter.enabledKinds.size}/${ATOM_KINDS.length}`;
+		const searchLabel = filter.query ? `${text.locale === "zh" ? "：" : ": "}${compactPreview(text, filter.query, 24)}` : "";
+		`${filter.enabledKinds.size}${ATOM_KINDS.length}`;
 		const selected = await deps.ui.select("Pi Context Editor", [
-			`${BROWSE}（${matches.length}/${deps.atoms.length}）`,
-			`${SEARCH}${searchLabel}`,
-			`${TYPES}（${typeCount}）`,
-			`${HIDDEN}（${filter.showHidden ? "当前显示" : "当前不显示"}）`,
-			`${RESET}（已隐藏 ${summary.hidden} · 已精简 ${summary.replaced}）`,
-			CLOSE
+			text.browseSummary(matches.length, deps.atoms.length),
+			`${text.search}${searchLabel}`,
+			text.typeSummary(filter.enabledKinds.size, ATOM_KINDS.length),
+			text.hiddenSummary(summary.hidden, filter.showHidden),
+			text.resetSummary(summary.hidden),
+			text.close
 		]);
-		if (selected === void 0 || selected === CLOSE) {
-			if (changed) deps.ui.notify(`已保存当前对话状态：隐藏 ${summary.hidden} 条，精简工具输出 ${summary.replaced} 条。隐藏和筛选只影响对话记录管理器，不会改变主聊天窗口；下次打开时会恢复这些设置。`, "info");
+		if (selected === void 0 || selected === text.close) {
+			if (changed) deps.ui.notify(text.savedMessage(summary.hidden), "info");
 			return;
 		}
-		if (selected.startsWith(BROWSE)) {
-			state = await browseAtoms(flowDeps, deps.atoms, state, filter);
+		if (selected.startsWith(text.browse)) {
+			state = await browseAtoms(text, flowDeps, deps.atoms, state, filter);
 			continue;
 		}
-		if (selected.startsWith(SEARCH)) {
-			const query = await flowDeps.ui.input("搜索对话记录", filter.query || "输入关键词；留空清除");
+		if (selected.startsWith(text.search)) {
+			const query = await flowDeps.ui.input(text.searchTitle(), filter.query || text.searchPlaceholder());
 			if (query !== void 0) {
 				filter.query = query.trim();
 				state = persistFilterState(flowDeps, state, filter);
 			}
 			continue;
 		}
-		if (selected.startsWith(TYPES)) {
-			await editTypeFilter(flowDeps.ui, filter);
+		if (selected.startsWith(text.types)) {
+			await editTypeFilter(text, flowDeps.ui, filter);
 			state = persistFilterState(flowDeps, state, filter);
 			continue;
 		}
-		if (selected.startsWith(HIDDEN)) {
+		if (selected.startsWith(text.hidden)) {
 			filter.showHidden = !filter.showHidden;
 			state = persistFilterState(flowDeps, state, filter);
 			continue;
 		}
-		if (selected.startsWith(RESET)) {
+		if (selected.startsWith(text.reset)) {
 			const previousState = state;
-			state = await resetState(flowDeps, deps.atoms, state);
+			state = await resetState(text, flowDeps, deps.atoms, state);
 			if (state !== previousState) {
 				filter.enabledKinds = new Set(DEFAULT_ENABLED_KINDS);
 				filter.query = "";
@@ -1283,27 +1206,11 @@ const RECORD_KINDS = [
 	"ai",
 	"tool"
 ];
-function kindLabel(kind) {
-	return kind === "ai" ? "AI" : kind === "tool" ? "Tool" : "User";
-}
-function unitLabel(unit) {
-	return unit.kind === "reasoning" ? "Reasoning" : unit.kind === "answer" ? "Answer" : unit.kind === "tool" ? "Tool" : "User";
-}
 function colorForKind(kind) {
 	return kind === "user" ? "accent" : kind === "ai" ? "text" : "toolOutput";
 }
 function visiblePad(text, width) {
 	return truncateToWidth(text, Math.max(1, width), "…", true);
-}
-function bodyLines(text, width, maxLines = 8) {
-	const available = Math.max(8, width - 8);
-	const source = text.split(/\r?\n/);
-	const output = source.slice(0, maxLines).map((line) => truncateToWidth(line || " ", available));
-	if (source.length > maxLines) {
-		const last = output.length - 1;
-		if (last >= 0) output[last] = truncateToWidth(`${output[last]} …`, available);
-	}
-	return output.length > 0 ? output : [" "];
 }
 var ContextEditorComponent = class {
 	tui;
@@ -1314,7 +1221,9 @@ var ContextEditorComponent = class {
 	undoMutation;
 	persistPrefs;
 	notify;
+	confirm;
 	done;
+	text;
 	records;
 	prefs;
 	query = "";
@@ -1322,12 +1231,14 @@ var ContextEditorComponent = class {
 	canUndo;
 	selectedIndex = 0;
 	scrollOffset = 0;
+	manualScroll = false;
 	selected = /* @__PURE__ */ new Set();
 	rangeAnchor = null;
 	expanded = /* @__PURE__ */ new Set();
 	searchMode = false;
 	matches = [];
 	matchIndex = -1;
+	bodyCache = /* @__PURE__ */ new Map();
 	constructor(tui, theme, records, snapshot, prefs, deps, done) {
 		this.tui = tui;
 		this.theme = theme;
@@ -1344,7 +1255,9 @@ var ContextEditorComponent = class {
 		this.undoMutation = deps.undo;
 		this.persistPrefs = deps.persistPrefs;
 		this.notify = deps.notify;
+		this.confirm = deps.confirm ?? (async () => true);
 		this.done = done;
+		this.text = createPiText(deps.locale ?? detectPiLocale());
 	}
 	flatUnits() {
 		const enabled = new Set(this.prefs.enabledKinds);
@@ -1365,19 +1278,45 @@ var ContextEditorComponent = class {
 	contentText(unit) {
 		return unit.atoms.map((atom) => atom.text).filter(Boolean).join("\n");
 	}
-	unitRows(width) {
-		return this.flatUnits().map((item, index) => {
+	unitIsHidden(unit) {
+		return unit.viewState === "hide" || unit.viewState === "mixed";
+	}
+	bodyLinesFor(unit, width) {
+		const text = this.contentText(unit);
+		const available = Math.max(8, width - 8);
+		const cached = this.bodyCache.get(unit.id);
+		if (cached && cached.width === available && cached.text === text) return cached.lines;
+		const lines = wrapTextWithAnsi(text || " ", available);
+		const normalized = lines.length > 0 ? lines : [" "];
+		this.bodyCache.set(unit.id, {
+			width: available,
+			text,
+			lines: normalized
+		});
+		return normalized;
+	}
+	unitLineCount(item, width) {
+		const { unit } = item;
+		if (this.unitIsHidden(unit) && !this.prefs.showHidden) return 2;
+		if (!this.expanded.has(unit.id) && !this.prefs.showHidden) return 1;
+		if (!this.expanded.has(unit.id) && this.unitIsHidden(unit)) return 1 + this.bodyLinesFor(unit, width).length;
+		if (!this.expanded.has(unit.id)) return 1;
+		return 1 + this.bodyLinesFor(unit, width).length;
+	}
+	unitRows(width, start = 0, end = this.flatUnits().length) {
+		return this.flatUnits().slice(start, end).map((item, offset) => {
+			const index = start + offset;
 			const { record, unit } = item;
 			const selected = this.selected.has(unit.id);
 			const cursor = index === this.selectedIndex ? "▶" : " ";
 			const checkbox = selected ? "[x]" : "[ ]";
-			const hidden = unit.viewState === "hide" || unit.viewState === "mixed";
+			const hidden = this.unitIsHidden(unit);
 			const state = hidden ? unit.viewState === "mixed" ? "partial" : "hidden" : "shown";
-			const title = `${cursor} ${checkbox} ${unitLabel(unit)} · ${kindLabel(record.kind)} · ${state} · ${unit.atoms.reduce((sum, atom) => sum + atom.approxTokens, 0)} tok`;
+			const title = `${cursor} ${checkbox} ${this.text.unitKind(unit.kind)} · ${this.text.recordKind(record.kind)} · ${this.text.unitState(state)} · ${unit.atoms.reduce((sum, atom) => sum + atom.approxTokens, 0)} tok`;
 			const titleLine = this.theme.fg(colorForKind(record.kind), title);
 			const lines = [index === this.selectedIndex ? this.theme.bg("selectedBg", visiblePad(titleLine, width)) : visiblePad(titleLine, width)];
-			if (hidden && !this.prefs.showHidden) lines.push(visiblePad(this.theme.fg("dim", `    ${unitLabel(unit)} hidden · press v to reveal`), width));
-			else if (this.expanded.has(unit.id)) for (const line of bodyLines(this.contentText(unit), width)) lines.push(visiblePad(this.theme.fg("dim", `    │ ${line}`), width));
+			if (hidden && !this.prefs.showHidden) lines.push(visiblePad(this.theme.fg("dim", this.text.hiddenUnit(this.text.unitKind(unit.kind))), width));
+			else if (this.expanded.has(unit.id) || hidden && this.prefs.showHidden) for (const line of this.bodyLinesFor(unit, width)) lines.push(visiblePad(this.theme.fg("dim", `    │ ${line}`), width));
 			return {
 				item,
 				lines
@@ -1387,21 +1326,67 @@ var ContextEditorComponent = class {
 	availableRows() {
 		return Math.max(5, this.tui.terminal.rows - 7);
 	}
-	ensureSelectionVisible(width = this.tui.terminal.columns) {
-		const rows = this.unitRows(width);
-		let selectedLine = 0;
-		for (const row of rows) {
-			if (row.item.unit.id === this.currentUnit()?.unit.id) break;
-			selectedLine += row.lines.length;
+	totalLineCount(width) {
+		return this.flatUnits().reduce((sum, item) => sum + this.unitLineCount(item, width), 0);
+	}
+	clampScroll(width = this.tui.terminal.columns) {
+		const viewport = this.availableRows();
+		const maxOffset = Math.max(0, this.totalLineCount(width) - viewport);
+		this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxOffset));
+		return maxOffset;
+	}
+	scrollByRows(delta) {
+		const width = Math.max(24, this.tui.terminal.columns);
+		const maxOffset = this.clampScroll(width);
+		const next = Math.max(0, Math.min(maxOffset, this.scrollOffset + delta));
+		if (next === this.scrollOffset && maxOffset === 0) {
+			this.moveSelection(delta >= 0 ? this.availableRows() : -this.availableRows(), false);
+			return;
 		}
+		this.scrollOffset = next;
+		this.manualScroll = true;
+		this.tui.requestRender();
+	}
+	ensureSelectionVisible(width = this.tui.terminal.columns) {
+		const selectedLine = this.flatUnits().slice(0, this.selectedIndex).reduce((sum, item) => sum + this.unitLineCount(item, width), 0);
 		const viewport = this.availableRows();
 		if (selectedLine < this.scrollOffset) this.scrollOffset = selectedLine;
 		if (selectedLine >= this.scrollOffset + viewport) this.scrollOffset = selectedLine - viewport + 1;
 		this.scrollOffset = Math.max(0, this.scrollOffset);
 	}
+	/** Build only rows intersecting the terminal viewport. Long bodies outside
+	* the viewport are never converted into strings during this frame. */
+	renderWindow(width, start, end) {
+		const units = this.flatUnits();
+		const output = [];
+		let lineOffset = 0;
+		for (let index = 0; index < units.length; index += 1) {
+			const item = units[index];
+			if (!item) continue;
+			const count = this.unitLineCount(item, width);
+			if (lineOffset + count > start && lineOffset < end) {
+				const row = this.unitRows(width, index, index + 1)[0];
+				if (row) {
+					const from = Math.max(0, start - lineOffset);
+					const to = Math.min(row.lines.length, end - lineOffset);
+					output.push(...row.lines.slice(from, to));
+				}
+			}
+			lineOffset += count;
+			if (lineOffset >= end) break;
+		}
+		return output;
+	}
 	resetSelection() {
 		this.selected.clear();
 		this.rangeAnchor = null;
+	}
+	savePrefs() {
+		try {
+			this.persistPrefs(this.prefs);
+		} catch (error) {
+			this.notify(this.text.savePrefsFailed(error instanceof Error ? error.message : String(error)), "warning");
+		}
 	}
 	refreshData() {
 		const snapshot = this.loadSnapshot();
@@ -1409,11 +1394,26 @@ var ContextEditorComponent = class {
 		this.revision = snapshot.revision;
 		this.canUndo = snapshot.canUndo;
 		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.flatUnits().length - 1));
+		this.manualScroll = false;
 		this.resetSelection();
 		this.matches = [];
 		this.matchIndex = -1;
 		this.ensureSelectionVisible();
 		this.tui.requestRender();
+	}
+	syncExternalState() {
+		const snapshot = this.loadSnapshot();
+		if (snapshot.revision === this.revision) return;
+		this.records = this.loadRecords();
+		this.revision = snapshot.revision;
+		this.canUndo = snapshot.canUndo;
+		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.flatUnits().length - 1));
+		this.scrollOffset = 0;
+		this.manualScroll = false;
+		this.resetSelection();
+		this.matches = [];
+		this.matchIndex = -1;
+		this.notify(this.text.sessionChanged(), "info");
 	}
 	applyMutation(action) {
 		const unitIds = action === "reset" ? void 0 : this.selectedUnitIds().length > 0 ? this.selectedUnitIds() : [this.currentUnit()?.unit.id].filter((id) => !!id);
@@ -1424,14 +1424,14 @@ var ContextEditorComponent = class {
 				...unitIds ? { unitIds } : {}
 			});
 			if (!result.ok || result.conflict) {
-				this.notify("会话或 sidecar 已变化，已刷新 Context Editor。", "warning");
+				this.notify(this.text.sidecarChanged(), "warning");
 				this.refreshData();
 				return;
 			}
 			this.refreshData();
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			this.notify(message === "AGENT_RUNTIME_BUSY" ? "Agent 运行中，暂时不能修改隐藏状态。" : `Context Editor 操作失败：${message}`, "warning");
+			this.notify(message === "AGENT_RUNTIME_BUSY" ? this.text.busy() : this.text.operationFailed(message), "warning");
 		}
 	}
 	moveSelection(delta, extend) {
@@ -1444,12 +1444,14 @@ var ContextEditorComponent = class {
 			const hi = Math.max(this.rangeAnchor, this.selectedIndex);
 			this.selected = new Set(this.flatUnits().slice(lo, hi + 1).map(({ unit }) => unit.id));
 		} else if (!extend) this.resetSelection();
+		this.manualScroll = false;
 		this.ensureSelectionVisible();
 		this.tui.requestRender();
 	}
 	refreshSearch() {
 		this.matches = searchRecords(this.records, this.query, new Set(this.prefs.enabledKinds));
 		this.matchIndex = this.matches.length > 0 ? 0 : -1;
+		this.resetSelection();
 		this.focusMatch();
 	}
 	focusMatch() {
@@ -1476,14 +1478,18 @@ var ContextEditorComponent = class {
 			...this.prefs,
 			enabledKinds: RECORD_KINDS.filter((candidate) => enabled.has(candidate))
 		};
-		this.persistPrefs(this.prefs);
+		this.savePrefs();
 		this.selectedIndex = 0;
 		this.scrollOffset = 0;
+		this.manualScroll = false;
 		this.resetSelection();
 		this.refreshSearch();
 	}
 	toggleAll() {
-		const units = this.flatUnits();
+		const allUnits = this.flatUnits();
+		const matchingIds = new Set(this.matches.map((match) => match.unitId));
+		const units = this.query.trim() ? allUnits.filter(({ unit }) => matchingIds.has(unit.id)) : allUnits;
+		if (units.length === 0) return;
 		if (units.length > 0 && units.every(({ unit }) => this.selected.has(unit.id))) this.resetSelection();
 		else this.selected = new Set(units.map(({ unit }) => unit.id));
 		this.tui.requestRender();
@@ -1510,7 +1516,11 @@ var ContextEditorComponent = class {
 			this.refreshSearch();
 		}
 	}
+	async resetAllWithConfirmation() {
+		if (await this.confirm(this.text.restoreAllConfirmTitle())) this.applyMutation("reset");
+	}
 	handleInput(data) {
+		this.syncExternalState();
 		if (this.searchMode) {
 			this.handleSearchInput(data);
 			return;
@@ -1545,21 +1555,23 @@ var ContextEditorComponent = class {
 			return;
 		}
 		if (matchesKey(data, "pageDown")) {
-			this.moveSelection(this.availableRows(), false);
+			this.scrollByRows(this.availableRows());
 			return;
 		}
 		if (matchesKey(data, "pageUp")) {
-			this.moveSelection(-this.availableRows(), false);
+			this.scrollByRows(-this.availableRows());
 			return;
 		}
 		if (data === "g") {
 			this.selectedIndex = 0;
+			this.manualScroll = false;
 			this.ensureSelectionVisible();
 			this.tui.requestRender();
 			return;
 		}
 		if (data === "G") {
 			this.selectedIndex = Math.max(0, this.flatUnits().length - 1);
+			this.manualScroll = false;
 			this.ensureSelectionVisible();
 			this.tui.requestRender();
 			return;
@@ -1585,7 +1597,7 @@ var ContextEditorComponent = class {
 				...this.prefs,
 				showHidden: !this.prefs.showHidden
 			};
-			this.persistPrefs(this.prefs);
+			this.savePrefs();
 			this.tui.requestRender();
 			return;
 		}
@@ -1611,6 +1623,7 @@ var ContextEditorComponent = class {
 			if (!unit) return;
 			if (this.expanded.has(unit.id)) this.expanded.delete(unit.id);
 			else this.expanded.add(unit.id);
+			this.manualScroll = false;
 			this.ensureSelectionVisible();
 			this.tui.requestRender();
 			return;
@@ -1624,33 +1637,34 @@ var ContextEditorComponent = class {
 			return;
 		}
 		if (data === "R") {
-			this.applyMutation("reset");
+			this.resetAllWithConfirmation();
 			return;
 		}
 		if (data === "u") {
 			if (!this.canUndo) return;
 			try {
 				const result = this.undoMutation(this.revision);
-				if (!result.ok || result.conflict) this.notify("撤销时发现 revision 冲突，已刷新。", "warning");
+				if (!result.ok || result.conflict) this.notify(this.text.undoConflict(), "warning");
 				this.refreshData();
 			} catch (error) {
-				this.notify(`撤销失败：${error instanceof Error ? error.message : String(error)}`, "warning");
+				this.notify(this.text.undoFailed(error instanceof Error ? error.message : String(error)), "warning");
 			}
 		}
 	}
 	render(width) {
 		const safeWidth = Math.max(24, width);
-		const content = this.unitRows(safeWidth).flatMap((row) => row.lines);
+		if (!this.manualScroll) this.ensureSelectionVisible(safeWidth);
+		const totalLines = this.totalLineCount(safeWidth);
 		const viewport = this.availableRows();
-		const maxOffset = Math.max(0, content.length - viewport);
+		const maxOffset = Math.max(0, totalLines - viewport);
 		this.scrollOffset = Math.min(this.scrollOffset, maxOffset);
-		const visible = content.slice(this.scrollOffset, this.scrollOffset + viewport);
+		const visible = this.renderWindow(safeWidth, this.scrollOffset, this.scrollOffset + viewport);
 		while (visible.length < viewport) visible.push("");
-		const enabled = (kind) => this.prefs.enabledKinds.includes(kind) ? this.theme.fg("accent", kindLabel(kind)) : this.theme.fg("dim", kindLabel(kind));
-		const title = this.theme.fg("accent", "Pi Context Editor") + this.theme.fg("dim", `  ${this.flatUnits().length} units`);
-		const mode = this.searchMode ? this.theme.fg("warning", `Search: ${this.query}▌  ${this.matches.length} units`) : this.theme.fg("dim", `Search: ${this.query || "(press /)"}${this.matches.length > 0 ? ` · ${this.matchIndex + 1}/${this.matches.length}` : ""}`);
+		const enabled = (kind) => this.prefs.enabledKinds.includes(kind) ? this.theme.fg("accent", this.text.recordKind(kind)) : this.theme.fg("dim", this.text.recordKind(kind));
+		const title = this.theme.fg("accent", "Pi Context Editor") + this.theme.fg("dim", `  ${this.text.unitCount(this.flatUnits().length)}`);
+		const mode = this.searchMode ? this.theme.fg("warning", this.text.tuiSearch(this.query, this.matches.length, this.matchIndex)) : this.theme.fg("dim", this.text.tuiSearchIdle(this.query, this.matches.length, this.matchIndex));
 		const filterLine = `${enabled("user")} [1]  ${enabled("ai")} [2]  ${enabled("tool")} [3]`;
-		const status = this.theme.fg("dim", "j/k move · shift+↑/↓ range · space select · enter expand · h hide · r restore · u undo · v reveal · q close");
+		const status = this.theme.fg("dim", this.text.tuiStatus());
 		return [
 			visiblePad(title, safeWidth),
 			visiblePad(filterLine, safeWidth),
@@ -1674,11 +1688,18 @@ function defaultDocument(sessionId) {
 function isEvent(value) {
 	if (!value || typeof value !== "object") return false;
 	const row = value;
-	return row.version === 2 && typeof row.transactionId === "string" && typeof row.createdAt === "string" && typeof row.baseRevision === "string" && (row.action === "hide" || row.action === "restore" || row.action === "reset" || row.action === "undo") && Array.isArray(row.changes);
+	const changes = Array.isArray(row.changes) ? row.changes : [];
+	const validChanges = changes.length > 0 && changes.every((change) => {
+		if (!change || typeof change !== "object") return false;
+		const item = change;
+		return typeof item.atomId === "string" && typeof item.fingerprint === "string" && (item.before === "show" || item.before === "collapse" || item.before === "hide") && (item.after === "show" || item.after === "collapse" || item.after === "hide");
+	});
+	return row.version === 2 && typeof row.transactionId === "string" && typeof row.createdAt === "string" && typeof row.baseRevision === "string" && (row.action === "hide" || row.action === "restore" || row.action === "reset" || row.action === "undo") && validChanges;
 }
 function parseDocument(raw, sessionId) {
 	if (!raw || typeof raw !== "object") return defaultDocument(sessionId);
 	const row = raw;
+	if (row.schemaVersion !== 1 || typeof row.sessionId === "string" && row.sessionId !== sessionId) return defaultDocument(sessionId);
 	const events = Array.isArray(row.events) ? row.events.flatMap((candidate) => {
 		if (!candidate || typeof candidate !== "object") return [];
 		const envelope = candidate;
@@ -1704,11 +1725,14 @@ function revisionOf(path, document) {
 		const value = statSync(path);
 		stat = `${value.size}:${value.mtimeMs}`;
 	} catch {}
-	return stableFingerprint$1([
+	return stableFingerprint([
 		path,
 		stat,
 		JSON.stringify(document)
 	]);
+}
+function viewRevisionOf(document) {
+	return stableFingerprint([document.sessionId, JSON.stringify(document.events)]);
 }
 function readSidecar(sessionFile, sessionId) {
 	const path = sidecarPath(sessionFile);
@@ -1722,7 +1746,8 @@ function readSidecar(sessionFile, sessionId) {
 	return {
 		path,
 		document,
-		revision: revisionOf(path, document)
+		revision: revisionOf(path, document),
+		viewRevision: viewRevisionOf(document)
 	};
 }
 function withLock(path, fn) {
@@ -1827,16 +1852,18 @@ var PiContextEditorHost = class {
 		const branchIds = new Set(entries.map((entry) => String(entry.id ?? "")));
 		const viewEvents = sidecar.document.events.filter((envelope) => envelope.anchorEntryId.length === 0 || branchIds.has(envelope.anchorEntryId)).map((envelope) => envelope.event);
 		const branchParts = contextEditorBranchRevisionParts(entries);
+		const revision = branchRevision(leafId, atoms, [...branchParts, sidecar.viewRevision]);
 		return {
 			entries,
 			atoms,
 			leafId,
-			revision: branchRevision(leafId, atoms, [...branchParts, sidecar.revision]),
-			revisionProbe: stableFingerprint$1([
+			revision,
+			revisionProbe: stableFingerprint([
 				this.sessionFile,
 				this.sessionId,
 				leafId ?? "",
-				sidecar.revision,
+				sidecar.viewRevision,
+				revision,
 				...branchParts
 			]),
 			viewEvents
@@ -1847,6 +1874,7 @@ var PiContextEditorHost = class {
 		const current = this.read();
 		if (current.revision !== event.baseRevision) throw new Error("CONTEXT_EDITOR_CONFLICT");
 		const sidecar = readSidecar(this.sessionFile, this.sessionId);
+		if (this.read().revision !== current.revision) throw new Error("CONTEXT_EDITOR_CONFLICT");
 		return appendSidecarEvent(this.sessionFile, this.sessionId, current.leafId ?? "", event, sidecar.revision);
 	}
 	isBusy() {
@@ -1946,28 +1974,11 @@ function sourceLeafId(ctx) {
 	return ctx.sessionManager.getLeafId() ?? void 0;
 }
 function contextEditorExtension(pi) {
-	let activeState;
-	const restoreState = (ctx) => {
-		activeState = readLatestState(ctx.sessionManager.getBranch());
-	};
-	pi.on("session_start", async (_event, ctx) => {
-		restoreState(ctx);
-	});
-	pi.on("session_tree", async (_event, ctx) => {
-		restoreState(ctx);
-	});
-	pi.on("context", async (event, ctx) => {
-		if (!activeState) return;
-		const actions = buildToolOutputActions(normalizeSessionEntries(ctx.sessionManager.buildContextEntries()), activeState, 2);
-		if (actions.length === 0) return;
-		const result = projectToolOutputs(event.messages, actions);
-		if (result.skippedToolCallIds.length > 0) ctx.ui.notify(`Context Editor skipped ${result.skippedToolCallIds.length} changed Tool Output(s) to preserve safety.`, "warning");
-		if (result.appliedToolCallIds.length === 0) return;
-		return { messages: result.messages };
-	});
 	pi.registerCommand("ctx", {
 		description: "Inspect the active Pi context (usage: /ctx)",
 		handler: async (_args, ctx) => {
+			const locale = detectPiLocale();
+			const text = createPiText(locale);
 			if (ctx.mode === "json" || ctx.mode === "print") {
 				ctx.ui.notify("/ctx requires interactive Pi TUI or Pi Desktop mode.", "warning");
 				return;
@@ -1979,20 +1990,15 @@ function contextEditorExtension(pi) {
 			}
 			const leafId = sourceLeafId(ctx);
 			const state = readLatestState(ctx.sessionManager.getBranch());
-			activeState = state;
 			if (ctx.mode === "rpc") {
 				await runDesktopContextEditor({
 					ui: ctx.ui,
 					atoms,
 					initialState: state,
 					sourceLeafId: leafId,
+					locale,
 					persistState: (nextState) => {
-						activeState = nextState;
 						pi.appendEntry(STATE_ENTRY_TYPE, nextState);
-					},
-					validateAtom: (atom) => {
-						const fresh = normalizeSessionEntries(ctx.sessionManager.buildContextEntries()).find((candidate) => candidate.id === atom.id);
-						return Boolean(fresh && fresh.fingerprint === atom.fingerprint && fresh.sourceRef.entryId === atom.sourceRef.entryId && fresh.sourceRef.blockIndex === atom.sourceRef.blockIndex);
 					}
 				});
 				return;
@@ -2003,6 +2009,10 @@ function contextEditorExtension(pi) {
 			}
 			const host = new PiContextEditorHost(ctx);
 			const records = host.records();
+			if (records.length === 0) {
+				ctx.ui.notify("There are no editable context records in the active branch.", "info");
+				return;
+			}
 			const snapshot = host.snapshot();
 			const prefs = host.getPrefs();
 			await ctx.ui.custom((tui, theme, _keybindings, done) => new ContextEditorComponent(tui, theme, records, snapshot, prefs, {
@@ -2011,7 +2021,9 @@ function contextEditorExtension(pi) {
 				mutate: (input) => host.commit(input),
 				undo: (baseRevision) => host.undo(baseRevision),
 				persistPrefs: (nextPrefs) => host.setPrefs(nextPrefs),
-				notify: (message, type = "info") => ctx.ui.notify(message, type)
+				notify: (message, type = "info") => ctx.ui.notify(message, type),
+				locale,
+				confirm: () => ctx.ui.confirm(text.restoreAllConfirmTitle(), text.restoreAllConfirmMessage())
 			}, () => done(void 0)));
 		}
 	});
