@@ -1,0 +1,46 @@
+{
+  "name": "agent-context-editor",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "description": "Cross-agent context inspection and view-state adapters",
+  "type": "module",
+  "license": "MIT",
+  "workspaces": [
+    "adapters/pi-extension",
+    "adapters/deepseek-harness",
+    "packages/*"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi-coding-agent",
+    "context-management",
+    "tui",
+    "desktop"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build:deepseek": "node ./scripts/build-deepseek-core.mjs",
+    "build:client": "node ./adapters/deepseek-harness/scripts/build-client.mjs",
+    "scan": "node ./scripts/scan-sensitive.mjs",
+    "pack:pi": "npm pack --workspace adapters/pi-extension --pack-destination ./release",
+    "pack:deepseek": "npm pack --workspace adapters/deepseek-harness --pack-destination ./release",
+    "pack": "npm run pack:pi && npm run pack:deepseek",
+    "verify:pack": "node ./scripts/check-pack.mjs",
+    "release:assets": "node ./scripts/make-release-assets.mjs",
+    "release:desktop-assets": "node ./scripts/make-release-assets.mjs --desktop",
+    "verify": "npm run check && npm test && npm run scan && npm run build:deepseek && npm run build:client && npm run verify:pack"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.84.2",
+    "@earendil-works/pi-ai": "0.84.2",
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "@earendil-works/pi-tui": "0.84.2",
+    "@types/node": "24.12.4",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9",
+    "zod": "4.4.3",
+    "rolldown": "1.2.4"
+  }
+}

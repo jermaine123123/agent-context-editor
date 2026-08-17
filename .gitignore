@@ -1,0 +1,14 @@
+node_modules/
+.npm-cache/
+*.tgz
+/pi-app/
+/release/
+/dist/
+/out/
+*.exe
+*.blockmap
+*.bak
+*.local
+.release-backup-*/
+.DS_Store
+coverage/
