@@ -1,3 +1,4 @@
+/* GENERATED FROM packages/context-editor-core; do not edit directly. */
 import { branchRevision, stableFingerprint } from './fingerprint.js'
 import { projectRecords } from './records.js'
 import { searchRecords } from './search.js'

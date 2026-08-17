@@ -1,53 +1,58 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  appendSidecarEvent,
-  readSidecar,
-  writeSidecarPrefs,
-} from "../adapters/pi-extension/src/sidecar.js";
+import { appendSidecarEvent, readSidecar, sidecarPath, writeSidecarPrefs } from "../adapters/pi-extension/src/sidecar.js";
+import type { ContextEditorViewEventV2 } from "../packages/context-editor-core/src/index.js";
 
-const temporaryRoots: string[] = [];
+const tempDirs: string[] = [];
 
 afterEach(() => {
-  for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+  for (const path of tempDirs.splice(0)) rmSync(path, { recursive: true, force: true });
 });
-
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "context-editor-sidecar-"));
-  temporaryRoots.push(root);
-  return join(root, "session.jsonl");
+  const dir = mkdtempSync(join(tmpdir(), "pi-context-editor-"));
+  tempDirs.push(dir);
+  return join(dir, "session.jsonl");
 }
 
-const event = {
-  version: 2 as const,
-  transactionId: "tx-1",
-  createdAt: "2026-08-18T00:00:00.000Z",
-  baseRevision: "base",
-  action: "hide" as const,
-  changes: [{ atomId: "a1", fingerprint: "fp", before: "show" as const, after: "hide" as const }],
-};
+function event(id: string): ContextEditorViewEventV2 {
+  return {
+    version: 2,
+    transactionId: id,
+    createdAt: new Date().toISOString(),
+    baseRevision: "base",
+    action: "hide",
+    changes: [{ atomId: "u1:0:user", fingerprint: "fp", before: "show", after: "hide" }],
+  };
+}
 
 describe("Pi sidecar", () => {
-  it("persists events atomically and rejects stale revisions", () => {
-    const session = fixture();
-    const initial = readSidecar(session, "session-1");
-    appendSidecarEvent(session, "session-1", "entry-1", event, initial.revision);
-    const next = readSidecar(session, "session-1");
-    expect(next.document.events).toHaveLength(1);
-    expect(next.document.events[0]?.event.transactionId).toBe("tx-1");
-    expect(() => appendSidecarEvent(session, "session-1", "entry-2", event, initial.revision)).toThrow("CONTEXT_EDITOR_CONFLICT");
+  it("writes atomically and round-trips events and preferences", () => {
+    const sessionFile = fixture();
+    const first = readSidecar(sessionFile, "session-1");
+    const id = appendSidecarEvent(sessionFile, "session-1", "leaf-1", event("tx-1"), first.revision);
+    expect(id).toBe("tx-1");
+    const withPrefs = writeSidecarPrefs(sessionFile, "session-1", { version: 2, enabledKinds: ["ai"], showHidden: true });
+    expect(withPrefs.document.events[0]?.anchorEntryId).toBe("leaf-1");
+    expect(withPrefs.document.prefs).toEqual({ version: 2, enabledKinds: ["ai"], showHidden: true });
+    expect(JSON.parse(readFileSync(sidecarPath(sessionFile), "utf8")).schemaVersion).toBe(1);
   });
 
-  it("normalizes and persists preferences without touching events", () => {
-    const session = fixture();
-    const result = writeSidecarPrefs(session, "session-2", {
-      version: 2,
-      enabledKinds: ["ai", "ai"],
-      showHidden: true,
-    });
-    expect(result.document.prefs).toEqual({ version: 2, enabledKinds: ["ai"], showHidden: true });
-    expect(result.document.events).toEqual([]);
+  it("rejects a stale sidecar revision without a partial write", () => {
+    const sessionFile = fixture();
+    const first = readSidecar(sessionFile, "session-1");
+    writeSidecarPrefs(sessionFile, "session-1", { version: 2, enabledKinds: ["tool"], showHidden: false });
+    expect(() => appendSidecarEvent(sessionFile, "session-1", "leaf-1", event("tx-1"), first.revision)).toThrow("CONTEXT_EDITOR_CONFLICT");
+    expect(readSidecar(sessionFile, "session-1").document.events).toHaveLength(0);
+  });
+
+  it("fails open for malformed JSON and replaces it on the next write", () => {
+    const sessionFile = fixture();
+    writeFileSync(sidecarPath(sessionFile), "{not-json", "utf8");
+    const parsed = readSidecar(sessionFile, "session-1");
+    expect(parsed.document.events).toEqual([]);
+    appendSidecarEvent(sessionFile, "session-1", "leaf-1", event("tx-1"), parsed.revision);
+    expect(() => JSON.parse(readFileSync(sidecarPath(sessionFile), "utf8"))).not.toThrow();
   });
 });

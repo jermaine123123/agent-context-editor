@@ -1,11 +1,11 @@
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { stableFingerprint } from "../../../packages/context-editor-core/src/index.js";
+import { stableFingerprint } from "./shared-core/index.js";
 import type {
   ContextEditorPrefsV2,
   ContextEditorViewEventV2,
-} from "../../../packages/context-editor-core/src/index.js";
-import { DEFAULT_CONTEXT_EDITOR_PREFS, normalizeContextEditorPrefs } from "../../../packages/context-editor-core/src/prefs.js";
+} from "./shared-core/index.js";
+import { DEFAULT_CONTEXT_EDITOR_PREFS, normalizeContextEditorPrefs } from "./shared-core/prefs.js";
 
 export const SIDECAR_SCHEMA_VERSION = 1 as const;
 
@@ -171,4 +171,3 @@ export function writeSidecarPrefs(
     return readSidecar(sessionFile, sessionId);
   });
 }
-
