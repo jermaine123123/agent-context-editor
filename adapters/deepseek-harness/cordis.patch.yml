@@ -1,0 +1,6 @@
+# Context Editor is one dual-face row: the Host half is the Remote service and
+# its browser half is discovered from the `dsh.client` manifest entry.
+- insert:
+    - id: context-editor
+      name: context-editor-deepseek-harness
+

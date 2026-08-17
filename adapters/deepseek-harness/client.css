@@ -1,0 +1,67 @@
+.context-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  height: 100%;
+  min-height: 0;
+  padding: 0.85rem 1rem 1.25rem;
+  color: var(--dsh-fg, var(--foreground, inherit));
+}
+
+.context-editor__toolbar,
+.context-editor__searchbar,
+.context-editor__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.context-editor__filters { display: flex; gap: 0.35rem; }
+.context-editor__filter,
+.context-editor__actions button,
+.context-editor__searchbar button,
+.context-editor__row button {
+  border: 1px solid var(--dsh-border, var(--border, #d7dbe2));
+  border-radius: 0.45rem;
+  background: var(--dsh-control-bg, var(--background, transparent));
+  color: inherit;
+  padding: 0.28rem 0.55rem;
+  cursor: pointer;
+}
+.context-editor__filter.is-active { background: var(--dsh-accent-soft, #e8efff); border-color: var(--dsh-accent, #7190e8); }
+.context-editor button:disabled { cursor: not-allowed; opacity: 0.45; }
+.context-editor__toggle { display: inline-flex; align-items: center; gap: 0.3rem; margin-left: auto; }
+.context-editor__searchbar input { flex: 1 1 20rem; min-width: 12rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.38rem 0.55rem; background: var(--dsh-input-bg, transparent); color: inherit; }
+.context-editor__search-summary { color: var(--dsh-muted, #687386); font-size: 0.82rem; }
+.context-editor__actions { border-bottom: 1px solid var(--dsh-border, var(--border, #d7dbe2)); padding-bottom: 0.5rem; }
+.context-editor__running { color: var(--dsh-muted, #687386); font-size: 0.82rem; }
+.context-editor__error { color: var(--dsh-danger, #b42318); font-size: 0.82rem; }
+.context-editor__list { overflow: auto; min-height: 0; display: flex; flex-direction: column; gap: 0.5rem; padding-right: 0.2rem; }
+.context-editor__row { display: flex; align-items: flex-start; gap: 0.6rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.55rem; padding: 0.65rem; background: var(--dsh-card-bg, transparent); }
+.context-editor__row.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }
+.context-editor__row.is-hidden { opacity: 0.82; }
+.context-editor__row--placeholder { align-items: center; min-height: 2.4rem; border-style: dashed; }
+.context-editor__row--placeholder input { margin-top: 0.2rem; }
+.context-editor__placeholder-text { flex: 1; color: var(--dsh-muted, #687386); font-size: 0.9rem; }
+.context-editor__row-content { flex: 1; min-width: 0; }
+.context-editor__row-meta { display: flex; align-items: center; gap: 0.45rem; color: var(--dsh-muted, #687386); font-size: 0.75rem; margin-bottom: 0.35rem; }
+.context-editor__kind { font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+.context-editor__hidden-badge { color: var(--dsh-warning, #996b00); }
+.context-editor__units { display: grid; gap: 0.45rem; }
+.context-editor__unit { border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.45rem 0.55rem; }
+.context-editor__unit.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }
+.context-editor__unit.is-hidden { opacity: 0.82; }
+.context-editor__unit-header { display: flex; align-items: center; gap: 0.45rem; min-height: 1.65rem; color: var(--dsh-muted, #687386); font-size: 0.78rem; }
+.context-editor__unit-select { display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer; }
+.context-editor__unit-kind { font-weight: 600; }
+.context-editor__unit-header button { margin-left: auto; }
+.context-editor__unit-body { min-width: 0; }
+.context-editor__unit-placeholder { color: var(--dsh-muted, #687386); padding: 0.35rem 0; font-size: 0.9rem; }
+.context-editor__record-body { display: grid; gap: 0.25rem; }
+.context-editor__atom { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }
+.context-editor__atom--reasoning { color: var(--dsh-muted, #687386); }
+.context-editor__tool-name { font-weight: 600; }
+.context-editor__hit { border-radius: 0.18rem; background: var(--dsh-highlight, #ffe28a); color: inherit; padding: 0 0.08rem; }
+.context-editor__state { color: var(--dsh-muted, #687386); padding: 2rem 0; text-align: center; }
+.context-editor__empty { color: var(--dsh-muted, #687386); }
