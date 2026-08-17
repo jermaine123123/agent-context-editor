@@ -1,0 +1,68 @@
+{
+  "name": "context-editor-deepseek-harness",
+  "version": "0.1.1",
+  "description": "Context Editor view for DeepSeek Harness with independent reasoning and answer units",
+  "type": "module",
+  "engines": { "node": ">=22.19.0" },
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": { "types": "./index.d.ts", "default": "./index.js" },
+    "./client": "./client.bundle.js",
+    "./remote": { "types": "./remote.d.ts", "default": "./remote.js" },
+    "./typert": { "types": "./typert.d.ts", "default": "./typert.js" },
+    "./core": { "types": "./core.d.ts", "default": "./core.js" },
+    "./client.css": "./client.css",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "client.js",
+    "client.bundle.js",
+    "client.css",
+    "core-runtime.js",
+    "core.js",
+    "core.d.ts",
+    "remote.js",
+    "remote.d.ts",
+    "typert.js",
+    "typert.d.ts",
+    "cordis.patch.yml",
+    "README.md",
+    "COMPATIBILITY.md"
+  ],
+  "scripts": {
+    "build:core": "node ./scripts/build-core.mjs",
+    "build:client": "node ./scripts/build-client.mjs",
+    "build": "npm run build:core && npm run build:client"
+  },
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.1 <5",
+    "@deepseek-ai/dsh-api-remotes": ">=0.1.0-rc.6 <0.2.0-0",
+    "@deepseek-ai/dsh-client-runtime": ">=0.1.0-rc.6 <0.2.0-0",
+    "@deepseek-ai/dsh-client-ui-conversation": ">=0.1.0-rc.6 <0.2.0-0",
+    "@deepseek-ai/dsh-session-persistence": ">=0.1.0-rc.6 <0.2.0-0",
+    "@deepseek-ai/dsh-storage-domain": ">=0.1.0-rc.6 <0.2.0-0",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.1.0-rc.6 <0.2.0-0",
+    "react": "^18.2.0"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  }
+}
