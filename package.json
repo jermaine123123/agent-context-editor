@@ -21,7 +21,7 @@
     "check": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "build:deepseek": "node ./scripts/build-deepseek-core.mjs",
+    "build:deepseek": "node ./adapters/deepseek-harness/scripts/build-core.mjs",
     "build:client": "node ./adapters/deepseek-harness/scripts/build-client.mjs",
     "scan": "node ./scripts/scan-sensitive.mjs",
     "pack:pi": "npm pack --workspace adapters/pi-extension --pack-destination ./release",

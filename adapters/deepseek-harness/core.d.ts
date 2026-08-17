@@ -1,6 +1,6 @@
 /*
  * GENERATED FILE - do not edit directly.
- * Canonical Core source digest: 4b0873d1fb89c2d6429d7ac722b8e32d3f5406df98aef1bfb758de72cc68716b
+ * Canonical Core source digest: 1eafb560f61283d8b66c3fae0f1d906babe91233067cfba9b8e57a397edabbaa
  * Rebuild with: npm run build:deepseek
  */
 export const HOST_ID: string
