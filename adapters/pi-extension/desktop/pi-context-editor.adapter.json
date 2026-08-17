@@ -1,0 +1,14 @@
+{
+  "$schema": "pi-desktop-adapter/v1",
+  "id": "pi-context-editor",
+  "displayName": "Pi Context Editor",
+  "description": "Inspect the active context and safely replace old Tool Output from native desktop dialogs.",
+  "match": {
+    "names": ["pi-context-editor"],
+    "commands": ["/ctx"]
+  },
+  "tier": "native",
+  "slash": {
+    "/ctx": "execute"
+  }
+}
