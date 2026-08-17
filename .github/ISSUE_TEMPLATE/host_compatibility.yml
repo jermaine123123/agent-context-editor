@@ -1,0 +1,22 @@
+name: Host compatibility request
+description: Report a host version that needs an acceptance run
+title: "[Compatibility] "
+labels: [compatibility]
+body:
+  - type: input
+    id: host
+    attributes:
+      label: Host and exact version/commit
+    validations:
+      required: true
+  - type: textarea
+    id: scenario
+    attributes:
+      label: Scenario and observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized acceptance evidence
+      description: Never include prompts, tokens or private session files.

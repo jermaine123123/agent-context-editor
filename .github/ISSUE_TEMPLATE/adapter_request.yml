@@ -1,0 +1,24 @@
+name: New adapter request
+description: Suggest a host adapter with a concrete integration boundary
+title: "[Adapter] "
+labels: [adapter-request]
+body:
+  - type: input
+    id: host
+    attributes:
+      label: Host project and URL
+    validations:
+      required: true
+  - type: textarea
+    id: api
+    attributes:
+      label: Available session/event API
+      description: Link to public documentation or describe the stable boundary.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Desired capabilities and limitations
+    validations:
+      required: true
