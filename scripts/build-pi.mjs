@@ -43,4 +43,3 @@ await writeFile(output, [
   "",
 ].join("\n"), "utf8")
 console.log(`Built ${output}`)
-
