@@ -13,7 +13,7 @@ const temp = await mkdtemp(join(tmpdir(), 'agent-context-editor-pack-'))
 
 const expected = {
   'adapters/pi-extension': {
-    required: ['src/index.ts', 'desktop/pi-context-editor.adapter.json', 'scripts/install-desktop.ps1'],
+    required: ['src/index.ts', 'src/host.ts', 'src/shared-core/index.ts', 'dist/index.js', 'desktop/pi-context-editor.adapter.json', 'scripts/install-desktop.ps1'],
     forbidden: ['core.js', 'pi-app/'],
   },
   'adapters/deepseek-harness': {

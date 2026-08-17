@@ -1,11 +1,12 @@
 {
   "name": "pi-context-editor",
   "version": "0.3.0",
-  "description": "Message-level context inspector for the Pi coding agent",
+  "description": "Cross-agent context editor for the Pi coding agent",
   "type": "module",
   "license": "MIT",
   "files": [
     "src",
+    "dist",
     "desktop",
     "scripts",
     "README.md",
@@ -13,10 +14,13 @@
   ],
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./dist/index.js"
     ]
   },
   "scripts": {
+    "build:core": "node scripts/build-core.mjs",
+    "build": "node ../../scripts/build-pi.mjs",
+    "prepack": "npm run build:core && npm run build",
     "verify": "tsc --noEmit"
   },
   "peerDependencies": {

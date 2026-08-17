@@ -6,7 +6,7 @@ The project currently ships two adapters:
 
 | Adapter | Package / app | Stable scope |
 | --- | --- | --- |
-| Pi extension | `pi-context-editor@0.3.0` | `/ctx` in Pi TUI and Pi Desktop; safe Tool Output replacement |
+| Pi extension | `pi-context-editor@0.3.0` | `/ctx` in Pi TUI and Pi Desktop; shared unit editor with visual-only state |
 | DeepSeek Harness | `context-editor-deepseek-harness@0.1.1` | Context Editor tab with independent reasoning/answer units |
 | Pi Context Desktop | `jermaine123123/pi-app` `context-editor-v0.1.4` | Windows x64 community desktop build |
 
@@ -22,8 +22,10 @@ restore, reset and undo events are stored in a `context_editor` sidecar.
 
 The original Harness Session log and model input are not rewritten. Hiding is a
 view operation in this release and does not reduce model token usage. The Pi
-extension retains its existing V1 sidecar and Tool Output safety behavior;
-these adapters are related, but their host capabilities are not identical.
+extension uses the same Record/Unit Core in its TUI; the Desktop/RPC path keeps
+the established Tool Output safety behavior. Pi TUI view events and
+preferences are stored in an atomic `<sessionFile>.context-editor.json`
+sidecar.
 
 This is an independent community project. It is not affiliated with, endorsed
 by or sponsored by DeepSeek, Pi, or their maintainers.
@@ -65,9 +67,9 @@ tested host boundary.
 | --- | ---: | ---: | ---: |
 | Inspect user / AI / tool records | Yes | Yes | Yes |
 | Search and occurrence counts | Yes | Yes | Yes |
-| Independent reasoning / answer units | Host-dependent | Yes | Yes |
+| Independent reasoning / answer units | Yes | Yes | Yes |
 | Hide / restore / reset | Yes | Yes | Yes |
-| Undo and revision conflict handling | V1 state | V2 sidecar | V2 sidecar |
+| Undo and revision conflict handling | V2 sidecar | V2 sidecar | V2 sidecar |
 | Session log preserved | Yes | Yes | Yes |
 | Context exclusion from model input | No | No | No |
 | Token reduction | Tool Output replacement only | No | No |
@@ -105,11 +107,11 @@ npm ci
 npm run verify
 ```
 
-`npm run verify` type-checks the Pi adapter and Core, runs all unit and adapter
+`npm run verify` regenerates the Pi adapter's vendored Core and bundled
+`dist/index.js`, type-checks the Pi adapter and Core, runs all unit and adapter
 fixtures, rebuilds the DeepSeek Core/client artifacts, and checks both npm
-tarballs for unexpected files. The DeepSeek `core.js` and `core-runtime.js`
-artifacts are generated from the canonical Core source; do not edit generated
-files directly.
+tarballs for unexpected files. Generated Core copies and bundles must not be
+edited directly.
 
 ## Known limits and roadmap
 

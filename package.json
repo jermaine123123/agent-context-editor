@@ -22,6 +22,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "build:deepseek": "node ./adapters/deepseek-harness/scripts/build-core.mjs",
+    "build:pi-core": "node ./adapters/pi-extension/scripts/build-core.mjs",
+    "build:pi": "node ./scripts/build-pi.mjs",
     "build:client": "node ./adapters/deepseek-harness/scripts/build-client.mjs",
     "scan": "node ./scripts/scan-sensitive.mjs",
     "pack:pi": "npm pack --workspace adapters/pi-extension --pack-destination ./release",
@@ -30,7 +32,7 @@
     "verify:pack": "node ./scripts/check-pack.mjs",
     "release:assets": "node ./scripts/make-release-assets.mjs",
     "release:desktop-assets": "node ./scripts/make-release-assets.mjs --desktop",
-    "verify": "npm run check && npm test && npm run scan && npm run build:deepseek && npm run build:client && npm run verify:pack"
+    "verify": "npm run build:pi-core && npm run check && npm test && npm run scan && npm run build:pi && npm run build:deepseek && npm run build:client && npm run verify:pack"
   },
   "devDependencies": {
     "@earendil-works/pi-agent-core": "0.84.2",

@@ -1,12 +1,18 @@
 # Pi Context Editor
 
 `pi-context-editor` adds the `/ctx` command to Pi TUI and Pi Desktop. It
-provides message-level inspection and safe Tool Output replacement for the
-active Pi session.
+provides a full-screen, keyboard-first context editor with shared
+record/unit projection, search, independent reasoning/answer visibility,
+batch selection, restore and undo.
 
 Install the published tarball with Pi's package manager, then restart Pi
-Desktop before using `/ctx`. The adapter keeps the original session entries
-and uses the existing V1 sidecar state format.
+Desktop before using `/ctx`. The TUI stores V2 hide/restore/undo events and
+preferences in an atomic `<sessionFile>.context-editor.json` sidecar. The
+Desktop/RPC path retains the existing V1 state and compatibility behavior.
+Neither path rewrites the original session entries or changes model input.
+
+This release does not exclude context, replace Tool Output, or filter Pi's
+main chat timeline.
 
 This adapter is one part of the cross-agent project. See the repository root
 README for the support matrix and current limitations.
