@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" role="img" aria-label="Synthetic Context Editor frame showing reasoning hidden and answer shown">
+  <rect width="960" height="540" fill="#101827"/>
+  <rect x="36" y="30" width="888" height="52" rx="10" fill="#1f2b45"/>
+  <text x="62" y="64" fill="#f8fafc" font-family="Segoe UI,Arial,sans-serif" font-size="22">Context Editor · synthetic session</text>
+  <rect x="64" y="122" width="832" height="122" rx="14" fill="#2a2137" stroke="#db8cff"/>
+  <text x="92" y="164" fill="#f0abfc" font-family="Segoe UI,Arial,sans-serif" font-size="21">AI turn · reasoning</text>
+  <text x="92" y="207" fill="#c4b5fd" font-family="Segoe UI,Arial,sans-serif" font-size="19">Hidden · independently selected</text>
+  <rect x="64" y="270" width="832" height="122" rx="14" fill="#18382f" stroke="#5ec7a5"/>
+  <text x="92" y="312" fill="#9fe7d0" font-family="Segoe UI,Arial,sans-serif" font-size="21">AI turn · answer</text>
+  <text x="92" y="355" fill="#f8fafc" font-family="Segoe UI,Arial,sans-serif" font-size="19">Shown · the answer remains visible</text>
+  <text x="64" y="466" fill="#94a3b8" font-family="Segoe UI,Arial,sans-serif" font-size="18">Search: deployment · matches by editable unit</text>
+</svg>

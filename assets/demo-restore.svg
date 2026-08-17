@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" role="img" aria-label="Synthetic Context Editor frame showing restore and undo">
+  <rect width="960" height="540" fill="#101827"/>
+  <rect x="36" y="30" width="888" height="52" rx="10" fill="#1f2b45"/>
+  <text x="62" y="64" fill="#f8fafc" font-family="Segoe UI,Arial,sans-serif" font-size="22">Context Editor · restore</text>
+  <rect x="64" y="126" width="832" height="260" rx="14" fill="#16243a" stroke="#80aaff"/>
+  <text x="92" y="173" fill="#bfdbfe" font-family="Segoe UI,Arial,sans-serif" font-size="21">reasoning</text>
+  <text x="92" y="214" fill="#f8fafc" font-family="Segoe UI,Arial,sans-serif" font-size="19">Restored · state persisted in sidecar</text>
+  <text x="92" y="267" fill="#bfdbfe" font-family="Segoe UI,Arial,sans-serif" font-size="21">answer</text>
+  <text x="92" y="308" fill="#f8fafc" font-family="Segoe UI,Arial,sans-serif" font-size="19">Shown · original Session remains unchanged</text>
+  <rect x="92" y="340" width="108" height="30" rx="15" fill="#315486"/>
+  <text x="116" y="361" fill="#f8fafc" font-family="Segoe UI,Arial,sans-serif" font-size="15">Undo ready</text>
+  <text x="64" y="466" fill="#94a3b8" font-family="Segoe UI,Arial,sans-serif" font-size="18">Restart check: sidecar state restored</text>
+</svg>

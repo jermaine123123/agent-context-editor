@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" role="img" aria-label="Synthetic Context Editor frame showing independent unit search">
+  <rect width="960" height="540" fill="#101827"/>
+  <rect x="52" y="38" width="856" height="58" rx="12" fill="#1f2b45" stroke="#4d6ba8"/>
+  <text x="78" y="75" fill="#f8fafc" font-family="Segoe UI,Arial,sans-serif" font-size="22">Search  deployment</text>
+  <text x="780" y="75" fill="#9fe7d0" font-family="Segoe UI,Arial,sans-serif" font-size="19">2 units · 3 hits</text>
+  <rect x="52" y="132" width="856" height="96" rx="12" fill="#2a2137" stroke="#db8cff"/>
+  <text x="78" y="172" fill="#f0abfc" font-family="Segoe UI,Arial,sans-serif" font-size="20">reasoning · 2 occurrences</text>
+  <text x="78" y="204" fill="#c4b5fd" font-family="Segoe UI,Arial,sans-serif" font-size="17">…deployment plan…</text>
+  <rect x="52" y="256" width="856" height="96" rx="12" fill="#18382f" stroke="#5ec7a5"/>
+  <text x="78" y="296" fill="#9fe7d0" font-family="Segoe UI,Arial,sans-serif" font-size="20">answer · 1 occurrence</text>
+  <text x="78" y="328" fill="#f8fafc" font-family="Segoe UI,Arial,sans-serif" font-size="17">…deployment complete…</text>
+  <text x="52" y="438" fill="#94a3b8" font-family="Segoe UI,Arial,sans-serif" font-size="18">Synthetic, sanitized demo material · no real session content</text>
+</svg>

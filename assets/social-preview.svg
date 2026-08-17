@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">Agent Context Editor</title>
+  <desc id="desc">Cross-agent context inspection with independent reasoning and answer units.</desc>
+  <rect width="1280" height="640" fill="#0b1020"/>
+  <circle cx="1100" cy="-20" r="300" fill="#243b73" opacity=".55"/>
+  <circle cx="80" cy="680" r="280" fill="#163b46" opacity=".7"/>
+  <text x="96" y="180" fill="#f8fafc" font-family="Segoe UI,Arial,sans-serif" font-size="62" font-weight="700">Agent Context Editor</text>
+  <text x="100" y="255" fill="#9fe7d0" font-family="Segoe UI,Arial,sans-serif" font-size="30">Independent reasoning / answer units for coding agents</text>
+  <rect x="100" y="330" width="460" height="132" rx="18" fill="#18233d" stroke="#4d6ba8"/>
+  <text x="132" y="382" fill="#f8fafc" font-family="Segoe UI,Arial,sans-serif" font-size="25">reasoning</text>
+  <text x="132" y="425" fill="#fca5a5" font-family="Segoe UI,Arial,sans-serif" font-size="24">hidden</text>
+  <rect x="590" y="330" width="460" height="132" rx="18" fill="#18382f" stroke="#5ec7a5"/>
+  <text x="622" y="382" fill="#f8fafc" font-family="Segoe UI,Arial,sans-serif" font-size="25">answer</text>
+  <text x="622" y="425" fill="#9fe7d0" font-family="Segoe UI,Arial,sans-serif" font-size="24">shown</text>
+  <text x="100" y="550" fill="#94a3b8" font-family="Segoe UI,Arial,sans-serif" font-size="22">Pi · DeepSeek Harness · MIT</text>
+</svg>
