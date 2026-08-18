@@ -1,16 +1,29 @@
 # Agent Context Editor
 
-给 Coding Agent 长对话增加一个可搜索、可隐藏、可恢复的管理视图，同时保留原始
-Session。
+一个面向 Coding Agent 长对话、以跨宿主为目标的会话内容编辑器。
 
-和 Coding Agent 协作久了，一段会话里会积累大量推理、旧回答和工具输出。Agent
-Context Editor 提供一个独立的管理视图，支持搜索、类型筛选、批量选择、隐藏、恢复
-和撤销。隐藏状态单独保存，原始 Session 不会被删除或改写。
+项目希望在 Codex、Pi、OpenCode 等 Agent IDE、桌面应用或 TUI 宿主中提供一致的
+对话管理方式：让用户决定长对话中哪些内容继续显示或参与后续模型上下文，重新打开
+会话时能快速找到过去的结论，并最终可以让 AI 精简选中的片段或整篇会话。Codex 和
+OpenCode 目前只是计划适配的目标宿主，并不是已经完成的集成。
 
-当前项目已经完成 Pi Desktop 和 DeepSeek Harness 适配。DeepSeek Harness 版本还能
-分别处理同一轮 AI 的 reasoning 与最终回答。
+和 Agent 长期协作后，一篇会话会积累大量用户指令、模型推理、旧回答和工具输出。
+Agent Context Editor 在原有 Session 之上建立一个结构化管理视图，支持搜索整篇对话、
+按 User、AI、Tool 类型筛选消息、选择单条或多条记录，以及隐藏、恢复和撤销视图修改。
 
-项目仍处于 Developer Preview，Pi TUI 还会继续验证，后续会尝试接入更多 Agent 宿主。
+## Developer Preview 当前能力
+
+第一阶段已经在 Pi 和 DeepSeek Harness 上提供可用版本，包括：
+
+- 全篇会话文本搜索、命中次数统计和上一个/下一个结果定位；
+- User、AI、Tool 消息类型筛选及组合筛选；
+- 单条、连续范围和批量选择；
+- 可恢复的视觉隐藏、恢复全部、重置和撤销；
+- 使用 sidecar 持久化隐藏状态，不删除或改写原始 Session；
+- 在 DeepSeek Harness 中分别处理同一轮 AI 的 reasoning 和最终回答。
+
+当前隐藏只改变独立 Context Editor 视图，不会修改宿主的主聊天时间线，不会从后续
+模型输入中删除消息，也不会减少 Token。Pi TUI 的完整真实宿主验收仍在继续。
 
 English 首页：[README.md](README.md)
 
@@ -23,6 +36,21 @@ English 首页：[README.md](README.md)
 DeepSeek 适配器把隐藏状态写入 `context_editor` sidecar，不改写原始 Harness
 Session 日志和模型输入。当前隐藏只是视图操作，不会减少 Token 消耗。项目与
 DeepSeek、Pi 官方及其维护团队没有隶属或赞助关系。
+
+## 产品路线图
+
+后续能力与当前已经可用的视觉管理器分阶段开发：
+
+1. 适配 Agent 主聊天时间线，并在宿主扩展接口允许的情况下接入 Codex、OpenCode
+   等更多应用。
+2. 实现可恢复的上下文排除：由用户手动把选中消息从后续模型输入中移除，但不销毁
+   已保存的原始 Session。
+3. 实现 AI 辅助精简：分析整篇对话，提出保留或排除建议，并为选中片段或整篇会话
+   生成摘要。
+4. 经用户确认后，用摘要替换对话窗口中的原内容、模型上下文中的原内容，或同时替换
+   两者；原文保持可恢复，所有修改均可撤销。
+
+上下文删除、AI 精简和摘要替换目前都属于后续计划，尚未包含在当前发布版中。
 
 ## 界面语言
 
@@ -77,11 +105,11 @@ npm run verify
 检查会运行 TypeScript、通用 Core、Pi 与 DeepSeek fixtures，重新生成 Pi vendored
 Core 和 bundle、重新生成 DeepSeek Core/client，并确认 tarball 不含本地路径、模板或其他非发布文件。
 
-## 限制与路线图
+## 当前限制
 
-本 Alpha 版本不直接改写对话窗口、不从模型上下文排除消息、不压缩 Token、不在
-Harness 中替换任意 Tool Output，也不增加更多宿主。后续方向包括正式的上下文排除
-契约、更多宿主适配、签名桌面构建和更完整的跨宿主 fixtures。
+本 Alpha 版本不直接改写对话窗口、不从模型上下文排除消息、不压缩 Token、不生成
+AI 摘要、不用摘要替换原内容、不在 Harness 中替换任意 Tool Output，也还没有适配
+Codex 和 OpenCode。视觉隐藏不等于模型上下文控制。
 
 ## 许可证
 

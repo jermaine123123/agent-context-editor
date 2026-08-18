@@ -1,24 +1,39 @@
 # Agent Context Editor
 
-A searchable, hideable, and reversible management view for long Coding Agent
-conversations, while preserving the original Session.
+A host-neutral conversation editor for long Coding Agent sessions.
 
-When you work with a Coding Agent for a long time, one Session accumulates
-reasoning, older answers, and tool output. Agent Context Editor provides a
-separate management view with search, type filters, batch selection, hide,
-restore, and undo. Hidden state is stored separately; the original Session is
-never deleted or rewritten.
+The product goal is to bring the same conversation-management workflow to
+Agent applications such as Codex, Pi, OpenCode, and other IDE, desktop, or TUI
+hosts. Users should be able to decide which parts of a long conversation remain
+visible or participate in future model context, quickly return to past
+decisions, and eventually ask AI to condense a selected range or the entire
+session. Codex and OpenCode are target hosts, not current integrations.
 
-The project currently has adapters for Pi Desktop and DeepSeek Harness. The
-DeepSeek Harness adapter can also manage the reasoning and final answer from
-the same AI turn independently.
+Long-running Agent sessions accumulate user instructions, model reasoning,
+older answers, and tool output. Agent Context Editor builds a structured
+management view over the existing Session so you can search the whole
+conversation, filter User, AI, and Tool messages, select individual or multiple
+items, and hide, restore, or undo view changes.
 
-The project is still a Developer Preview. Pi TUI validation is ongoing, and
-additional Agent hosts are planned.
+## Developer Preview
 
-The project currently ships two adapters:
+The first phase is available today for Pi and DeepSeek Harness. It provides an
+independent Context Editor view with:
 
-| Adapter | Package / app | Stable scope |
+- full-session text search, occurrence counts, and previous/next navigation;
+- User, AI, and Tool type filters, including combined filters;
+- single, contiguous, and batch selection;
+- reversible visual hiding, restore, reset, and undo;
+- sidecar persistence without deleting or rewriting the original Session;
+- independent reasoning and final-answer units in DeepSeek Harness.
+
+Visual hiding currently changes only the Context Editor view. It does not edit
+the host's main chat timeline, remove messages from future model input, or
+reduce token usage. Pi TUI acceptance testing is still in progress.
+
+The repository currently ships two adapter packages and one desktop fork:
+
+| Adapter | Package / app | Current scope |
 | --- | --- | --- |
 | Pi extension | `pi-context-editor@0.4.0-alpha.1` | `/ctx` in Pi TUI and Pi Desktop; shared unit editor with visual-only state |
 | DeepSeek Harness | `context-editor-deepseek-harness@0.1.1` | Context Editor tab with independent reasoning/answer units |
@@ -26,7 +41,7 @@ The project currently ships two adapters:
 
 中文说明：[README.zh-CN.md](README.zh-CN.md)
 
-## What it does
+## How it works today
 
 The DeepSeek Harness adapter reads the durable Session event log and projects
 user, AI and tool records into a separate Context Editor view. Reasoning and
@@ -46,6 +61,24 @@ visual edit.
 
 This is an independent community project. It is not affiliated with, endorsed
 by or sponsored by DeepSeek, Pi, or their maintainers.
+
+## Product roadmap
+
+The next stages are intentionally separated from the visual editor already
+available:
+
+1. Adapt the main conversation timeline and add more hosts, including Codex and
+   OpenCode where their extension APIs allow it.
+2. Add reversible context exclusion so a user can manually remove selected
+   messages from future model input without destroying the stored Session.
+3. Add AI-assisted session cleanup: analyze a whole conversation, propose what
+   to keep or exclude, and summarize a selected range or the full session.
+4. Allow an approved summary to replace the original range in the visible
+   conversation, the model-context projection, or both, while keeping the
+   source recoverable and every change undoable.
+
+These context-removal, AI-condensation, and summary-replacement capabilities
+are planned work; they are not included in the current release.
 
 ## Install
 
@@ -93,6 +126,7 @@ translated.
 | Capability | Pi extension 0.4.0-alpha.1 | DeepSeek Harness 0.1.1 | Pi Context Desktop 0.1.4 |
 | --- | ---: | ---: | ---: |
 | Inspect user / AI / tool records | Yes | Yes | Yes |
+| Filter user / AI / tool records | Yes | Yes | Yes |
 | Search and occurrence counts | Yes | Yes | Yes |
 | Independent reasoning / answer units | Yes | Yes | Yes |
 | Hide / restore / reset | Yes | Yes | Yes |
@@ -100,6 +134,9 @@ translated.
 | Session log preserved | Yes | Yes | Yes |
 | Context exclusion from model input | No | No | No |
 | Token reduction | No (visual-only) | No | No |
+| AI full-session condensation | No | No | No |
+| AI selected-range summary | No | No | No |
+| Summary replacement | No | No | No |
 | Automatic zh/en UI | Yes | Yes | Yes |
 
 ## Repository layout
@@ -141,13 +178,12 @@ fixtures, rebuilds the DeepSeek Core/client artifacts, and checks both npm
 tarballs for unexpected files. Generated Core copies and bundles must not be
 edited directly.
 
-## Known limits and roadmap
+## Known limits
 
-The alpha release deliberately does not rewrite the active conversation, remove
-items from model context, compress tokens, replace Tool Output, or add more
-hosts. Hiding is strictly a Context Editor view operation; it is not a model
-context control. Next steps are a real context-exclusion contract, additional
-host adapters, signed desktop distributions and a broader fixture suite.
+The alpha release does not rewrite the active conversation, remove items from
+model context, compress tokens, generate AI summaries, replace original content
+with a summary, replace Tool Output, or support Codex and OpenCode. Hiding is
+strictly a Context Editor view operation; it is not a model-context control.
 
 Please report reproducible host compatibility issues with the relevant host
 version, adapter version and sanitized logs. Do not attach session logs that
