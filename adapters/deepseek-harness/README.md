@@ -1,8 +1,14 @@
 # Context Editor for DeepSeek Harness
 
-This is the first cross-agent adapter for Context Editor.  It targets the
-official DeepSeek Harness Developer Preview commit
-`47f943859bef60e4160492346772ded9b24f765a0` and installs as one bundle.  The
+Agent Context Editor adds a searchable, hideable, and reversible management
+view for long DeepSeek Harness conversations while preserving the original
+Session. Long-running Coding Agent sessions accumulate reasoning, older
+answers, and tool output; this adapter keeps those records available while
+providing search, type filters, batch selection, hide, restore, and undo in a
+separate view.
+
+This adapter targets the official DeepSeek Harness Developer Preview commit
+`47f943859bef60e4160492346772ded9b24f765a0` and installs as one bundle. The
 package adds a `Context Editor` tab beside the normal `Chat` view for the same
 Session; it never creates a second conversation.
 

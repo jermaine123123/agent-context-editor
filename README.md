@@ -1,6 +1,20 @@
 # Agent Context Editor
 
-Cross-agent context inspection and view-state controls for coding agents.
+A searchable, hideable, and reversible management view for long Coding Agent
+conversations, while preserving the original Session.
+
+When you work with a Coding Agent for a long time, one Session accumulates
+reasoning, older answers, and tool output. Agent Context Editor provides a
+separate management view with search, type filters, batch selection, hide,
+restore, and undo. Hidden state is stored separately; the original Session is
+never deleted or rewritten.
+
+The project currently has adapters for Pi Desktop and DeepSeek Harness. The
+DeepSeek Harness adapter can also manage the reasoning and final answer from
+the same AI turn independently.
+
+The project is still a Developer Preview. Pi TUI validation is ongoing, and
+additional Agent hosts are planned.
 
 The project currently ships two adapters:
 
@@ -16,9 +30,10 @@ The project currently ships two adapters:
 
 The DeepSeek Harness adapter reads the durable Session event log and projects
 user, AI and tool records into a separate Context Editor view. Reasoning and
-answer blocks in one AI turn are independent editable units: you can search,
-select, hide, restore and persist either unit without hiding the other. Hide,
-restore, reset and undo events are stored in a `context_editor` sidecar.
+answer blocks in one AI turn are independent view units: you can search, filter
+by type, select individually or in batches, hide, restore and undo either unit
+without hiding the other. Hide, restore, reset and undo events are stored in a
+`context_editor` sidecar.
 
 The original Harness Session log and model input are not rewritten. Hiding is a
 view operation in this release and does not reduce model token usage. The Pi
