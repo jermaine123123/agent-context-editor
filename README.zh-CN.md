@@ -1,7 +1,7 @@
 # Agent Context Editor
 
-一个面向 Coding Agent 长对话的跨 Agent 会话管理器：可搜索、可筛选、可隐藏、
-可恢复，并完整保留原始 Session。
+一个跨 Agent 的对话管理插件：可搜索、可筛选、可隐藏、可恢复，并完整保留原始
+Session。
 
 和 Agent 长期协作后，一篇会话会积累大量用户指令、模型推理、旧回答和工具输出。
 Agent Context Editor 在原有 Session 之上建立一个独立的结构化管理视图，支持搜索

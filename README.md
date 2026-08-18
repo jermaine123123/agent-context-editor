@@ -1,7 +1,8 @@
 # Agent Context Editor
 
-A cross-agent conversation manager for long Coding Agent sessions—searchable,
-filterable, hideable, reversible, and built to preserve the original Session.
+A cross-agent conversation management plugin for Coding Agent sessions—
+searchable, filterable, hideable, reversible, and built to preserve the
+original Session.
 
 Long-running Agent sessions accumulate user instructions, model reasoning,
 older answers, and tool output. Agent Context Editor builds an independent,
