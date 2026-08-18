@@ -1,19 +1,19 @@
 # Agent Context Editor
 
-A host-neutral conversation editor for long Coding Agent sessions.
-
-The product goal is to bring the same conversation-management workflow to
-Agent applications such as Codex, Pi, OpenCode, and other IDE, desktop, or TUI
-hosts. Users should be able to decide which parts of a long conversation remain
-visible or participate in future model context, quickly return to past
-decisions, and eventually ask AI to condense a selected range or the entire
-session. Codex and OpenCode are target hosts, not current integrations.
+A cross-agent conversation manager for long Coding Agent sessions—searchable,
+filterable, hideable, reversible, and built to preserve the original Session.
 
 Long-running Agent sessions accumulate user instructions, model reasoning,
-older answers, and tool output. Agent Context Editor builds a structured
-management view over the existing Session so you can search the whole
-conversation, filter User, AI, and Tool messages, select individual or multiple
-items, and hide, restore, or undo view changes.
+older answers, and tool output. Agent Context Editor builds an independent,
+structured management view over the existing Session so you can search the
+whole conversation, filter User, AI, and Tool messages, select individual or
+multiple items, and hide, restore, or undo view changes. Hidden state is stored
+separately; the original Session is never deleted or rewritten.
+
+The long-term goal is to provide the same conversation-editing workflow across
+Agent hosts: keep long sessions focused, quickly return to the information you
+chose to retain, control what participates in future model context, and ask AI
+to condense a selected range or the entire session.
 
 ## Developer Preview
 
@@ -67,8 +67,8 @@ by or sponsored by DeepSeek, Pi, or their maintainers.
 The next stages are intentionally separated from the visual editor already
 available:
 
-1. Adapt the main conversation timeline and add more hosts, including Codex and
-   OpenCode where their extension APIs allow it.
+1. Adapt the main conversation timeline and add more Agent hosts where their
+   extension APIs allow it.
 2. Add reversible context exclusion so a user can manually remove selected
    messages from future model input without destroying the stored Session.
 3. Add AI-assisted session cleanup: analyze a whole conversation, propose what
@@ -182,8 +182,8 @@ edited directly.
 
 The alpha release does not rewrite the active conversation, remove items from
 model context, compress tokens, generate AI summaries, replace original content
-with a summary, replace Tool Output, or support Codex and OpenCode. Hiding is
-strictly a Context Editor view operation; it is not a model-context control.
+with a summary, replace Tool Output, or support additional Agent hosts. Hiding
+is strictly a Context Editor view operation; it is not a model-context control.
 
 Please report reproducible host compatibility issues with the relevant host
 version, adapter version and sanitized logs. Do not attach session logs that

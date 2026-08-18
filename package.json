@@ -2,7 +2,7 @@
   "name": "agent-context-editor",
   "version": "0.1.0-alpha.1",
   "private": true,
-  "description": "Host-neutral search, filtering, and reversible view management for long Coding Agent sessions",
+  "description": "Cross-agent search, filtering, and reversible view management for long Coding Agent sessions",
   "type": "module",
   "license": "MIT",
   "workspaces": [
