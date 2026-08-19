@@ -1,5 +1,7 @@
 import type { AtomKind, ViewState } from "./types.js";
 
+type PiSearchScope = "dialogue" | "all";
+
 export type PiLocale = "zh" | "en";
 
 type LocaleSource = {
@@ -57,6 +59,7 @@ export interface PiText {
   savedMessage(hidden: number): string;
   searchTitle(): string;
   searchPlaceholder(): string;
+  searchScope(scope: PiSearchScope): string;
   hiddenSummary(hidden: number, shown: boolean): string;
   resetSummary(hidden: number): string;
   browseSummary(matches: number, total: number): string;
@@ -64,11 +67,14 @@ export interface PiText {
   typeSummary(count: number, total: number): string;
   unitTitle(unitKind: string, recordKind: string, state: string, tokens: number): string;
   hiddenUnit(unitKind: string): string;
+  hiddenSearchHit(): string;
   tuiTitle(units: number): string;
   unitCount(units: number): string;
-  tuiSearch(query: string, count: number, index: number): string;
-  tuiSearchIdle(query: string, count: number, index: number): string;
-  tuiStatus(): string;
+  tuiSearch(query: string, count: number, index: number, scope?: PiSearchScope): string;
+  tuiSearchIdle(query: string, count: number, index: number, scope?: PiSearchScope): string;
+  tuiStatus(mode?: "normal" | "search" | "results" | "help", scope?: PiSearchScope): string;
+  tuiHelpTitle(): string;
+  tuiHelpLines(): string[];
   savePrefsFailed(error: string): string;
   sessionChanged(): string;
   sidecarChanged(): string;
@@ -151,6 +157,9 @@ export function createPiText(locale: PiLocale): PiText {
     savedMessage: (hidden) => zh ? `已保存当前对话状态：隐藏 ${hidden} 条。隐藏和筛选只影响记录管理器，不会改变主聊天窗口或模型上下文；下次打开时会恢复这些设置。` : `Conversation state saved: ${hidden} hidden. Hiding and filtering only affect the record manager; the main chat and model context are unchanged, and these settings will be restored next time.`,
     searchTitle: () => zh ? "搜索对话记录" : "Search conversation records",
     searchPlaceholder: () => zh ? "输入关键词；留空清除" : "Enter a keyword; leave blank to clear",
+    searchScope: (scope) => scope === "all"
+      ? (zh ? "\u641c\u7d22\u8303\u56f4\uff1a\u5168\u6587" : "Search scope: Full")
+      : (zh ? "\u641c\u7d22\u8303\u56f4\uff1a\u5bf9\u8bdd" : "Search scope: Dialogue"),
     hiddenSummary: (hidden, shown) => zh ? `已隐藏记录（${shown ? "当前显示" : "当前不显示"}）` : `Hidden records (${shown ? "shown" : "hidden"})`,
     resetSummary: (hidden) => zh ? `重置当前对话状态（已隐藏 ${hidden}）` : `Reset current conversation state (${hidden} hidden)`,
     browseSummary: (matches, total) => zh ? `浏览对话记录（${matches}/${total}）` : `Browse conversation records (${matches}/${total})`,
@@ -158,11 +167,49 @@ export function createPiText(locale: PiLocale): PiText {
     typeSummary: (count, total) => `${zh ? "筛选对话记录类型" : "Filter record types"} (${count}/${total})`,
     unitTitle: (unitKind, recordKind, state, tokens) => `${unitKind} · ${recordKind} · ${state} · ${tokens} tok`,
     hiddenUnit: (unitKind) => zh ? `    ${unitKind} 已隐藏 · 按 v 显示` : `    ${unitKind} hidden · press v to reveal`,
+    hiddenSearchHit: () => zh ? " · " : " · match is in hidden content",
     tuiTitle: (units) => `${zh ? "Pi Context Editor" : "Pi Context Editor"}  ${units} ${zh ? "单元" : "units"}`,
     unitCount: (units) => `${units} ${zh ? "单元" : "units"}`,
-    tuiSearch: (query, count, index) => zh ? `搜索：${query}▌  ${count} 单元` : `Search: ${query}▌  ${count} units`,
-    tuiSearchIdle: (query, count, index) => `${zh ? "搜索" : "Search"}: ${query || (zh ? "（按 /）" : "(press /)")}${count > 0 ? ` · ${index + 1}/${count}` : ""}`,
-    tuiStatus: () => zh ? "j/k 移动 · shift+↑/↓ 区间选择 · 空格选择 · enter 展开 · h 隐藏 · r 恢复 · u 撤销 · v 显示 · q 关闭" : "j/k move · shift+↑/↓ range · space select · enter expand · h hide · r restore · u undo · v reveal · q close",
+    tuiSearch: (query, count, _index, scope = "dialogue") => {
+      const scopeLabel = scope === "all" ? (zh ? "\u5168\u6587" : "full") : (zh ? "\u5bf9\u8bdd" : "dialogue");
+      return zh ? `\u641c\u7d22\uff1a[${scopeLabel}] ${query}▌ · ${count} \u4e2a\u547d\u4e2d` : `Search: [${scopeLabel}] ${query}▌ · ${count} matches`;
+    },
+    tuiSearchIdle: (query, count, index, scope = "dialogue") => {
+      const scopeLabel = scope === "all" ? (zh ? "\u5168\u6587" : "full") : query ? (zh ? "\u5bf9\u8bdd" : "dialogue") : "";
+      const prefix = `${zh ? "\u641c\u7d22" : "Search"}${zh ? "\uff1a" : ": "}${query || (zh ? "\uff08\u6309 / \u641c\u7d22\uff09" : "(press /)")}${scopeLabel ? ` · ${scopeLabel}` : ""}`;
+      if (count <= 0) return prefix;
+      return `${prefix} · ${index >= 0 ? `${index + 1}/${count}` : `${count} ${zh ? "\u4e2a\u547d\u4e2d" : "matches"}`}`;
+    },
+    tuiStatus: (mode = "normal", scope = "dialogue") => {
+      if (mode === "search") return zh ? "\u8f93\u5165\u5173\u952e\u8bcd · Enter \u8df3\u8f6c · Esc \u7ed3\u675f\u641c\u7d22" : "Type a query · Enter jump · Esc finish search";
+      if (mode === "results") return zh ? "n \u4e0b\u4e00\u4e2a\u547d\u4e2d，N \u4e0a\u4e00\u4e2a\u547d\u4e2d · s \u5207\u6362\u8303\u56f4 · / \u4fee\u6539\u641c\u7d22 · ? \u5e2e\u52a9 · q \u5173\u95ed" : "n next / N previous occurrence · s toggle scope · / edit search · ? help · q close";
+      if (mode === "help") return zh ? "? Esc \u8fd4\u56de\u7f16\u8f91\u5668" : "? / Esc return to editor";
+      return zh ? "j/k · Enter \u67e5\u770b/\u6536\u8d77 · h \u9690\u85cf · r \u6062\u590d · / \u641c\u7d22 · ? \u5e2e\u52a9 · q \u5173\u95ed" : "j/k move · Enter view/collapse · h hide · r restore · / search · ? help · q close";
+    },
+    tuiHelpTitle: () => zh ? "Context Editor \u5feb\u6377\u952e" : "Context Editor help",
+    tuiHelpLines: () => zh
+      ? [
+        "Enter  \u4e34\u65f6\u5c55\u5f00/\u6536\u8d77\uff0c\u4e0d\u4fdd\u5b58",
+        "h      \u6301\u4e45\u9690\u85cf\uff1br      \u6062\u590d\u9690\u85cf\u5355\u5143",
+        "Space  \u9009\u62e9/\u53d6\u6d88\uff1bShift+↑/↓ \u8fde\u7eed\u9009\u62e9",
+        "j/k、↑/↓、PgUp/PgDn \u5bfc\u822a\uff1bg/G \u8df3\u5230\u9996\u5c3e",
+        "/      \u641c\u7d22\uff1bn \u4e0b\u4e00\u4e2a\uff0cN \u4e0a\u4e00\u4e2a\u547d\u4e2d",
+        "s      \u5207\u6362\u5bf9\u8bdd/\u5168\u6587\u641c\u7d22\u8303\u56f4",
+        "1/2/3  \u7b5b\u9009\u7528\u6237\u3001AI、\u5de5\u5177\uff1ba \u5168\u9009\u5f53\u524d\u7ed3\u679c",
+        "u \u64a4\u9500\uff1bv \u4e34\u65f6\u663e\u793a\u9690\u85cf\u6b63\u6587",
+        "R  \u6062\u590d\u5168\u90e8\u9690\u85cf\u5355\u5143\uff08\u517c\u5bb9\u952e\uff09",
+      ]
+      : [
+        "Enter  temporarily expand/collapse; does not persist",
+        "h      persistently hide; r      restore hidden",
+        "Space  select; Shift+↑/↓ extend the selection",
+        "j/k, arrows, PgUp/PgDn navigate; g/G jump to ends",
+        "/      search; n next, N previous occurrence",
+        "s      dialogue/full search scope",
+        "1/2/3 filter User, AI, Tool; a select all visible matches",
+        "u undo; v reveal hidden content temporarily",
+        "R restore all hidden units (compatibility shortcut)",
+      ],
     savePrefsFailed: (error) => zh ? `Context Editor 偏好保存失败：${error}` : `Context Editor preferences could not be saved: ${error}`,
     sessionChanged: () => zh ? "Session 或分支已变化，已清空临时选择。" : "The Session or branch changed; temporary selection was cleared.",
     sidecarChanged: () => zh ? "会话或 sidecar 已变化，已刷新 Context Editor。" : "The conversation or sidecar changed; Context Editor was refreshed.",

@@ -16,22 +16,28 @@ Agent Context Editor 在原有 Session 之上建立一个独立的结构化管�
 
 第一阶段已经在 Pi 和 DeepSeek Harness 上提供可用版本，包括：
 
-- 全篇会话文本搜索、命中次数统计和上一个/下一个结果定位；
+- 默认只搜索用户消息和 AI 最终回答，也可临时切换到全文搜索；支持命中次数统计和上一个/下一个结果定位；
 - User、AI、Tool 消息类型筛选及组合筛选；
 - 单条、连续范围和批量选择；
 - 可恢复的视觉隐藏、恢复全部、重置和撤销；
 - 使用 sidecar 持久化隐藏状态，不删除或改写原始 Session；
 - 在 DeepSeek Harness 中分别处理同一轮 AI 的 reasoning 和最终回答。
 
+Pi TUI 中，`Enter` 只临时展开或收起当前单元，`h` 和 `r` 分别持久隐藏
+与恢复。搜索会定位到第一个文字命中并自动居中、高亮，`n`/`N` 可逐个循环
+命中；隐藏正文默认不会泄露，只有打开显示隐藏内容后才会显示。
+
 当前隐藏只改变独立 Context Editor 视图，不会修改宿主的主聊天时间线，不会从后续
 模型输入中删除消息，也不会减少 Token。Pi TUI 的完整真实宿主验收仍在继续。
+
+Pi TUI 按 `s` 在“对话范围/全文范围”之间切换；DeepSeek Harness 在搜索框旁提供同样的切换按钮，Pi Desktop/RPC 在对话框中提供搜索范围项。范围只在当前编辑窗口生效，不写入 sidecar 或偏好；User/AI/Tool 类型筛选仍然有效。
 
 English 首页：[README.md](README.md)
 
 ## 当前发布内容
 
 - Pi 扩展 `pi-context-editor@0.4.0-alpha.1`：在 Pi TUI / Pi Desktop 中使用 `/ctx`，共享 Record/Unit Core，并把隐藏限定为视觉状态。
-- DeepSeek Harness 适配器 `context-editor-deepseek-harness@0.1.1`：在同一 Session 的 Context Editor 视图中，reasoning 与 answer 可以独立搜索、选择、隐藏、恢复和持久化。
+- DeepSeek Harness 适配器 `context-editor-deepseek-harness@0.1.4`：在同一 Session 的 Context Editor 视图中，控制区固定在顶部，AI 下可分别筛选思考与回答；搜索结果会在可用内容区域居中定位，搜索默认对话范围并可临时切换全文。
 - Pi Context Desktop `0.1.4`：位于独立 fork [jermaine123123/pi-app](https://github.com/jermaine123123/pi-app) 的 Windows x64 社区构建。
 
 DeepSeek 适配器把隐藏状态写入 `context_editor` sidecar，不改写原始 Harness
@@ -71,7 +77,7 @@ V1 视觉 CustomEntry 兼容路径。Pi 不注册上下文替换 hook，Tool Out
 
 ```sh
 pi install ./pi-context-editor-0.4.0-alpha.1.tgz
-dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.1.1.tgz
+dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.1.4.tgz
 ```
 
 Pi Desktop 还需要运行 `adapters/pi-extension/scripts/install-desktop.ps1`，脚本支持

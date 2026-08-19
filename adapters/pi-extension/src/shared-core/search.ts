@@ -1,19 +1,29 @@
 /* GENERATED FROM packages/context-editor-core; do not edit directly. */
-import type { ContextEditableUnit, ContextRecord, ContextRecordKind, ContextSearchMatch } from './types.js'
+import type { AtomKind, ContextEditableUnit, ContextEditableUnitKind, ContextRecord, ContextRecordKind, ContextSearchMatch, ContextSearchOccurrence, ContextSearchScope } from './types.js'
 
 export function normalizeSearchQuery(query: string): string {
   return query.trim().toLocaleLowerCase()
 }
 
-export function searchRecords(
+export function normalizeSearchScope(scope: unknown): ContextSearchScope {
+  return scope === 'all' ? 'all' : 'dialogue'
+}
+
+export function atomMatchesSearchScope(kind: AtomKind, scope: ContextSearchScope = 'dialogue'): boolean {
+  return normalizeSearchScope(scope) === 'all' || kind === 'user' || kind === 'assistant_text'
+}
+
+export function searchOccurrences(
   records: readonly ContextRecord[],
   query: string,
   enabledKinds: ReadonlySet<ContextRecordKind>,
-): ContextSearchMatch[] {
+  scope: ContextSearchScope = 'dialogue',
+  enabledUnitKinds?: ReadonlySet<ContextEditableUnitKind>,
+): ContextSearchOccurrence[] {
   const needle = normalizeSearchQuery(query)
   if (!needle) return []
-  type Occurrence = Omit<ContextSearchMatch, 'index' | 'total' | 'occurrenceCount'>
-  const grouped = new Map<string, { record: ContextRecord; unit: ContextEditableUnit; occurrences: Occurrence[] }>()
+  const normalizedScope = normalizeSearchScope(scope)
+  const occurrences: ContextSearchOccurrence[] = []
   const addMatches = (
     record: ContextRecord,
     unit: ContextEditableUnit,
@@ -29,8 +39,7 @@ export function searchRecords(
     while (from < lowered.length) {
       const start = lowered.indexOf(needle, from)
       if (start < 0) break
-      const group = grouped.get(unit.id) ?? { record, unit, occurrences: [] }
-      group.occurrences.push({
+      occurrences.push({
         recordId: record.id,
         recordKind: record.kind,
         unitId: unit.id,
@@ -43,7 +52,6 @@ export function searchRecords(
         end: start + needle.length,
         excerpt: haystack.slice(Math.max(0, start - 80), Math.min(haystack.length, start + needle.length + 120)),
       })
-      grouped.set(unit.id, group)
       from = start + Math.max(needle.length, 1)
     }
   }
@@ -59,9 +67,11 @@ export function searchRecords(
           atoms: record.atoms,
           viewState: record.viewState,
           mutable: record.mutable,
-        } satisfies ContextEditableUnit]
+    } satisfies ContextEditableUnit]
     for (const unit of units) {
+      if (enabledUnitKinds !== undefined && !enabledUnitKinds.has(unit.kind)) continue
       for (const atom of unit.atoms) {
+        if (!atomMatchesSearchScope(atom.kind, normalizedScope)) continue
         if (atom.toolName) addMatches(record, unit, atom.id, atom.sourceRef.blockIndex, 'tool_name', atom.toolName, atom.sourceRef.entryId)
         const field: ContextSearchMatch['field'] = atom.kind === 'reasoning'
           ? 'reasoning'
@@ -74,15 +84,32 @@ export function searchRecords(
       }
     }
   }
+  return occurrences
+}
+
+export function searchRecords(
+  records: readonly ContextRecord[],
+  query: string,
+  enabledKinds: ReadonlySet<ContextRecordKind>,
+  scope: ContextSearchScope = 'dialogue',
+  enabledUnitKinds?: ReadonlySet<ContextEditableUnitKind>,
+): ContextSearchMatch[] {
+  const occurrences = searchOccurrences(records, query, enabledKinds, scope, enabledUnitKinds)
+  const grouped = new Map<string, ContextSearchOccurrence[]>()
+  for (const occurrence of occurrences) {
+    const group = grouped.get(occurrence.unitId) ?? []
+    group.push(occurrence)
+    grouped.set(occurrence.unitId, group)
+  }
   const groups = Array.from(grouped.values())
   return groups.map((group, index) => {
-    const first = group.occurrences[0]
-    if (!first) throw new Error(`search record ${group.record.id} has no occurrence`)
+    const first = group[0]
+    if (!first) throw new Error('search record has no occurrence')
     return {
       ...first,
       index,
       total: groups.length,
-      occurrenceCount: group.occurrences.length,
+      occurrenceCount: group.length,
     }
   })
 }

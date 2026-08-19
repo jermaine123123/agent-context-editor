@@ -1,5 +1,5 @@
 /* GENERATED FILE - rebuild with npm run build:pi. */
-/* Canonical Core source digest: 88c7f4a040e5ace3689ed76567ae5ace5124725753a4a1a7db2c3e57ca8270bc */
+/* Canonical Core source digest: 903a4588d3a0f0ac1d5bc66796a6557dfa249698a4b5737a8b9b59c1809626d9 */
 import { decodeKittyPrintable, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -150,10 +150,17 @@ function projectRecords(atoms, states) {
 function normalizeSearchQuery(query) {
 	return query.trim().toLocaleLowerCase();
 }
-function searchRecords(records, query, enabledKinds) {
+function normalizeSearchScope(scope) {
+	return scope === "all" ? "all" : "dialogue";
+}
+function atomMatchesSearchScope(kind, scope = "dialogue") {
+	return normalizeSearchScope(scope) === "all" || kind === "user" || kind === "assistant_text";
+}
+function searchOccurrences(records, query, enabledKinds, scope = "dialogue", enabledUnitKinds) {
 	const needle = normalizeSearchQuery(query);
 	if (!needle) return [];
-	const grouped = /* @__PURE__ */ new Map();
+	const normalizedScope = normalizeSearchScope(scope);
+	const occurrences = [];
 	const addMatches = (record, unit, atomId, blockIndex, field, haystack, anchorEntryId = record.anchorEntryId) => {
 		if (!haystack) return;
 		const lowered = haystack.toLocaleLowerCase();
@@ -161,12 +168,7 @@ function searchRecords(records, query, enabledKinds) {
 		while (from < lowered.length) {
 			const start = lowered.indexOf(needle, from);
 			if (start < 0) break;
-			const group = grouped.get(unit.id) ?? {
-				record,
-				unit,
-				occurrences: []
-			};
-			group.occurrences.push({
+			occurrences.push({
 				recordId: record.id,
 				recordKind: record.kind,
 				unitId: unit.id,
@@ -179,7 +181,6 @@ function searchRecords(records, query, enabledKinds) {
 				end: start + needle.length,
 				excerpt: haystack.slice(Math.max(0, start - 80), Math.min(haystack.length, start + needle.length + 120))
 			});
-			grouped.set(unit.id, group);
 			from = start + Math.max(needle.length, 1);
 		}
 	};
@@ -194,21 +195,35 @@ function searchRecords(records, query, enabledKinds) {
 			viewState: record.viewState,
 			mutable: record.mutable
 		}];
-		for (const unit of units) for (const atom of unit.atoms) {
-			if (atom.toolName) addMatches(record, unit, atom.id, atom.sourceRef.blockIndex, "tool_name", atom.toolName, atom.sourceRef.entryId);
-			const field = atom.kind === "reasoning" ? "reasoning" : atom.kind === "tool_output" ? "tool_output" : atom.kind === "tool_call" ? "tool_args" : "message";
-			addMatches(record, unit, atom.id, atom.sourceRef.blockIndex, field, atom.text, atom.sourceRef.entryId);
+		for (const unit of units) {
+			if (enabledUnitKinds !== void 0 && !enabledUnitKinds.has(unit.kind)) continue;
+			for (const atom of unit.atoms) {
+				if (!atomMatchesSearchScope(atom.kind, normalizedScope)) continue;
+				if (atom.toolName) addMatches(record, unit, atom.id, atom.sourceRef.blockIndex, "tool_name", atom.toolName, atom.sourceRef.entryId);
+				const field = atom.kind === "reasoning" ? "reasoning" : atom.kind === "tool_output" ? "tool_output" : atom.kind === "tool_call" ? "tool_args" : "message";
+				addMatches(record, unit, atom.id, atom.sourceRef.blockIndex, field, atom.text, atom.sourceRef.entryId);
+			}
 		}
+	}
+	return occurrences;
+}
+function searchRecords(records, query, enabledKinds, scope = "dialogue", enabledUnitKinds) {
+	const occurrences = searchOccurrences(records, query, enabledKinds, scope, enabledUnitKinds);
+	const grouped = /* @__PURE__ */ new Map();
+	for (const occurrence of occurrences) {
+		const group = grouped.get(occurrence.unitId) ?? [];
+		group.push(occurrence);
+		grouped.set(occurrence.unitId, group);
 	}
 	const groups = Array.from(grouped.values());
 	return groups.map((group, index) => {
-		const first = group.occurrences[0];
-		if (!first) throw new Error(`search record ${group.record.id} has no occurrence`);
+		const first = group[0];
+		if (!first) throw new Error("search record has no occurrence");
 		return {
 			...first,
 			index,
 			total: groups.length,
-			occurrenceCount: group.occurrences.length
+			occurrenceCount: group.length
 		};
 	});
 }
@@ -455,7 +470,9 @@ var ContextEditorService = class {
 	}
 	searchContextRecords(adapter, input) {
 		const state = currentState(adapter);
-		const matches = searchRecords(state.records, input.query, enabledRecordKinds(input.enabledKinds));
+		const scope = input.scope === "all" ? "all" : "dialogue";
+		const enabledUnitKinds = Array.isArray(input.enabledUnitKinds) ? new Set(input.enabledUnitKinds.filter((value) => value === "reasoning" || value === "answer" || value === "user" || value === "tool")) : void 0;
+		const matches = searchRecords(state.records, input.query, enabledRecordKinds(input.enabledKinds), scope, enabledUnitKinds);
 		const id = `context-search-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 		this.searchCache.set(id, {
 			id,
@@ -859,19 +876,6 @@ function stateWithViewFilter(state, viewFilter, sourceLeafId) {
 //#endregion
 //#region adapters/pi-extension/src/filter.ts
 const DEFAULT_ENABLED_KINDS = /* @__PURE__ */ new Set(["user", "assistant_text"]);
-function matchesFilter(atom, filter) {
-	if (!filter.enabledKinds.has(atom.kind)) return false;
-	const query = filter.query.trim().toLocaleLowerCase();
-	if (!query) return true;
-	return [
-		atom.kind,
-		atom.toolName ?? "",
-		atom.text
-	].join(" ").toLocaleLowerCase().includes(query);
-}
-function filterAtoms(atoms, filter) {
-	return atoms.filter((atom) => matchesFilter(atom, filter));
-}
 //#endregion
 //#region adapters/pi-extension/src/locale.ts
 /** Resolve the host language without depending on Pi's optional UI settings API. */
@@ -958,6 +962,7 @@ function createPiText(locale) {
 		savedMessage: (hidden) => zh ? `已保存当前对话状态：隐藏 ${hidden} 条。隐藏和筛选只影响记录管理器，不会改变主聊天窗口或模型上下文；下次打开时会恢复这些设置。` : `Conversation state saved: ${hidden} hidden. Hiding and filtering only affect the record manager; the main chat and model context are unchanged, and these settings will be restored next time.`,
 		searchTitle: () => zh ? "搜索对话记录" : "Search conversation records",
 		searchPlaceholder: () => zh ? "输入关键词；留空清除" : "Enter a keyword; leave blank to clear",
+		searchScope: (scope) => scope === "all" ? zh ? "搜索范围：全文" : "Search scope: Full" : zh ? "搜索范围：对话" : "Search scope: Dialogue",
 		hiddenSummary: (hidden, shown) => zh ? `已隐藏记录（${shown ? "当前显示" : "当前不显示"}）` : `Hidden records (${shown ? "shown" : "hidden"})`,
 		resetSummary: (hidden) => zh ? `重置当前对话状态（已隐藏 ${hidden}）` : `Reset current conversation state (${hidden} hidden)`,
 		browseSummary: (matches, total) => zh ? `浏览对话记录（${matches}/${total}）` : `Browse conversation records (${matches}/${total})`,
@@ -965,11 +970,47 @@ function createPiText(locale) {
 		typeSummary: (count, total) => `${zh ? "筛选对话记录类型" : "Filter record types"} (${count}/${total})`,
 		unitTitle: (unitKind, recordKind, state, tokens) => `${unitKind} · ${recordKind} · ${state} · ${tokens} tok`,
 		hiddenUnit: (unitKind) => zh ? `    ${unitKind} 已隐藏 · 按 v 显示` : `    ${unitKind} hidden · press v to reveal`,
+		hiddenSearchHit: () => zh ? " · " : " · match is in hidden content",
 		tuiTitle: (units) => `${zh ? "Pi Context Editor" : "Pi Context Editor"}  ${units} ${zh ? "单元" : "units"}`,
 		unitCount: (units) => `${units} ${zh ? "单元" : "units"}`,
-		tuiSearch: (query, count, index) => zh ? `搜索：${query}▌  ${count} 单元` : `Search: ${query}▌  ${count} units`,
-		tuiSearchIdle: (query, count, index) => `${zh ? "搜索" : "Search"}: ${query || (zh ? "（按 /）" : "(press /)")}${count > 0 ? ` · ${index + 1}/${count}` : ""}`,
-		tuiStatus: () => zh ? "j/k 移动 · shift+↑/↓ 区间选择 · 空格选择 · enter 展开 · h 隐藏 · r 恢复 · u 撤销 · v 显示 · q 关闭" : "j/k move · shift+↑/↓ range · space select · enter expand · h hide · r restore · u undo · v reveal · q close",
+		tuiSearch: (query, count, _index, scope = "dialogue") => {
+			const scopeLabel = scope === "all" ? zh ? "全文" : "full" : zh ? "对话" : "dialogue";
+			return zh ? `\u641c\u7d22\uff1a[${scopeLabel}] ${query}▌ · ${count} \u4e2a\u547d\u4e2d` : `Search: [${scopeLabel}] ${query}▌ · ${count} matches`;
+		},
+		tuiSearchIdle: (query, count, index, scope = "dialogue") => {
+			const scopeLabel = scope === "all" ? zh ? "全文" : "full" : query ? zh ? "对话" : "dialogue" : "";
+			const prefix = `${zh ? "搜索" : "Search"}${zh ? "：" : ": "}${query || (zh ? "（按 / 搜索）" : "(press /)")}${scopeLabel ? ` · ${scopeLabel}` : ""}`;
+			if (count <= 0) return prefix;
+			return `${prefix} · ${index >= 0 ? `${index + 1}/${count}` : `${count} ${zh ? "个命中" : "matches"}`}`;
+		},
+		tuiStatus: (mode = "normal", scope = "dialogue") => {
+			if (mode === "search") return zh ? "输入关键词 · Enter 跳转 · Esc 结束搜索" : "Type a query · Enter jump · Esc finish search";
+			if (mode === "results") return zh ? "n 下一个命中，N 上一个命中 · s 切换范围 · / 修改搜索 · ? 帮助 · q 关闭" : "n next / N previous occurrence · s toggle scope · / edit search · ? help · q close";
+			if (mode === "help") return zh ? "? Esc 返回编辑器" : "? / Esc return to editor";
+			return zh ? "j/k · Enter 查看/收起 · h 隐藏 · r 恢复 · / 搜索 · ? 帮助 · q 关闭" : "j/k move · Enter view/collapse · h hide · r restore · / search · ? help · q close";
+		},
+		tuiHelpTitle: () => zh ? "Context Editor 快捷键" : "Context Editor help",
+		tuiHelpLines: () => zh ? [
+			"Enter  临时展开/收起，不保存",
+			"h      持久隐藏；r      恢复隐藏单元",
+			"Space  选择/取消；Shift+↑/↓ 连续选择",
+			"j/k、↑/↓、PgUp/PgDn 导航；g/G 跳到首尾",
+			"/      搜索；n 下一个，N 上一个命中",
+			"s      切换对话/全文搜索范围",
+			"1/2/3  筛选用户、AI、工具；a 全选当前结果",
+			"u 撤销；v 临时显示隐藏正文",
+			"R  恢复全部隐藏单元（兼容键）"
+		] : [
+			"Enter  temporarily expand/collapse; does not persist",
+			"h      persistently hide; r      restore hidden",
+			"Space  select; Shift+↑/↓ extend the selection",
+			"j/k, arrows, PgUp/PgDn navigate; g/G jump to ends",
+			"/      search; n next, N previous occurrence",
+			"s      dialogue/full search scope",
+			"1/2/3 filter User, AI, Tool; a select all visible matches",
+			"u undo; v reveal hidden content temporarily",
+			"R restore all hidden units (compatibility shortcut)"
+		],
 		savePrefsFailed: (error) => zh ? `Context Editor 偏好保存失败：${error}` : `Context Editor preferences could not be saved: ${error}`,
 		sessionChanged: () => zh ? "Session 或分支已变化，已清空临时选择。" : "The Session or branch changed; temporary selection was cleared.",
 		sidecarChanged: () => zh ? "会话或 sidecar 已变化，已刷新 Context Editor。" : "The conversation or sidecar changed; Context Editor was refreshed.",
@@ -1017,10 +1058,15 @@ function detailText(text, atom) {
 	return `${metadata}\n\n${body.length > MAX_EDITOR_CHARS ? `${body.slice(0, MAX_EDITOR_CHARS)}\n\n${text.truncatedDetail(MAX_EDITOR_CHARS)}` : body}`;
 }
 function visibleAtoms(atoms, state, filter) {
-	return filterAtoms(atoms, {
-		enabledKinds: filter.enabledKinds,
-		query: filter.query
-	}).filter((atom) => filter.showHidden || atomState(state, atom).viewState !== "hide");
+	const query = filter.query.trim().toLocaleLowerCase();
+	return atoms.filter((atom) => {
+		if (!filter.enabledKinds.has(atom.kind)) return false;
+		if (query) {
+			if (!atomMatchesSearchScope(atom.kind, filter.searchScope)) return false;
+			if (![atom.toolName ?? "", atom.text].join(" ").toLocaleLowerCase().includes(query)) return false;
+		}
+		return filter.showHidden || atomState(state, atom).viewState !== "hide";
+	});
 }
 function stateSummary(atoms, state) {
 	let hidden = 0;
@@ -1146,7 +1192,8 @@ async function runDesktopContextEditor(deps) {
 	const filter = {
 		enabledKinds: new Set(savedFilter?.enabledKinds ?? DEFAULT_ENABLED_KINDS),
 		query: savedFilter?.query ?? "",
-		showHidden: savedFilter?.showHidden ?? false
+		showHidden: savedFilter?.showHidden ?? false,
+		searchScope: "dialogue"
 	};
 	while (true) {
 		const matches = visibleAtoms(deps.atoms, state, filter);
@@ -1156,6 +1203,7 @@ async function runDesktopContextEditor(deps) {
 		const selected = await deps.ui.select("Pi Context Editor", [
 			text.browseSummary(matches.length, deps.atoms.length),
 			`${text.search}${searchLabel}`,
+			text.searchScope(filter.searchScope),
 			text.typeSummary(filter.enabledKinds.size, ATOM_KINDS.length),
 			text.hiddenSummary(summary.hidden, filter.showHidden),
 			text.resetSummary(summary.hidden),
@@ -1177,6 +1225,10 @@ async function runDesktopContextEditor(deps) {
 			}
 			continue;
 		}
+		if (selected === text.searchScope(filter.searchScope)) {
+			filter.searchScope = filter.searchScope === "dialogue" ? "all" : "dialogue";
+			continue;
+		}
 		if (selected.startsWith(text.types)) {
 			await editTypeFilter(text, flowDeps.ui, filter);
 			state = persistFilterState(flowDeps, state, filter);
@@ -1194,6 +1246,7 @@ async function runDesktopContextEditor(deps) {
 				filter.enabledKinds = new Set(DEFAULT_ENABLED_KINDS);
 				filter.query = "";
 				filter.showHidden = false;
+				filter.searchScope = "dialogue";
 				state = persistFilterState(flowDeps, state, filter);
 			}
 		}
@@ -1236,8 +1289,12 @@ var ContextEditorComponent = class {
 	rangeAnchor = null;
 	expanded = /* @__PURE__ */ new Set();
 	searchMode = false;
+	helpMode = false;
+	searchScope = "dialogue";
 	matches = [];
 	matchIndex = -1;
+	lastRenderWidth = 0;
+	lastRenderRows = 0;
 	bodyCache = /* @__PURE__ */ new Map();
 	constructor(tui, theme, records, snapshot, prefs, deps, done) {
 		this.tui = tui;
@@ -1275,25 +1332,58 @@ var ContextEditorComponent = class {
 	currentUnit() {
 		return this.flatUnits()[this.selectedIndex];
 	}
-	contentText(unit) {
-		return unit.atoms.map((atom) => atom.text).filter(Boolean).join("\n");
+	highlightText(text, start, end) {
+		if (start < 0 || end <= start || start >= text.length) return text;
+		const safeEnd = Math.min(text.length, end);
+		return `${text.slice(0, start)}${this.theme.fg("warning", text.slice(start, safeEnd))}${text.slice(safeEnd)}`;
+	}
+	contentText(unit, activeHit) {
+		return unit.atoms.map((atom) => {
+			if (activeHit && activeHit.field !== "tool_name" && activeHit.atomId === atom.id) return this.highlightText(atom.text, activeHit.start, activeHit.end);
+			return atom.text;
+		}).filter(Boolean).join("\n");
 	}
 	unitIsHidden(unit) {
 		return unit.viewState === "hide" || unit.viewState === "mixed";
 	}
-	bodyLinesFor(unit, width) {
-		const text = this.contentText(unit);
+	bodyLinesFor(unit, width, activeHit) {
+		const text = this.contentText(unit, activeHit);
 		const available = Math.max(8, width - 8);
+		const highlightKey = activeHit ? `${activeHit.atomId}:${activeHit.field}:${activeHit.start}:${activeHit.end}` : "";
 		const cached = this.bodyCache.get(unit.id);
-		if (cached && cached.width === available && cached.text === text) return cached.lines;
+		if (cached && cached.width === available && cached.text === text && cached.highlightKey === highlightKey) return cached.lines;
 		const lines = wrapTextWithAnsi(text || " ", available);
 		const normalized = lines.length > 0 ? lines : [" "];
 		this.bodyCache.set(unit.id, {
 			width: available,
 			text,
+			highlightKey,
 			lines: normalized
 		});
 		return normalized;
+	}
+	activeHitForUnit(unit) {
+		const hit = this.matches[this.matchIndex];
+		return hit?.unitId === unit.id ? hit : void 0;
+	}
+	toolNameForUnit(unit) {
+		const atom = unit.atoms.find((candidate) => !!candidate.toolName);
+		return atom?.toolName ? {
+			name: atom.toolName,
+			atomId: atom.id
+		} : void 0;
+	}
+	titleText(record, unit, index, activeHit) {
+		const selected = this.selected.has(unit.id);
+		const cursor = index === this.selectedIndex ? "▶" : " ";
+		const checkbox = selected ? "[x]" : "[ ]";
+		const hidden = this.unitIsHidden(unit);
+		const state = hidden ? unit.viewState === "mixed" ? "partial" : "hidden" : "shown";
+		const base = `${cursor} ${checkbox} ${this.text.unitKind(unit.kind)} · ${this.text.recordKind(record.kind)} · ${this.text.unitState(state)} · ${unit.atoms.reduce((sum, atom) => sum + atom.approxTokens, 0)} tok`;
+		if (hidden && !this.prefs.showHidden) return base;
+		const tool = this.toolNameForUnit(unit);
+		if (!tool) return base;
+		return `${base} · ${activeHit?.field === "tool_name" && activeHit.atomId === tool.atomId ? this.highlightText(tool.name, activeHit.start, activeHit.end) : tool.name}`;
 	}
 	unitLineCount(item, width) {
 		const { unit } = item;
@@ -1307,16 +1397,16 @@ var ContextEditorComponent = class {
 		return this.flatUnits().slice(start, end).map((item, offset) => {
 			const index = start + offset;
 			const { record, unit } = item;
-			const selected = this.selected.has(unit.id);
-			const cursor = index === this.selectedIndex ? "▶" : " ";
-			const checkbox = selected ? "[x]" : "[ ]";
+			const activeHit = this.activeHitForUnit(unit);
 			const hidden = this.unitIsHidden(unit);
-			const state = hidden ? unit.viewState === "mixed" ? "partial" : "hidden" : "shown";
-			const title = `${cursor} ${checkbox} ${this.text.unitKind(unit.kind)} · ${this.text.recordKind(record.kind)} · ${this.text.unitState(state)} · ${unit.atoms.reduce((sum, atom) => sum + atom.approxTokens, 0)} tok`;
+			hidden && unit.viewState;
+			const title = this.titleText(record, unit, index, activeHit);
 			const titleLine = this.theme.fg(colorForKind(record.kind), title);
 			const lines = [index === this.selectedIndex ? this.theme.bg("selectedBg", visiblePad(titleLine, width)) : visiblePad(titleLine, width)];
-			if (hidden && !this.prefs.showHidden) lines.push(visiblePad(this.theme.fg("dim", this.text.hiddenUnit(this.text.unitKind(unit.kind))), width));
-			else if (this.expanded.has(unit.id) || hidden && this.prefs.showHidden) for (const line of this.bodyLinesFor(unit, width)) lines.push(visiblePad(this.theme.fg("dim", `    │ ${line}`), width));
+			if (hidden && !this.prefs.showHidden) {
+				const hiddenLabel = this.activeHitForUnit(unit) ? `${this.text.hiddenUnit(this.text.unitKind(unit.kind))}${this.text.hiddenSearchHit()}` : this.text.hiddenUnit(this.text.unitKind(unit.kind));
+				lines.push(visiblePad(this.theme.fg("dim", hiddenLabel), width));
+			} else if (this.expanded.has(unit.id) || hidden && this.prefs.showHidden) for (const line of this.bodyLinesFor(unit, width, activeHit)) lines.push(visiblePad(this.theme.fg("dim", `    │ ${line}`), width));
 			return {
 				item,
 				lines
@@ -1348,11 +1438,49 @@ var ContextEditorComponent = class {
 		this.tui.requestRender();
 	}
 	ensureSelectionVisible(width = this.tui.terminal.columns) {
-		const selectedLine = this.flatUnits().slice(0, this.selectedIndex).reduce((sum, item) => sum + this.unitLineCount(item, width), 0);
+		const selectedLine = this.unitStartOffset(this.selectedIndex, width);
 		const viewport = this.availableRows();
 		if (selectedLine < this.scrollOffset) this.scrollOffset = selectedLine;
 		if (selectedLine >= this.scrollOffset + viewport) this.scrollOffset = selectedLine - viewport + 1;
 		this.scrollOffset = Math.max(0, this.scrollOffset);
+	}
+	unitStartOffset(index, width) {
+		return this.flatUnits().slice(0, index).reduce((sum, item) => sum + this.unitLineCount(item, width), 0);
+	}
+	bodyLineIndexForHit(unit, hit, width) {
+		if (hit.field === "tool_name") return 0;
+		const atomIndex = unit.atoms.findIndex((atom) => atom.id === hit.atomId);
+		if (atomIndex < 0) return 0;
+		const preceding = unit.atoms.slice(0, atomIndex).map((atom) => atom.text).filter(Boolean).join("\n");
+		const target = unit.atoms[atomIndex]?.text ?? "";
+		const prefix = preceding ? `${preceding}\n${target.slice(0, hit.start)}` : target.slice(0, hit.start);
+		return Math.max(0, wrapTextWithAnsi(prefix || " ", Math.max(8, width - 8)).length - 1);
+	}
+	positionSearchHit(width) {
+		const hit = this.matches[this.matchIndex];
+		if (!hit) return;
+		const units = this.flatUnits();
+		const unitIndex = units.findIndex(({ unit }) => unit.id === hit.unitId);
+		if (unitIndex < 0) return;
+		const unit = units[unitIndex]?.unit;
+		if (!unit) return;
+		const hidden = this.unitIsHidden(unit) && !this.prefs.showHidden;
+		if (!hidden) this.expanded.add(unit.id);
+		const unitStart = this.unitStartOffset(unitIndex, width);
+		const targetLine = hidden ? unitStart + 1 : unitStart + (hit.field === "tool_name" ? 0 : 1 + this.bodyLineIndexForHit(unit, hit, width));
+		this.scrollOffset = Math.max(0, targetLine - Math.floor(this.availableRows() / 2));
+		this.manualScroll = true;
+		this.clampScroll(width);
+	}
+	focusSearchHit(index) {
+		if (!this.matches[index]) return;
+		this.matchIndex = index;
+		const unitIndex = this.flatUnits().findIndex(({ unit }) => unit.id === this.matches[index]?.unitId);
+		if (unitIndex < 0) return;
+		this.selectedIndex = unitIndex;
+		this.resetSelection();
+		this.positionSearchHit(Math.max(24, this.tui.terminal.columns));
+		this.tui.requestRender();
 	}
 	/** Build only rows intersecting the terminal viewport. Long bodies outside
 	* the viewport are never converted into strings during this frame. */
@@ -1396,7 +1524,7 @@ var ContextEditorComponent = class {
 		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.flatUnits().length - 1));
 		this.manualScroll = false;
 		this.resetSelection();
-		this.matches = [];
+		this.matches = this.query.trim() ? searchOccurrences(this.records, this.query, new Set(this.prefs.enabledKinds), this.searchScope) : [];
 		this.matchIndex = -1;
 		this.ensureSelectionVisible();
 		this.tui.requestRender();
@@ -1411,7 +1539,7 @@ var ContextEditorComponent = class {
 		this.scrollOffset = 0;
 		this.manualScroll = false;
 		this.resetSelection();
-		this.matches = [];
+		this.matches = this.query.trim() ? searchOccurrences(this.records, this.query, new Set(this.prefs.enabledKinds), this.searchScope) : [];
 		this.matchIndex = -1;
 		this.notify(this.text.sessionChanged(), "info");
 	}
@@ -1444,31 +1572,29 @@ var ContextEditorComponent = class {
 			const hi = Math.max(this.rangeAnchor, this.selectedIndex);
 			this.selected = new Set(this.flatUnits().slice(lo, hi + 1).map(({ unit }) => unit.id));
 		} else if (!extend) this.resetSelection();
+		this.matchIndex = -1;
 		this.manualScroll = false;
 		this.ensureSelectionVisible();
 		this.tui.requestRender();
 	}
 	refreshSearch() {
-		this.matches = searchRecords(this.records, this.query, new Set(this.prefs.enabledKinds));
-		this.matchIndex = this.matches.length > 0 ? 0 : -1;
+		this.matches = searchOccurrences(this.records, this.query, new Set(this.prefs.enabledKinds), this.searchScope);
+		this.matchIndex = -1;
 		this.resetSelection();
-		this.focusMatch();
-	}
-	focusMatch() {
-		const match = this.matches[this.matchIndex];
-		if (!match) return;
-		const index = this.flatUnits().findIndex(({ unit }) => unit.id === match.unitId);
-		if (index >= 0) {
-			this.selectedIndex = index;
-			this.resetSelection();
-			this.ensureSelectionVisible();
-		}
 		this.tui.requestRender();
+	}
+	toggleSearchScope() {
+		this.searchScope = this.searchScope === "dialogue" ? "all" : "dialogue";
+		this.matches = searchOccurrences(this.records, this.query, new Set(this.prefs.enabledKinds), this.searchScope);
+		this.matchIndex = -1;
+		this.resetSelection();
+		if (this.query.trim() && this.matches.length > 0) this.focusSearchHit(0);
+		else this.tui.requestRender();
 	}
 	nextMatch(delta) {
 		if (this.matches.length === 0) return;
-		this.matchIndex = (this.matchIndex + delta + this.matches.length) % this.matches.length;
-		this.focusMatch();
+		const start = this.matchIndex < 0 ? delta < 0 ? this.matches.length - 1 : 0 : this.matchIndex + delta;
+		this.focusSearchHit((start + this.matches.length) % this.matches.length);
 	}
 	toggleKind(kind) {
 		const enabled = new Set(this.prefs.enabledKinds);
@@ -1494,6 +1620,9 @@ var ContextEditorComponent = class {
 		else this.selected = new Set(units.map(({ unit }) => unit.id));
 		this.tui.requestRender();
 	}
+	helpLines() {
+		return this.text.tuiHelpLines();
+	}
 	handleSearchInput(data) {
 		if (matchesKey(data, "escape")) {
 			this.searchMode = false;
@@ -1502,7 +1631,8 @@ var ContextEditorComponent = class {
 		}
 		if (matchesKey(data, "enter")) {
 			this.searchMode = false;
-			this.tui.requestRender();
+			if (this.matches.length > 0) this.focusSearchHit(0);
+			else this.tui.requestRender();
 			return;
 		}
 		if (matchesKey(data, "backspace")) {
@@ -1525,6 +1655,13 @@ var ContextEditorComponent = class {
 			this.handleSearchInput(data);
 			return;
 		}
+		if (this.helpMode) {
+			if (data === "?" || matchesKey(data, "escape") || data === "q" || data === "Q") {
+				this.helpMode = false;
+				this.tui.requestRender();
+			}
+			return;
+		}
 		if (matchesKey(data, "ctrl+c") || matchesKey(data, "escape")) {
 			this.done();
 			return;
@@ -1535,6 +1672,15 @@ var ContextEditorComponent = class {
 		}
 		if (data === "/") {
 			this.searchMode = true;
+			this.tui.requestRender();
+			return;
+		}
+		if (data === "s") {
+			this.toggleSearchScope();
+			return;
+		}
+		if (data === "?") {
+			this.helpMode = true;
 			this.tui.requestRender();
 			return;
 		}
@@ -1564,6 +1710,7 @@ var ContextEditorComponent = class {
 		}
 		if (data === "g") {
 			this.selectedIndex = 0;
+			this.matchIndex = -1;
 			this.manualScroll = false;
 			this.ensureSelectionVisible();
 			this.tui.requestRender();
@@ -1571,6 +1718,7 @@ var ContextEditorComponent = class {
 		}
 		if (data === "G") {
 			this.selectedIndex = Math.max(0, this.flatUnits().length - 1);
+			this.matchIndex = -1;
 			this.manualScroll = false;
 			this.ensureSelectionVisible();
 			this.tui.requestRender();
@@ -1598,7 +1746,8 @@ var ContextEditorComponent = class {
 				showHidden: !this.prefs.showHidden
 			};
 			this.savePrefs();
-			this.tui.requestRender();
+			if (this.matchIndex >= 0) this.focusSearchHit(this.matchIndex);
+			else this.tui.requestRender();
 			return;
 		}
 		if (data === "n") {
@@ -1623,6 +1772,7 @@ var ContextEditorComponent = class {
 			if (!unit) return;
 			if (this.expanded.has(unit.id)) this.expanded.delete(unit.id);
 			else this.expanded.add(unit.id);
+			this.matchIndex = -1;
 			this.manualScroll = false;
 			this.ensureSelectionVisible();
 			this.tui.requestRender();
@@ -1653,18 +1803,27 @@ var ContextEditorComponent = class {
 	}
 	render(width) {
 		const safeWidth = Math.max(24, width);
-		if (!this.manualScroll) this.ensureSelectionVisible(safeWidth);
-		const totalLines = this.totalLineCount(safeWidth);
 		const viewport = this.availableRows();
-		const maxOffset = Math.max(0, totalLines - viewport);
-		this.scrollOffset = Math.min(this.scrollOffset, maxOffset);
-		const visible = this.renderWindow(safeWidth, this.scrollOffset, this.scrollOffset + viewport);
+		let visible;
+		if (this.helpMode) visible = this.helpLines().slice(0, viewport);
+		else {
+			const layoutChanged = this.lastRenderWidth !== safeWidth || this.lastRenderRows !== this.tui.terminal.rows;
+			if (this.matchIndex >= 0 && layoutChanged) this.positionSearchHit(safeWidth);
+			if (!this.manualScroll) this.ensureSelectionVisible(safeWidth);
+			const totalLines = this.totalLineCount(safeWidth);
+			const maxOffset = Math.max(0, totalLines - viewport);
+			this.scrollOffset = Math.min(this.scrollOffset, maxOffset);
+			visible = this.renderWindow(safeWidth, this.scrollOffset, this.scrollOffset + viewport);
+		}
+		this.lastRenderWidth = safeWidth;
+		this.lastRenderRows = this.tui.terminal.rows;
 		while (visible.length < viewport) visible.push("");
 		const enabled = (kind) => this.prefs.enabledKinds.includes(kind) ? this.theme.fg("accent", this.text.recordKind(kind)) : this.theme.fg("dim", this.text.recordKind(kind));
-		const title = this.theme.fg("accent", "Pi Context Editor") + this.theme.fg("dim", `  ${this.text.unitCount(this.flatUnits().length)}`);
-		const mode = this.searchMode ? this.theme.fg("warning", this.text.tuiSearch(this.query, this.matches.length, this.matchIndex)) : this.theme.fg("dim", this.text.tuiSearchIdle(this.query, this.matches.length, this.matchIndex));
-		const filterLine = `${enabled("user")} [1]  ${enabled("ai")} [2]  ${enabled("tool")} [3]`;
-		const status = this.theme.fg("dim", this.text.tuiStatus());
+		const title = this.helpMode ? this.theme.fg("accent", this.text.tuiHelpTitle()) : this.theme.fg("accent", "Pi Context Editor") + this.theme.fg("dim", `  ${this.text.unitCount(this.flatUnits().length)}`);
+		const mode = this.helpMode ? this.theme.fg("dim", "") : this.searchMode ? this.theme.fg("warning", this.text.tuiSearch(this.query, this.matches.length, this.matchIndex, this.searchScope)) : this.theme.fg("dim", this.text.tuiSearchIdle(this.query, this.matches.length, this.matchIndex, this.searchScope));
+		const filterLine = this.helpMode ? "" : `${enabled("user")} [1]  ${enabled("ai")} [2]  ${enabled("tool")} [3]`;
+		const statusMode = this.helpMode ? "help" : this.searchMode ? "search" : this.matches.length > 0 ? "results" : "normal";
+		const status = this.theme.fg("dim", this.text.tuiStatus(statusMode, this.searchScope));
 		return [
 			visiblePad(title, safeWidth),
 			visiblePad(filterLine, safeWidth),
@@ -1893,10 +2052,11 @@ var PiContextEditorHost = class {
 	snapshot() {
 		return service.getSnapshot(this);
 	}
-	search(query, enabledKinds) {
+	search(query, enabledKinds, scope) {
 		return service.searchContextRecords(this, {
 			query,
-			enabledKinds
+			enabledKinds,
+			scope
 		});
 	}
 	searchMatch(input) {
@@ -1953,7 +2113,7 @@ var PiContextEditorHost = class {
 	}
 	async searchRecords(request) {
 		asLocator(request.locator, this.sessionId);
-		return this.search(request.query, request.enabledKinds);
+		return this.search(request.query, request.enabledKinds, request.scope);
 	}
 	async getSearchMatch(request) {
 		asLocator(request.locator, this.sessionId);

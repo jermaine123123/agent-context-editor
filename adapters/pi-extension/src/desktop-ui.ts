@@ -1,7 +1,6 @@
-import { DEFAULT_ENABLED_KINDS, filterAtoms } from "./filter.js";
+import { DEFAULT_ENABLED_KINDS } from "./filter.js";
 import { atomState, stateForAtoms, stateWithAtom, stateWithViewFilter } from "./state.js";
 import type {
-  AtomFilter,
   AtomKind,
   ContextAtom,
   ContextEditorStateV1,
@@ -9,6 +8,7 @@ import type {
 } from "./types.js";
 import { ATOM_KINDS } from "./types.js";
 import { createPiText, detectPiLocale, type PiLocale, type PiText } from "./locale.js";
+import { atomMatchesSearchScope, type ContextSearchScope } from "./shared-core/index.js";
 
 const PAGE_SIZE = 50;
 const MAX_EDITOR_CHARS = 100_000;
@@ -34,6 +34,8 @@ interface DesktopFilterState {
   enabledKinds: Set<AtomKind>;
   query: string;
   showHidden: boolean;
+  /** Search-only scope; intentionally not part of the persisted V1 filter. */
+  searchScope: ContextSearchScope;
 }
 
 function compactPreview(text: PiText, value: string, maxChars = 96): string {
@@ -81,13 +83,16 @@ function visibleAtoms(
   state: ContextEditorStateV1,
   filter: DesktopFilterState,
 ): ContextAtom[] {
-  const atomFilter: AtomFilter = {
-    enabledKinds: filter.enabledKinds,
-    query: filter.query,
-  };
-  return filterAtoms(atoms, atomFilter).filter(
-    (atom) => filter.showHidden || atomState(state, atom).viewState !== "hide",
-  );
+  const query = filter.query.trim().toLocaleLowerCase();
+  return atoms.filter((atom) => {
+    if (!filter.enabledKinds.has(atom.kind)) return false;
+    if (query) {
+      if (!atomMatchesSearchScope(atom.kind, filter.searchScope)) return false;
+      const haystack = [atom.toolName ?? "", atom.text].join(" ").toLocaleLowerCase();
+      if (!haystack.includes(query)) return false;
+    }
+    return filter.showHidden || atomState(state, atom).viewState !== "hide";
+  });
 }
 
 function stateSummary(atoms: readonly ContextAtom[], state: ContextEditorStateV1): { hidden: number } {
@@ -283,6 +288,7 @@ export async function runDesktopContextEditor(deps: DesktopEditorDeps): Promise<
     enabledKinds: new Set(savedFilter?.enabledKinds ?? DEFAULT_ENABLED_KINDS),
     query: savedFilter?.query ?? "",
     showHidden: savedFilter?.showHidden ?? false,
+    searchScope: "dialogue",
   };
 
   while (true) {
@@ -293,6 +299,7 @@ export async function runDesktopContextEditor(deps: DesktopEditorDeps): Promise<
     const selected = await deps.ui.select("Pi Context Editor", [
       text.browseSummary(matches.length, deps.atoms.length),
       `${text.search}${searchLabel}`,
+      text.searchScope(filter.searchScope),
       text.typeSummary(filter.enabledKinds.size, ATOM_KINDS.length),
       text.hiddenSummary(summary.hidden, filter.showHidden),
       text.resetSummary(summary.hidden),
@@ -320,6 +327,10 @@ export async function runDesktopContextEditor(deps: DesktopEditorDeps): Promise<
       }
       continue;
     }
+    if (selected === text.searchScope(filter.searchScope)) {
+      filter.searchScope = filter.searchScope === "dialogue" ? "all" : "dialogue";
+      continue;
+    }
     if (selected.startsWith(text.types)) {
       await editTypeFilter(text, flowDeps.ui, filter);
       state = persistFilterState(flowDeps, state, filter);
@@ -337,6 +348,7 @@ export async function runDesktopContextEditor(deps: DesktopEditorDeps): Promise<
         filter.enabledKinds = new Set(DEFAULT_ENABLED_KINDS);
         filter.query = "";
         filter.showHidden = false;
+        filter.searchScope = "dialogue";
         state = persistFilterState(flowDeps, state, filter);
       }
     }

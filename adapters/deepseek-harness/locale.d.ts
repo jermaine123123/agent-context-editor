@@ -12,9 +12,11 @@ export interface HarnessText {
   restore: string
   showHidden: string
   searchPlaceholder: string
+  searchPlaceholderForScope(scope: 'dialogue' | 'all'): string
   searchAria: string
   searchFailed(error: string): string
-  searchSummary(total: number, occurrences: number, current: number | undefined, index: number, active?: boolean): string
+  searchSummary(total: number, occurrences: number, current: number | undefined, index: number, active?: boolean, scope?: 'dialogue' | 'all'): string
+  searchScope(scope: 'dialogue' | 'all'): string
   previous: string
   next: string
   hideSelected(count: number): string

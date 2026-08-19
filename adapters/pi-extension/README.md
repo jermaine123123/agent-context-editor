@@ -15,6 +15,17 @@ Tool Output, or changes model input.
 This release does not exclude context, replace Tool Output, or filter Pi's
 main chat timeline.
 
+Search defaults to User messages and AI final answers. Press `s` outside the
+search input to temporarily include reasoning and Tool Call/Output content;
+the scope is reset to dialogue when `/ctx` is reopened and is never written to
+the sidecar or preferences. The User/AI/Tool type filters still apply.
+
+In the TUI, `Enter` is a temporary expand/collapse action, while `h` and `r`
+write reversible hide/restore events. Search selects the first occurrence,
+centers and highlights it, and `n`/`N` cycles through occurrences. Hidden
+matches remain protected until the user toggles hidden-content display with
+`v`.
+
 The editor resolves its UI language automatically. Chinese (`zh-*`) hosts use
 Chinese labels; other hosts use English labels. TUI and native `/ctx` dialogs
 resolve the system locale when the command opens. Conversation content is

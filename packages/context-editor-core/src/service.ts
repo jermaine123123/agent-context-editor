@@ -11,11 +11,13 @@ import {
 } from './state.js'
 import type {
   ContextAtom,
+  ContextEditableUnitKind,
   ContextEditorSnapshot,
   ContextEditorViewEventV2,
   ContextRecord,
   ContextRecordKind,
   ContextSearchMatch,
+  ContextSearchScope,
   ViewState,
 } from './types.js'
 
@@ -147,10 +149,14 @@ export class ContextEditorService {
 
   searchContextRecords(
     adapter: ContextEditorSessionAdapter,
-    input: { query: string; enabledKinds?: unknown },
+    input: { query: string; enabledKinds?: unknown; enabledUnitKinds?: unknown; scope?: unknown },
   ): { searchId: string; revision: string; total: number; totalOccurrences: number } {
     const state = currentState(adapter)
-    const matches = searchRecords(state.records, input.query, enabledRecordKinds(input.enabledKinds))
+    const scope: ContextSearchScope = input.scope === 'all' ? 'all' : 'dialogue'
+    const enabledUnitKinds = Array.isArray(input.enabledUnitKinds)
+      ? new Set(input.enabledUnitKinds.filter((value): value is ContextEditableUnitKind => value === 'reasoning' || value === 'answer' || value === 'user' || value === 'tool'))
+      : undefined
+    const matches = searchRecords(state.records, input.query, enabledRecordKinds(input.enabledKinds), scope, enabledUnitKinds)
     const id = `context-search-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
     this.searchCache.set(id, { id, revision: state.revision, revisionProbe: state.revisionProbe, matches })
     while (this.searchCache.size > this.maxSearchCacheEntries) {

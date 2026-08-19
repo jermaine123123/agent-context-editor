@@ -1,14 +1,15 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { decodeKittyPrintable, matchesKey, truncateToWidth, wrapTextWithAnsi, type Component, type TUI } from "@earendil-works/pi-tui";
 import {
-  searchRecords,
+  searchOccurrences,
   type ContextEditableUnit,
   type ContextEditorPrefsV2,
   type ContextEditorSnapshot,
   type ContextMutationResult,
   type ContextRecord,
   type ContextRecordKind,
-  type ContextSearchMatch,
+  type ContextSearchOccurrence,
+  type ContextSearchScope,
 } from "./shared-core/index.js";
 import { createPiText, detectPiLocale, type PiLocale, type PiText } from "./locale.js";
 
@@ -56,9 +57,13 @@ export class ContextEditorComponent implements Component {
   private rangeAnchor: number | null = null;
   private expanded = new Set<string>();
   private searchMode = false;
-  private matches: ContextSearchMatch[] = [];
+  private helpMode = false;
+  private searchScope: ContextSearchScope = "dialogue";
+  private matches: ContextSearchOccurrence[] = [];
   private matchIndex = -1;
-  private readonly bodyCache = new Map<string, { width: number; text: string; lines: string[] }>();
+  private lastRenderWidth = 0;
+  private lastRenderRows = 0;
+  private readonly bodyCache = new Map<string, { width: number; text: string; highlightKey: string; lines: string[] }>();
 
   constructor(
     tui: TUI,
@@ -111,23 +116,61 @@ export class ContextEditorComponent implements Component {
     return this.flatUnits()[this.selectedIndex];
   }
 
-  private contentText(unit: ContextEditableUnit): string {
-    return unit.atoms.map((atom) => atom.text).filter(Boolean).join("\n");
+  private highlightText(text: string, start: number, end: number): string {
+    if (start < 0 || end <= start || start >= text.length) return text;
+    const safeEnd = Math.min(text.length, end);
+    return `${text.slice(0, start)}${this.theme.fg("warning", text.slice(start, safeEnd))}${text.slice(safeEnd)}`;
+  }
+
+  private contentText(unit: ContextEditableUnit, activeHit?: ContextSearchOccurrence): string {
+    return unit.atoms.map((atom) => {
+      if (activeHit && activeHit.field !== "tool_name" && activeHit.atomId === atom.id) {
+        return this.highlightText(atom.text, activeHit.start, activeHit.end);
+      }
+      return atom.text;
+    }).filter(Boolean).join("\n");
   }
 
   private unitIsHidden(unit: ContextEditableUnit): boolean {
     return unit.viewState === "hide" || unit.viewState === "mixed";
   }
 
-  private bodyLinesFor(unit: ContextEditableUnit, width: number): string[] {
-    const text = this.contentText(unit);
+  private bodyLinesFor(unit: ContextEditableUnit, width: number, activeHit?: ContextSearchOccurrence): string[] {
+    const text = this.contentText(unit, activeHit);
     const available = Math.max(8, width - 8);
+    const highlightKey = activeHit ? `${activeHit.atomId}:${activeHit.field}:${activeHit.start}:${activeHit.end}` : "";
     const cached = this.bodyCache.get(unit.id);
-    if (cached && cached.width === available && cached.text === text) return cached.lines;
+    if (cached && cached.width === available && cached.text === text && cached.highlightKey === highlightKey) return cached.lines;
     const lines = wrapTextWithAnsi(text || " ", available);
     const normalized = lines.length > 0 ? lines : [" "];
-    this.bodyCache.set(unit.id, { width: available, text, lines: normalized });
+    this.bodyCache.set(unit.id, { width: available, text, highlightKey, lines: normalized });
     return normalized;
+  }
+
+  private activeHitForUnit(unit: ContextEditableUnit): ContextSearchOccurrence | undefined {
+    const hit = this.matches[this.matchIndex];
+    return hit?.unitId === unit.id ? hit : undefined;
+  }
+
+  private toolNameForUnit(unit: ContextEditableUnit): { name: string; atomId: string } | undefined {
+    const atom = unit.atoms.find((candidate) => !!candidate.toolName);
+    return atom?.toolName ? { name: atom.toolName, atomId: atom.id } : undefined;
+  }
+
+  private titleText(record: ContextRecord, unit: ContextEditableUnit, index: number, activeHit?: ContextSearchOccurrence): string {
+    const selected = this.selected.has(unit.id);
+    const cursor = index === this.selectedIndex ? "▶" : " ";
+    const checkbox = selected ? "[x]" : "[ ]";
+    const hidden = this.unitIsHidden(unit);
+    const state = hidden ? (unit.viewState === "mixed" ? "partial" : "hidden") : "shown";
+    const base = `${cursor} ${checkbox} ${this.text.unitKind(unit.kind)} · ${this.text.recordKind(record.kind)} · ${this.text.unitState(state)} · ${unit.atoms.reduce((sum, atom) => sum + atom.approxTokens, 0)} tok`;
+    if (hidden && !this.prefs.showHidden) return base;
+    const tool = this.toolNameForUnit(unit);
+    if (!tool) return base;
+    const toolText = activeHit?.field === "tool_name" && activeHit.atomId === tool.atomId
+      ? this.highlightText(tool.name, activeHit.start, activeHit.end)
+      : tool.name;
+    return `${base} · ${toolText}`;
   }
 
   private unitLineCount(item: FlatUnit, width: number): number {
@@ -144,18 +187,19 @@ export class ContextEditorComponent implements Component {
     return units.slice(start, end).map((item, offset) => {
       const index = start + offset;
       const { record, unit } = item;
-      const selected = this.selected.has(unit.id);
-      const cursor = index === this.selectedIndex ? "▶" : " ";
-      const checkbox = selected ? "[x]" : "[ ]";
+      const activeHit = this.activeHitForUnit(unit);
       const hidden = this.unitIsHidden(unit);
       const state = hidden ? (unit.viewState === "mixed" ? "partial" : "hidden") : "shown";
-      const title = `${cursor} ${checkbox} ${this.text.unitKind(unit.kind)} · ${this.text.recordKind(record.kind)} · ${this.text.unitState(state)} · ${unit.atoms.reduce((sum, atom) => sum + atom.approxTokens, 0)} tok`;
+      const title = this.titleText(record, unit, index, activeHit);
       const titleLine = this.theme.fg(colorForKind(record.kind), title);
       const lines = [index === this.selectedIndex ? this.theme.bg("selectedBg", visiblePad(titleLine, width)) : visiblePad(titleLine, width)];
       if (hidden && !this.prefs.showHidden) {
-        lines.push(visiblePad(this.theme.fg("dim", this.text.hiddenUnit(this.text.unitKind(unit.kind))), width));
+        const hiddenLabel = this.activeHitForUnit(unit)
+          ? `${this.text.hiddenUnit(this.text.unitKind(unit.kind))}${this.text.hiddenSearchHit()}`
+          : this.text.hiddenUnit(this.text.unitKind(unit.kind));
+        lines.push(visiblePad(this.theme.fg("dim", hiddenLabel), width));
       } else if (this.expanded.has(unit.id) || (hidden && this.prefs.showHidden)) {
-        for (const line of this.bodyLinesFor(unit, width)) {
+        for (const line of this.bodyLinesFor(unit, width, activeHit)) {
           lines.push(visiblePad(this.theme.fg("dim", `    │ ${line}`), width));
         }
       }
@@ -192,14 +236,58 @@ export class ContextEditorComponent implements Component {
   }
 
   private ensureSelectionVisible(width = this.tui.terminal.columns): void {
-    const units = this.flatUnits();
-    const selectedLine = units
-      .slice(0, this.selectedIndex)
-      .reduce((sum, item) => sum + this.unitLineCount(item, width), 0);
+    const selectedLine = this.unitStartOffset(this.selectedIndex, width);
     const viewport = this.availableRows();
     if (selectedLine < this.scrollOffset) this.scrollOffset = selectedLine;
     if (selectedLine >= this.scrollOffset + viewport) this.scrollOffset = selectedLine - viewport + 1;
     this.scrollOffset = Math.max(0, this.scrollOffset);
+  }
+
+  private unitStartOffset(index: number, width: number): number {
+    return this.flatUnits()
+      .slice(0, index)
+      .reduce((sum, item) => sum + this.unitLineCount(item, width), 0);
+  }
+
+  private bodyLineIndexForHit(unit: ContextEditableUnit, hit: ContextSearchOccurrence, width: number): number {
+    if (hit.field === "tool_name") return 0;
+    const atomIndex = unit.atoms.findIndex((atom) => atom.id === hit.atomId);
+    if (atomIndex < 0) return 0;
+    const preceding = unit.atoms.slice(0, atomIndex).map((atom) => atom.text).filter(Boolean).join("\n");
+    const target = unit.atoms[atomIndex]?.text ?? "";
+    const prefix = preceding ? `${preceding}\n${target.slice(0, hit.start)}` : target.slice(0, hit.start);
+    return Math.max(0, wrapTextWithAnsi(prefix || " ", Math.max(8, width - 8)).length - 1);
+  }
+
+  private positionSearchHit(width: number): void {
+    const hit = this.matches[this.matchIndex];
+    if (!hit) return;
+    const units = this.flatUnits();
+    const unitIndex = units.findIndex(({ unit }) => unit.id === hit.unitId);
+    if (unitIndex < 0) return;
+    const unit = units[unitIndex]?.unit;
+    if (!unit) return;
+    const hidden = this.unitIsHidden(unit) && !this.prefs.showHidden;
+    if (!hidden) this.expanded.add(unit.id);
+    const unitStart = this.unitStartOffset(unitIndex, width);
+    const targetLine = hidden
+      ? unitStart + 1
+      : unitStart + (hit.field === "tool_name" ? 0 : 1 + this.bodyLineIndexForHit(unit, hit, width));
+    this.scrollOffset = Math.max(0, targetLine - Math.floor(this.availableRows() / 2));
+    this.manualScroll = true;
+    this.clampScroll(width);
+  }
+
+  private focusSearchHit(index: number): void {
+    if (!this.matches[index]) return;
+    this.matchIndex = index;
+    const units = this.flatUnits();
+    const unitIndex = units.findIndex(({ unit }) => unit.id === this.matches[index]?.unitId);
+    if (unitIndex < 0) return;
+    this.selectedIndex = unitIndex;
+    this.resetSelection();
+    this.positionSearchHit(Math.max(24, this.tui.terminal.columns));
+    this.tui.requestRender();
   }
 
   /** Build only rows intersecting the terminal viewport. Long bodies outside
@@ -247,7 +335,7 @@ export class ContextEditorComponent implements Component {
     this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.flatUnits().length - 1));
     this.manualScroll = false;
     this.resetSelection();
-    this.matches = [];
+    this.matches = this.query.trim() ? searchOccurrences(this.records, this.query, new Set(this.prefs.enabledKinds), this.searchScope) : [];
     this.matchIndex = -1;
     this.ensureSelectionVisible();
     this.tui.requestRender();
@@ -263,7 +351,7 @@ export class ContextEditorComponent implements Component {
     this.scrollOffset = 0;
     this.manualScroll = false;
     this.resetSelection();
-    this.matches = [];
+    this.matches = this.query.trim() ? searchOccurrences(this.records, this.query, new Set(this.prefs.enabledKinds), this.searchScope) : [];
     this.matchIndex = -1;
     this.notify(this.text.sessionChanged(), "info");
   }
@@ -296,34 +384,32 @@ export class ContextEditorComponent implements Component {
     } else if (!extend) {
       this.resetSelection();
     }
+    this.matchIndex = -1;
     this.manualScroll = false;
     this.ensureSelectionVisible();
     this.tui.requestRender();
   }
 
   private refreshSearch(): void {
-    this.matches = searchRecords(this.records, this.query, new Set(this.prefs.enabledKinds));
-    this.matchIndex = this.matches.length > 0 ? 0 : -1;
+    this.matches = searchOccurrences(this.records, this.query, new Set(this.prefs.enabledKinds), this.searchScope);
+    this.matchIndex = -1;
     this.resetSelection();
-    this.focusMatch();
+    this.tui.requestRender();
   }
 
-  private focusMatch(): void {
-    const match = this.matches[this.matchIndex];
-    if (!match) return;
-    const index = this.flatUnits().findIndex(({ unit }) => unit.id === match.unitId);
-    if (index >= 0) {
-      this.selectedIndex = index;
-      this.resetSelection();
-      this.ensureSelectionVisible();
-    }
-    this.tui.requestRender();
+  private toggleSearchScope(): void {
+    this.searchScope = this.searchScope === "dialogue" ? "all" : "dialogue";
+    this.matches = searchOccurrences(this.records, this.query, new Set(this.prefs.enabledKinds), this.searchScope);
+    this.matchIndex = -1;
+    this.resetSelection();
+    if (this.query.trim() && this.matches.length > 0) this.focusSearchHit(0);
+    else this.tui.requestRender();
   }
 
   private nextMatch(delta: number): void {
     if (this.matches.length === 0) return;
-    this.matchIndex = (this.matchIndex + delta + this.matches.length) % this.matches.length;
-    this.focusMatch();
+    const start = this.matchIndex < 0 ? (delta < 0 ? this.matches.length - 1 : 0) : this.matchIndex + delta;
+    this.focusSearchHit((start + this.matches.length) % this.matches.length);
   }
 
   private toggleKind(kind: ContextRecordKind): void {
@@ -351,6 +437,10 @@ export class ContextEditorComponent implements Component {
     this.tui.requestRender();
   }
 
+  private helpLines(): string[] {
+    return this.text.tuiHelpLines();
+  }
+
   private handleSearchInput(data: string): void {
     if (matchesKey(data, "escape")) {
       this.searchMode = false;
@@ -359,7 +449,8 @@ export class ContextEditorComponent implements Component {
     }
     if (matchesKey(data, "enter")) {
       this.searchMode = false;
-      this.tui.requestRender();
+      if (this.matches.length > 0) this.focusSearchHit(0);
+      else this.tui.requestRender();
       return;
     }
     if (matchesKey(data, "backspace")) {
@@ -385,6 +476,13 @@ export class ContextEditorComponent implements Component {
       this.handleSearchInput(data);
       return;
     }
+    if (this.helpMode) {
+      if (data === "?" || matchesKey(data, "escape") || data === "q" || data === "Q") {
+        this.helpMode = false;
+        this.tui.requestRender();
+      }
+      return;
+    }
     if (matchesKey(data, "ctrl+c") || matchesKey(data, "escape")) {
       this.done();
       return;
@@ -398,14 +496,23 @@ export class ContextEditorComponent implements Component {
       this.tui.requestRender();
       return;
     }
+    if (data === "s") {
+      this.toggleSearchScope();
+      return;
+    }
+    if (data === "?") {
+      this.helpMode = true;
+      this.tui.requestRender();
+      return;
+    }
     if (data === "j" || matchesKey(data, "down")) { this.moveSelection(1, false); return; }
     if (data === "k" || matchesKey(data, "up")) { this.moveSelection(-1, false); return; }
     if (matchesKey(data, "shift+down")) { this.moveSelection(1, true); return; }
     if (matchesKey(data, "shift+up")) { this.moveSelection(-1, true); return; }
     if (matchesKey(data, "pageDown")) { this.scrollByRows(this.availableRows()); return; }
     if (matchesKey(data, "pageUp")) { this.scrollByRows(-this.availableRows()); return; }
-    if (data === "g") { this.selectedIndex = 0; this.manualScroll = false; this.ensureSelectionVisible(); this.tui.requestRender(); return; }
-    if (data === "G") { this.selectedIndex = Math.max(0, this.flatUnits().length - 1); this.manualScroll = false; this.ensureSelectionVisible(); this.tui.requestRender(); return; }
+    if (data === "g") { this.selectedIndex = 0; this.matchIndex = -1; this.manualScroll = false; this.ensureSelectionVisible(); this.tui.requestRender(); return; }
+    if (data === "G") { this.selectedIndex = Math.max(0, this.flatUnits().length - 1); this.matchIndex = -1; this.manualScroll = false; this.ensureSelectionVisible(); this.tui.requestRender(); return; }
     if (data === "1") { this.toggleKind("user"); return; }
     if (data === "2") { this.toggleKind("ai"); return; }
     if (data === "3") { this.toggleKind("tool"); return; }
@@ -413,7 +520,8 @@ export class ContextEditorComponent implements Component {
     if (data === "v" || data === "V") {
       this.prefs = { ...this.prefs, showHidden: !this.prefs.showHidden };
       this.savePrefs();
-      this.tui.requestRender();
+      if (this.matchIndex >= 0) this.focusSearchHit(this.matchIndex);
+      else this.tui.requestRender();
       return;
     }
     if (data === "n") { this.nextMatch(1); return; }
@@ -432,6 +540,7 @@ export class ContextEditorComponent implements Component {
       if (!unit) return;
       if (this.expanded.has(unit.id)) this.expanded.delete(unit.id);
       else this.expanded.add(unit.id);
+      this.matchIndex = -1;
       this.manualScroll = false;
       this.ensureSelectionVisible();
       this.tui.requestRender();
@@ -454,21 +563,35 @@ export class ContextEditorComponent implements Component {
 
   render(width: number): string[] {
     const safeWidth = Math.max(24, width);
-    if (!this.manualScroll) this.ensureSelectionVisible(safeWidth);
-    const totalLines = this.totalLineCount(safeWidth);
     const viewport = this.availableRows();
-    const maxOffset = Math.max(0, totalLines - viewport);
-    this.scrollOffset = Math.min(this.scrollOffset, maxOffset);
-    const visible = this.renderWindow(safeWidth, this.scrollOffset, this.scrollOffset + viewport);
+    let visible: string[];
+    if (this.helpMode) {
+      visible = this.helpLines().slice(0, viewport);
+    } else {
+      const layoutChanged = this.lastRenderWidth !== safeWidth || this.lastRenderRows !== this.tui.terminal.rows;
+      if (this.matchIndex >= 0 && layoutChanged) this.positionSearchHit(safeWidth);
+      if (!this.manualScroll) this.ensureSelectionVisible(safeWidth);
+      const totalLines = this.totalLineCount(safeWidth);
+      const maxOffset = Math.max(0, totalLines - viewport);
+      this.scrollOffset = Math.min(this.scrollOffset, maxOffset);
+      visible = this.renderWindow(safeWidth, this.scrollOffset, this.scrollOffset + viewport);
+    }
+    this.lastRenderWidth = safeWidth;
+    this.lastRenderRows = this.tui.terminal.rows;
     while (visible.length < viewport) visible.push("");
 
     const enabled = (kind: ContextRecordKind): string => this.prefs.enabledKinds.includes(kind) ? this.theme.fg("accent", this.text.recordKind(kind)) : this.theme.fg("dim", this.text.recordKind(kind));
-    const title = this.theme.fg("accent", "Pi Context Editor") + this.theme.fg("dim", `  ${this.text.unitCount(this.flatUnits().length)}`);
-    const mode = this.searchMode
-      ? this.theme.fg("warning", this.text.tuiSearch(this.query, this.matches.length, this.matchIndex))
-      : this.theme.fg("dim", this.text.tuiSearchIdle(this.query, this.matches.length, this.matchIndex));
-    const filterLine = `${enabled("user")} [1]  ${enabled("ai")} [2]  ${enabled("tool")} [3]`;
-    const status = this.theme.fg("dim", this.text.tuiStatus());
+    const title = this.helpMode
+      ? this.theme.fg("accent", this.text.tuiHelpTitle())
+      : this.theme.fg("accent", "Pi Context Editor") + this.theme.fg("dim", `  ${this.text.unitCount(this.flatUnits().length)}`);
+    const mode = this.helpMode
+      ? this.theme.fg("dim", "")
+      : this.searchMode
+      ? this.theme.fg("warning", this.text.tuiSearch(this.query, this.matches.length, this.matchIndex, this.searchScope))
+      : this.theme.fg("dim", this.text.tuiSearchIdle(this.query, this.matches.length, this.matchIndex, this.searchScope));
+    const filterLine = this.helpMode ? "" : `${enabled("user")} [1]  ${enabled("ai")} [2]  ${enabled("tool")} [3]`;
+    const statusMode = this.helpMode ? "help" : this.searchMode ? "search" : this.matches.length > 0 ? "results" : "normal";
+    const status = this.theme.fg("dim", this.text.tuiStatus(statusMode, this.searchScope));
     return [
       visiblePad(title, safeWidth),
       visiblePad(filterLine, safeWidth),

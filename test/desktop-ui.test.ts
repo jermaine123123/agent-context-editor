@@ -112,6 +112,52 @@ describe("desktop context editor", () => {
     expect(ui.notifications.some((message) => message.includes("已保存当前对话状态"))).toBe(true);
   });
 
+  it("defaults to dialogue search and keeps full-scope switching temporary", async () => {
+    const atoms = [
+      atom("u-scope", "user", "u-scope", "用户消息"),
+      atom("r-scope", "reasoning", "u-scope", "内部思考"),
+    ];
+    const initialState: ContextEditorStateV1 = {
+      version: 1,
+      updatedAt: new Date(0).toISOString(),
+      items: {},
+      viewFilter: { enabledKinds: ["user", "assistant_text", "reasoning", "tool_call", "tool_output", "summary"], query: "", showHidden: false },
+    };
+    const persisted: ContextEditorStateV1[] = [];
+    let mainVisits = 0;
+    let dialogueBrowse = "";
+    let fullBrowse = "";
+    const ui = new ScriptedUI((title, options) => {
+      if (title === "Pi Context Editor") {
+        mainVisits += 1;
+        if (mainVisits === 1) return options.find((option) => option.startsWith("搜索对话记录"));
+        if (mainVisits === 2) {
+          dialogueBrowse = options.find((option) => option.startsWith("浏览对话记录")) ?? "";
+          return dialogueBrowse;
+        }
+        if (mainVisits === 3) return options.find((option) => option.startsWith("搜索范围"));
+        if (mainVisits === 4) {
+          fullBrowse = options.find((option) => option.startsWith("浏览对话记录")) ?? "";
+          return fullBrowse;
+        }
+        return "关闭";
+      }
+      return "返回";
+    }, "内部思考");
+
+    await runDesktopContextEditor({
+      ui,
+      atoms,
+      initialState,
+      locale: "zh",
+      persistState: (state) => persisted.push(state),
+    });
+
+    expect(dialogueBrowse).toContain("0/2");
+    expect(fullBrowse).toContain("1/2");
+    expect(persisted.every((state) => !Object.prototype.hasOwnProperty.call(state.viewFilter ?? {}, "searchScope"))).toBe(true);
+  });
+
   it("runs the native dialog flow and persists view-only Hide", async () => {
     const atoms = [atom("u1", "user", "u1", "保留目标")];
     const persisted: ContextEditorStateV1[] = [];

@@ -244,7 +244,9 @@ export class ContextEditorHost extends TypertRemoteService {
     const enabledKinds = Array.isArray(request?.enabledKinds)
       ? request.enabledKinds
       : ['user', 'ai', 'tool']
-    const matches = searchRecords(projection.records, query, enabledKinds)
+    const scope = request?.scope === 'all' ? 'all' : 'dialogue'
+    const enabledUnitKinds = Array.isArray(request?.enabledUnitKinds) ? request.enabledUnitKinds : undefined
+    const matches = searchRecords(projection.records, query, enabledKinds, scope, enabledUnitKinds)
     const searchId = `${projection.identity.id}:${++this.searchSequence}:${randomId('search')}`
     this.searchCache.set(searchId, {
       sessionId: projection.identity.id,

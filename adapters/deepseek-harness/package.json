@@ -1,7 +1,7 @@
 {
   "name": "context-editor-deepseek-harness",
-  "version": "0.1.1",
-  "description": "Context Editor view for DeepSeek Harness with independent reasoning and answer units",
+  "version": "0.1.4",
+  "description": "Context Editor view for DeepSeek Harness with centered search navigation and hierarchical AI filters",
   "type": "module",
   "engines": { "node": ">=22.19.0" },
   "main": "index.js",
@@ -20,6 +20,8 @@
     "index.js",
     "index.d.ts",
     "client.js",
+    "client-state.js",
+    "client-state.d.ts",
     "locale.js",
     "locale.d.ts",
     "client.bundle.js",

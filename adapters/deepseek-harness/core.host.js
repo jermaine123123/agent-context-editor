@@ -9,6 +9,7 @@
  */
 
 import {
+  atomMatchesSearchScope as atomMatchesSharedSearchScope,
   projectRecords as projectSharedRecords,
   searchRecords as searchSharedRecords,
 } from './core-runtime.js'
@@ -218,8 +219,12 @@ export function projectRecords(atoms, states = new Map()) {
   return projectSharedRecords(atoms, states)
 }
 
-export function searchRecords(records, query, enabledKinds = RECORD_KINDS) {
-  return searchSharedRecords(records, query, new Set(enabledKinds))
+export function atomMatchesSearchScope(kind, scope = 'dialogue') {
+  return atomMatchesSharedSearchScope(kind, scope)
+}
+
+export function searchRecords(records, query, enabledKinds = RECORD_KINDS, scope = 'dialogue', enabledUnitKinds) {
+  return searchSharedRecords(records, query, new Set(enabledKinds), scope, enabledUnitKinds === undefined ? undefined : new Set(enabledUnitKinds))
 }
 
 function validViewState(value) {

@@ -3,4 +3,4 @@
 // projection and search implementation without requiring a workspace path at
 // runtime.
 export { projectRecords } from '../../packages/context-editor-core/src/records.ts'
-export { searchRecords } from '../../packages/context-editor-core/src/search.ts'
+export { atomMatchesSearchScope, searchRecords } from '../../packages/context-editor-core/src/search.ts'

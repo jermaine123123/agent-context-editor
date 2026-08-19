@@ -14,7 +14,7 @@ describe('DeepSeek Harness installable bundle', () => {
       dsh?: { bundle?: { patch?: string }; client?: { platform?: string } }
     }
     expect(manifest.name).toBe('context-editor-deepseek-harness')
-    expect(manifest.version).toBe('0.1.1')
+    expect(manifest.version).toBe('0.1.4')
     expect(manifest.dsh?.bundle?.patch).toBe('./cordis.patch.yml')
     expect(manifest.dsh?.client?.platform).toBe('web')
     expect(readFileSync(resolve(root, 'cordis.patch.yml'), 'utf8')).toContain('id: context-editor')
@@ -23,6 +23,11 @@ describe('DeepSeek Harness installable bundle', () => {
     expect(clientBundle).toContain('window.__ModuleLoader__.load({')
     expect(clientBundle).toContain('exports.apply')
     expect(clientBundle).toContain('remote.contextEditor')
+    expect(clientBundle).toContain('enabledUnitKinds')
+    expect(clientBundle).toContain('context-editor__controls')
+    expect(clientBundle).toContain('computeCenteredScrollTop')
+    expect(clientBundle).not.toContain("block: 'nearest'")
+    expect(readFileSync(resolve(root, 'client.css'), 'utf8')).toContain('position: sticky')
   })
 
   it('keeps apply and inject on the module namespace for the Cordis loader', () => {

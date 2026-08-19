@@ -43,6 +43,12 @@ describe("cross-host record/unit contract", () => {
     expect(piMatches.map((match) => [match.recordKind, match.unitKind, match.occurrenceCount])).toEqual(
       deepSeekMatches.map((match) => [match.recordKind, match.unitKind, match.occurrenceCount]),
     );
+    expect(piMatches.map((match) => match.unitKind)).toEqual(["user", "answer"]);
+    const piFullMatches = searchPiRecords(piRecords, "部署", new Set(["user", "ai", "tool"]), "all");
+    const deepSeekFullMatches = searchDeepSeekRecords(deepSeekRecords, "部署", ["user", "ai", "tool"], "all");
+    expect(piFullMatches.map((match) => [match.recordKind, match.unitKind, match.occurrenceCount])).toEqual(
+      deepSeekFullMatches.map((match) => [match.recordKind, match.unitKind, match.occurrenceCount]),
+    );
 
     const piReasoning = piRecords.find((record) => record.kind === "ai")!.units.find((unit) => unit.kind === "reasoning")!;
     const deepSeekReasoning = deepSeekRecords.find((record) => record.kind === "ai")!.units.find((unit) => unit.kind === "reasoning")!;

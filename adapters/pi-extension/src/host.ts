@@ -15,6 +15,7 @@ import {
   type ContextRecordPage,
   type ContextSearchMatch,
   type ContextSearchMatchRequest,
+  type ContextSearchScope,
   type ContextSearchSummary,
   type ContextSessionLocator,
   type ContextViewMutationRequest,
@@ -115,8 +116,8 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
     return service.getSnapshot(this);
   }
 
-  search(query: string, enabledKinds: readonly ("user" | "ai" | "tool")[]): ContextSearchSummary {
-    return service.searchContextRecords(this, { query, enabledKinds });
+  search(query: string, enabledKinds: readonly ("user" | "ai" | "tool")[], scope?: ContextSearchScope): ContextSearchSummary {
+    return service.searchContextRecords(this, { query, enabledKinds, scope });
   }
 
   searchMatch(input: { searchId: string; revision?: string; index: number }): ContextSearchMatch | null {
@@ -169,9 +170,9 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
     return record ? { record, sourceRevision: current.revision, viewRevision: current.revision } : null;
   }
 
-  async searchRecords(request: { locator: ContextSessionLocator; query: string; enabledKinds: readonly ("user" | "ai" | "tool")[] }): Promise<ContextSearchSummary> {
+  async searchRecords(request: { locator: ContextSessionLocator; query: string; enabledKinds: readonly ("user" | "ai" | "tool")[]; scope?: ContextSearchScope }): Promise<ContextSearchSummary> {
     asLocator(request.locator, this.sessionId);
-    return this.search(request.query, request.enabledKinds);
+    return this.search(request.query, request.enabledKinds, request.scope);
   }
 
   async getSearchMatch(request: ContextSearchMatchRequest): Promise<ContextSearchMatch | null> {

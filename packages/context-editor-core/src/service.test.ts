@@ -57,7 +57,7 @@ describe('ContextEditorService', () => {
       'tool:e-tool:call-1',
     ])
 
-    const search = service.searchContextRecords(adapter, { query: '部署正常', enabledKinds: ['tool'] })
+    const search = service.searchContextRecords(adapter, { query: '部署正常', enabledKinds: ['tool'], scope: 'all' })
     expect(search.total).toBe(1)
     expect(search.totalOccurrences).toBe(1)
     const match = service.getContextSearchMatch(adapter, { ...search, index: 0 })
@@ -71,6 +71,14 @@ describe('ContextEditorService', () => {
       atomId: 'a-tool-output',
       blockIndex: 0,
     })
+
+    const answerOnly = service.searchContextRecords(adapter, {
+      query: '部署状态',
+      enabledKinds: ['ai'],
+      enabledUnitKinds: ['answer'],
+      scope: 'all',
+    })
+    expect(answerOnly.total).toBe(1)
 
     const aiRecord = snapshot.records.find((record) => record.id === 'ai:e-ai')!
     const reasoningUnit = aiRecord.units.find((unit) => unit.kind === 'reasoning')!

@@ -2058,16 +2058,19 @@ window.__ModuleLoader__.load({
     		hidden: zh ? "隐藏" : "Hidden",
     		restore: zh ? "恢复" : "Restore",
     		showHidden: zh ? "显示隐藏内容" : "Show hidden content",
-    		searchPlaceholder: zh ? "搜索完整会话历史…" : "Search complete session history…",
+    		searchPlaceholder: zh ? "搜索：用户消息和 AI 回答…" : "Search user messages and AI answers…",
+    		searchPlaceholderForScope: (scope) => zh ? scope === "all" ? "搜索：全文…" : "搜索：用户消息和 AI 回答…" : scope === "all" ? "Search full history…" : "Search user messages and AI answers…",
     		searchAria: zh ? "搜索上下文" : "Search context",
-    		searchFailed: (error) => zh ? `搜索失败：${error}` : `Search failed: ${error}`,
-    		searchSummary: (total, occurrences, current, index, active = false) => {
-    			if (!active) return zh ? "搜索覆盖完整持久化历史" : "Search covers the complete persisted history";
-    			if (!total) return zh ? "0 个单元 · 0 次出现" : "0 units · 0 matches";
-    			const currentPart = current === void 0 ? "" : zh ? ` · 当前单元 ${current} 次` : ` · ${current} matches in current unit`;
+    		searchFailed: (error) => zh ? `\u641c\u7d22\u5931\u8d25：${error}` : `Search failed: ${error}`,
+    		searchSummary: (total, occurrences, current, index, active = false, scope = "dialogue") => {
+    			const scopeLabel = scope === "all" ? zh ? "全文" : "full" : zh ? "对话" : "dialogue";
+    			if (!active) return zh ? `\u641c\u7d22\u8303\u56f4：${scopeLabel}` : `Search scope: ${scopeLabel}`;
+    			if (!total) return zh ? `0 \u4e2a\u5355\u5143 · 0 \u4e2a\u547d\u4e2d · ${scopeLabel}` : `0 units · 0 matches · ${scopeLabel}`;
+    			const currentPart = current === void 0 ? "" : zh ? ` · \u5f53\u524d\u5355\u5143 ${current} \u4e2a\u547d\u4e2d` : ` · ${current} matches in current unit`;
     			const indexPart = zh ? ` · ${index + 1}/${total}` : ` · ${index + 1}/${total}`;
-    			return zh ? `${total} 个单元 · ${occurrences} 次出现${currentPart}${indexPart}` : `${total} units · ${occurrences} matches${currentPart}${indexPart}`;
+    			return zh ? `${total} \u4e2a\u5355\u5143 · ${occurrences} \u4e2a\u547d\u4e2d${currentPart}${indexPart} · ${scopeLabel}` : `${total} units · ${occurrences} matches${currentPart}${indexPart} · ${scopeLabel}`;
     		},
+    		searchScope: (scope) => scope === "all" ? zh ? "搜索范围：全文" : "Full search" : zh ? "搜索范围：对话" : "Dialogue search",
     		previous: zh ? "上一条" : "Previous",
     		next: zh ? "下一条" : "Next",
     		hideSelected: (count) => zh ? `隐藏选中${count ? `（${count}）` : ""}` : `Hide selected${count ? ` (${count})` : ""}`,
@@ -2080,9 +2083,72 @@ window.__ModuleLoader__.load({
     	};
     }
     //#endregion
+    //#region adapters/deepseek-harness/client-state.js
+    const CLIENT_KINDS = Object.freeze([
+    	"user",
+    	"ai",
+    	"tool"
+    ]);
+    const CLIENT_UNIT_KINDS = Object.freeze([
+    	"user",
+    	"reasoning",
+    	"answer",
+    	"tool"
+    ]);
+    /**
+    * Normalize the persisted unit-level filter.  An explicit empty array means
+    * that the user intentionally hid every unit and must remain empty.
+    */
+    function normalizeEnabledUnitKinds(value, defaults = CLIENT_UNIT_KINDS) {
+    	if (!Array.isArray(value)) return [...defaults];
+    	return [...new Set(value.filter((kind) => CLIENT_UNIT_KINDS.includes(kind)))];
+    }
+    /** Migrate the V1 record-level filter into the V2 unit-level representation. */
+    function migrateEnabledKindsToUnits(value, defaults = CLIENT_UNIT_KINDS) {
+    	if (!Array.isArray(value)) return [...defaults];
+    	const next = [];
+    	for (const kind of value) if (kind === "user" || kind === "tool") next.push(kind);
+    	else if (kind === "ai") next.push("reasoning", "answer");
+    	return [...new Set(next)];
+    }
+    function toggleEnabledUnitKind(enabledKinds, kind) {
+    	if (!CLIENT_UNIT_KINDS.includes(kind)) return [...enabledKinds];
+    	return enabledKinds.includes(kind) ? enabledKinds.filter((value) => value !== kind) : [...enabledKinds, kind];
+    }
+    function nextSearchIndex(currentIndex, delta, total) {
+    	if (!Number.isInteger(total) || total < 1) return 0;
+    	return ((Number.isInteger(currentIndex) ? currentIndex : 0) + delta + total) % total;
+    }
+    function finiteNumber(value, fallback = 0) {
+    	return Number.isFinite(Number(value)) ? Number(value) : fallback;
+    }
+    /**
+    * Return the scroll offset that places a target in the middle of the usable
+    * viewport.  The usable viewport starts below the sticky Context Editor
+    * controls and ends at the scroll container's bottom edge.  The returned
+    * value is always clamped to the container's actual scroll range, so short
+    * documents and first/last matches naturally degrade to the closest visible
+    * position.
+    */
+    function computeCenteredScrollTop({ currentScrollTop = 0, scrollHeight = 0, clientHeight = 0, containerTop = 0, containerBottom, controlsBottom = containerTop, targetTop = 0, targetBottom = targetTop, gap = 12 } = {}) {
+    	const current = finiteNumber(currentScrollTop);
+    	const height = Math.max(0, finiteNumber(clientHeight));
+    	const contentHeight = Math.max(0, finiteNumber(scrollHeight));
+    	const maximum = Math.max(0, contentHeight - height);
+    	if (maximum === 0) return Math.min(Math.max(current, 0), maximum);
+    	const top = finiteNumber(containerTop);
+    	const bottom = finiteNumber(containerBottom, top + height);
+    	const inset = Math.max(0, finiteNumber(gap, 12));
+    	const usableTop = Math.max(top, finiteNumber(controlsBottom, top)) + inset;
+    	const usableBottom = Math.min(bottom, bottom - inset);
+    	const usableCenter = usableBottom > usableTop ? (usableTop + usableBottom) / 2 : top + height / 2;
+    	const desired = current + (finiteNumber(targetTop) + finiteNumber(targetBottom, targetTop)) / 2 - usableCenter;
+    	return Math.min(Math.max(desired, 0), maximum);
+    }
+    //#endregion
     //#region \0context-editor-client-css
     const style = document.createElement("style");
-    style.textContent = ".context-editor {\n  display: flex;\n  flex-direction: column;\n  gap: 0.65rem;\n  height: 100%;\n  min-height: 0;\n  padding: 0.85rem 1rem 1.25rem;\n  color: var(--dsh-fg, var(--foreground, inherit));\n}\n\n.context-editor__toolbar,\n.context-editor__searchbar,\n.context-editor__actions {\n  display: flex;\n  align-items: center;\n  gap: 0.45rem;\n  flex-wrap: wrap;\n}\n\n.context-editor__filters { display: flex; gap: 0.35rem; }\n.context-editor__filter,\n.context-editor__actions button,\n.context-editor__searchbar button,\n.context-editor__row button {\n  border: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  border-radius: 0.45rem;\n  background: var(--dsh-control-bg, var(--background, transparent));\n  color: inherit;\n  padding: 0.28rem 0.55rem;\n  cursor: pointer;\n}\n.context-editor__filter.is-active { background: var(--dsh-accent-soft, #e8efff); border-color: var(--dsh-accent, #7190e8); }\n.context-editor button:disabled { cursor: not-allowed; opacity: 0.45; }\n.context-editor__toggle { display: inline-flex; align-items: center; gap: 0.3rem; margin-left: auto; }\n.context-editor__searchbar input { flex: 1 1 20rem; min-width: 12rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.38rem 0.55rem; background: var(--dsh-input-bg, transparent); color: inherit; }\n.context-editor__search-summary { color: var(--dsh-muted, #687386); font-size: 0.82rem; }\n.context-editor__actions { border-bottom: 1px solid var(--dsh-border, var(--border, #d7dbe2)); padding-bottom: 0.5rem; }\n.context-editor__running { color: var(--dsh-muted, #687386); font-size: 0.82rem; }\n.context-editor__error { color: var(--dsh-danger, #b42318); font-size: 0.82rem; }\n.context-editor__list { overflow: auto; min-height: 0; display: flex; flex-direction: column; gap: 0.5rem; padding-right: 0.2rem; }\n.context-editor__row { display: flex; align-items: flex-start; gap: 0.6rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.55rem; padding: 0.65rem; background: var(--dsh-card-bg, transparent); }\n.context-editor__row.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }\n.context-editor__row.is-hidden { opacity: 0.82; }\n.context-editor__row--placeholder { align-items: center; min-height: 2.4rem; border-style: dashed; }\n.context-editor__row--placeholder input { margin-top: 0.2rem; }\n.context-editor__placeholder-text { flex: 1; color: var(--dsh-muted, #687386); font-size: 0.9rem; }\n.context-editor__row-content { flex: 1; min-width: 0; }\n.context-editor__row-meta { display: flex; align-items: center; gap: 0.45rem; color: var(--dsh-muted, #687386); font-size: 0.75rem; margin-bottom: 0.35rem; }\n.context-editor__kind { font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }\n.context-editor__hidden-badge { color: var(--dsh-warning, #996b00); }\n.context-editor__units { display: grid; gap: 0.45rem; }\n.context-editor__unit { border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.45rem 0.55rem; }\n.context-editor__unit.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }\n.context-editor__unit.is-hidden { opacity: 0.82; }\n.context-editor__unit-header { display: flex; align-items: center; gap: 0.45rem; min-height: 1.65rem; color: var(--dsh-muted, #687386); font-size: 0.78rem; }\n.context-editor__unit-select { display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer; }\n.context-editor__unit-kind { font-weight: 600; }\n.context-editor__unit-header button { margin-left: auto; }\n.context-editor__unit-body { min-width: 0; }\n.context-editor__unit-placeholder { color: var(--dsh-muted, #687386); padding: 0.35rem 0; font-size: 0.9rem; }\n.context-editor__record-body { display: grid; gap: 0.25rem; }\n.context-editor__atom { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }\n.context-editor__atom--reasoning { color: var(--dsh-muted, #687386); }\n.context-editor__tool-name { font-weight: 600; }\n.context-editor__hit { border-radius: 0.18rem; background: var(--dsh-highlight, #ffe28a); color: inherit; padding: 0 0.08rem; }\n.context-editor__state { color: var(--dsh-muted, #687386); padding: 2rem 0; text-align: center; }\n.context-editor__empty { color: var(--dsh-muted, #687386); }\n";
+    style.textContent = ".context-editor {\n  display: flex;\n  flex-direction: column;\n  gap: 0.65rem;\n  height: 100%;\n  min-height: 0;\n  padding: 0.85rem 1rem 1.25rem;\n  color: var(--dsh-fg, var(--foreground, inherit));\n}\n\n.context-editor__controls {\n  position: sticky;\n  top: 0;\n  z-index: 10;\n  display: grid;\n  gap: 0.55rem;\n  padding: 0.15rem 0 0.65rem;\n  background: var(--dsh-panel-bg, var(--background, var(--dsh-card-bg, #fff)));\n  border-bottom: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  box-shadow: 0 0.35rem 0.75rem color-mix(in srgb, var(--dsh-shadow, #172033) 12%, transparent);\n}\n\n.context-editor__toolbar,\n.context-editor__searchbar,\n.context-editor__actions {\n  display: flex;\n  align-items: center;\n  gap: 0.45rem;\n  flex-wrap: wrap;\n}\n\n.context-editor__filters { display: flex; align-items: flex-start; gap: 0.35rem; flex-wrap: wrap; }\n.context-editor__filter-group { display: inline-flex; align-items: flex-start; gap: 0.25rem; }\n.context-editor__subfilters { display: inline-flex; gap: 0.25rem; padding-top: 0.1rem; }\n.context-editor__filter,\n.context-editor__actions button,\n.context-editor__searchbar button,\n.context-editor__row button {\n  border: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  border-radius: 0.45rem;\n  background: var(--dsh-control-bg, var(--background, transparent));\n  color: inherit;\n  padding: 0.28rem 0.55rem;\n  cursor: pointer;\n}\n.context-editor__filter.is-active,\n.context-editor__filter.is-mixed { background: var(--dsh-accent-soft, #e8efff); border-color: var(--dsh-accent, #7190e8); }\n.context-editor__filter.is-mixed { background: linear-gradient(90deg, var(--dsh-accent-soft, #e8efff) 50%, var(--dsh-control-bg, var(--background, transparent)) 50%); }\n.context-editor button:disabled { cursor: not-allowed; opacity: 0.45; }\n.context-editor__toggle { display: inline-flex; align-items: center; gap: 0.3rem; margin-left: auto; }\n.context-editor__searchbar input { flex: 1 1 20rem; min-width: 12rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.38rem 0.55rem; background: var(--dsh-input-bg, transparent); color: inherit; }\n.context-editor__search-summary { color: var(--dsh-muted, #687386); font-size: 0.82rem; }\n.context-editor__actions { padding-bottom: 0.15rem; }\n.context-editor__running { color: var(--dsh-muted, #687386); font-size: 0.82rem; }\n.context-editor__error { color: var(--dsh-danger, #b42318); font-size: 0.82rem; }\n.context-editor__list { overflow: visible; min-height: 0; display: flex; flex-direction: column; gap: 0.5rem; padding-right: 0.2rem; }\n.context-editor__row { display: flex; align-items: flex-start; gap: 0.6rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.55rem; padding: 0.65rem; background: var(--dsh-card-bg, transparent); }\n.context-editor__row.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }\n.context-editor__row.is-hidden { opacity: 0.82; }\n.context-editor__row--placeholder { align-items: center; min-height: 2.4rem; border-style: dashed; }\n.context-editor__row--placeholder input { margin-top: 0.2rem; }\n.context-editor__placeholder-text { flex: 1; color: var(--dsh-muted, #687386); font-size: 0.9rem; }\n.context-editor__row-content { flex: 1; min-width: 0; }\n.context-editor__row-meta { display: flex; align-items: center; gap: 0.45rem; color: var(--dsh-muted, #687386); font-size: 0.75rem; margin-bottom: 0.35rem; }\n.context-editor__kind { font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }\n.context-editor__hidden-badge { color: var(--dsh-warning, #996b00); }\n.context-editor__units { display: grid; gap: 0.45rem; }\n.context-editor__unit { border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.45rem 0.55rem; }\n.context-editor__unit.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }\n.context-editor__unit.is-hidden { opacity: 0.82; }\n.context-editor__unit-header { display: flex; align-items: center; gap: 0.45rem; min-height: 1.65rem; color: var(--dsh-muted, #687386); font-size: 0.78rem; }\n.context-editor__unit-select { display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer; }\n.context-editor__unit-kind { font-weight: 600; }\n.context-editor__unit-header button { margin-left: auto; }\n.context-editor__unit-body { min-width: 0; }\n.context-editor__unit-placeholder { color: var(--dsh-muted, #687386); padding: 0.35rem 0; font-size: 0.9rem; }\n.context-editor__record-body { display: grid; gap: 0.25rem; }\n.context-editor__atom { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }\n.context-editor__atom--reasoning { color: var(--dsh-muted, #687386); }\n.context-editor__tool-name { font-weight: 600; }\n.context-editor__hit { border-radius: 0.18rem; background: var(--dsh-highlight, #ffe28a); color: inherit; padding: 0 0.08rem; }\n.context-editor__state { color: var(--dsh-muted, #687386); padding: 2rem 0; text-align: center; }\n.context-editor__empty { color: var(--dsh-muted, #687386); }\n\n@media (max-width: 42rem) {\n  .context-editor__searchbar input { flex-basis: 100%; min-width: 0; }\n  .context-editor__toggle { margin-left: 0; }\n  .context-editor__search-summary { flex: 1 1 100%; }\n}\n";
     document.head.appendChild(style);
     //#endregion
     //#region adapters/deepseek-harness/client.js
@@ -2096,12 +2162,10 @@ window.__ModuleLoader__.load({
     */
     const inject = ["remote"];
     const h = react.default.createElement;
-    const ALL_KINDS = Object.freeze([
-    	"user",
-    	"ai",
-    	"tool"
-    ]);
-    const PREFS_KEY = "dsh-context-editor:prefs:v1";
+    const ALL_KINDS = CLIENT_KINDS;
+    const ALL_UNIT_KINDS = CLIENT_UNIT_KINDS;
+    const PREFS_KEY_V1 = "dsh-context-editor:prefs:v1";
+    const PREFS_KEY_V2 = "dsh-context-editor:prefs:v2";
     function unwrap(value) {
     	if (value && value.ok === false && value.error !== void 0) {
     		const error = new Error(value.error.message ?? value.error.code ?? "Context Editor Remote failed");
@@ -2113,25 +2177,34 @@ window.__ModuleLoader__.load({
     }
     function safePreferences() {
     	const defaults = {
-    		enabledKinds: [...ALL_KINDS],
+    		enabledUnitKinds: [...ALL_UNIT_KINDS],
     		showHidden: false
     	};
     	try {
-    		const raw = globalThis.localStorage?.getItem(PREFS_KEY);
-    		if (!raw) return defaults;
-    		const value = JSON.parse(raw);
-    		const enabledKinds = Array.isArray(value?.enabledKinds) ? value.enabledKinds.filter((kind) => ALL_KINDS.includes(kind)) : defaults.enabledKinds;
-    		return {
-    			enabledKinds: enabledKinds.length ? [...new Set(enabledKinds)] : defaults.enabledKinds,
-    			showHidden: Boolean(value?.showHidden)
-    		};
+    		const rawV2 = globalThis.localStorage?.getItem(PREFS_KEY_V2);
+    		if (rawV2) {
+    			const value = JSON.parse(rawV2);
+    			if (Array.isArray(value?.enabledUnitKinds)) return {
+    				enabledUnitKinds: normalizeEnabledUnitKinds(value.enabledUnitKinds, defaults.enabledUnitKinds),
+    				showHidden: Boolean(value?.showHidden)
+    			};
+    		}
+    		const rawV1 = globalThis.localStorage?.getItem(PREFS_KEY_V1);
+    		if (rawV1) {
+    			const value = JSON.parse(rawV1);
+    			if (Array.isArray(value?.enabledKinds)) return {
+    				enabledUnitKinds: migrateEnabledKindsToUnits(value.enabledKinds, defaults.enabledUnitKinds),
+    				showHidden: Boolean(value?.showHidden)
+    			};
+    		}
+    		return defaults;
     	} catch {
     		return defaults;
     	}
     }
     function savePreferences(value) {
     	try {
-    		globalThis.localStorage?.setItem(PREFS_KEY, JSON.stringify(value));
+    		globalThis.localStorage?.setItem(PREFS_KEY_V2, JSON.stringify(value));
     	} catch {}
     }
     function unitsForRecord(record) {
@@ -2160,6 +2233,83 @@ window.__ModuleLoader__.load({
     }
     function errorText(error) {
     	return error instanceof Error ? error.message : String(error ?? "Unknown error");
+    }
+    function isScrollableElement(element) {
+    	if (!element || typeof element.scrollHeight !== "number" || typeof element.clientHeight !== "number") return false;
+    	if (element.scrollHeight <= element.clientHeight + 1) return false;
+    	const style = globalThis.getComputedStyle?.(element);
+    	if (!style) return true;
+    	const overflowY = style.overflowY || style.overflow || "";
+    	return overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay";
+    }
+    function findScrollableContainer(node) {
+    	let current = node?.parentElement ?? null;
+    	while (current) {
+    		if (isScrollableElement(current)) return current;
+    		current = current.parentElement;
+    	}
+    	const documentObject = globalThis.document;
+    	return documentObject?.scrollingElement ?? documentObject?.documentElement ?? documentObject?.body ?? null;
+    }
+    function elementRect(element, fallbackHeight = 0) {
+    	const documentObject = globalThis.document;
+    	if (element && (element === documentObject?.scrollingElement || element === documentObject?.documentElement || element === documentObject?.body)) return {
+    		top: 0,
+    		bottom: Number(globalThis.innerHeight) || Number(documentObject?.documentElement?.clientHeight) || Number(element.clientHeight) || fallbackHeight
+    	};
+    	const rect = element?.getBoundingClientRect?.();
+    	if (rect && Number.isFinite(rect.top) && Number.isFinite(rect.bottom)) return {
+    		top: rect.top,
+    		bottom: rect.bottom
+    	};
+    	return {
+    		top: 0,
+    		bottom: Number.isFinite(Number(element?.clientHeight)) ? Number(element.clientHeight) : fallbackHeight
+    	};
+    }
+    function scrollTopOf(element) {
+    	return Number.isFinite(Number(element?.scrollTop)) ? Number(element.scrollTop) : 0;
+    }
+    function scrollToTop(element, top, behavior) {
+    	if (!element) return;
+    	const options = {
+    		top,
+    		left: Number.isFinite(Number(element.scrollLeft)) ? Number(element.scrollLeft) : 0,
+    		behavior
+    	};
+    	if (typeof element.scrollTo === "function") try {
+    		element.scrollTo(options);
+    		return;
+    	} catch {
+    		try {
+    			element.scrollTo(0, top);
+    			return;
+    		} catch {}
+    	}
+    	if (element === globalThis.document?.scrollingElement && typeof globalThis.scrollTo === "function") try {
+    		globalThis.scrollTo({
+    			top,
+    			behavior
+    		});
+    		return;
+    	} catch {}
+    	try {
+    		element.scrollTop = top;
+    	} catch {}
+    }
+    function enabledRecordKindsForUnits(enabledUnitKinds) {
+    	const enabled = new Set(enabledUnitKinds);
+    	return ALL_KINDS.filter((kind) => kind === "ai" ? enabled.has("reasoning") || enabled.has("answer") : enabled.has(kind));
+    }
+    function unitFilterState(enabledUnitKinds, kind) {
+    	return enabledUnitKinds.includes(kind) ? "on" : "off";
+    }
+    function aiFilterState(enabledUnitKinds) {
+    	const reasoning = enabledUnitKinds.includes("reasoning");
+    	const answer = enabledUnitKinds.includes("answer");
+    	if (reasoning && answer) return "on";
+    	if (!reasoning && !answer) return "off";
+    	return "mixed";
     }
     /** Thin generated-Remote consumer with no global Session state. */
     var ContextEditorController = class {
@@ -2210,10 +2360,12 @@ window.__ModuleLoader__.load({
     			records
     		};
     	}
-    	async search(query, enabledKinds) {
+    	async search(query, enabledKinds, scope = "dialogue", enabledUnitKinds) {
     		return await this.call("searchRecords", {
     			query,
-    			enabledKinds
+    			enabledKinds,
+    			scope,
+    			...enabledUnitKinds === void 0 ? {} : { enabledUnitKinds }
     		});
     	}
     	async match(searchId, index, revision) {
@@ -2234,13 +2386,18 @@ window.__ModuleLoader__.load({
     		return this.call("undoView", { baseRevision });
     	}
     };
-    function FilterButton({ kind, enabled, onClick, text }) {
+    function FilterButton({ kind, state, onClick, text, label }) {
+    	const enabled = state === "on";
     	return h("button", {
     		type: "button",
-    		className: `context-editor__filter ${enabled ? "is-active" : ""}`,
+    		className: `context-editor__filter ${enabled ? "is-active" : ""} ${state === "mixed" ? "is-mixed" : ""}`,
+    		"data-filter-kind": kind,
+    		"data-filter-state": state,
     		onClick,
-    		"aria-pressed": enabled
-    	}, text.kind(kind));
+    		"aria-pressed": enabled,
+    		"aria-checked": state,
+    		role: "checkbox"
+    	}, label ?? text.kind(kind));
     }
     function UnitBody({ unit, match, text }) {
     	const atoms = unit.atoms ?? [];
@@ -2254,7 +2411,7 @@ window.__ModuleLoader__.load({
     		}, toolName, h("span", null, atomMatch ? highlight(atom.text ?? "", match) : atom.text ?? ""));
     	}));
     }
-    function UnitSection({ unit, selected, onSelect, focused, showHidden, match, disabled, onRestore, text }) {
+    function UnitSection({ unit, selected, onSelect, focused, showHidden, match, disabled, onRestore, registerNode, text }) {
     	const hidden = unit.viewState === "hide" || unit.viewState === "mixed";
     	const mixed = unit.viewState === "mixed";
     	const body = hidden && !showHidden ? h("div", { className: "context-editor__unit-placeholder" }, mixed ? text.mixedPlaceholder : text.hiddenPlaceholder(unit.kind)) : h(UnitBody, {
@@ -2264,7 +2421,9 @@ window.__ModuleLoader__.load({
     	});
     	return h("div", {
     		className: `context-editor__unit ${focused ? "is-focused" : ""} ${hidden ? "is-hidden" : ""}`,
-    		"data-unit-id": unit.id
+    		"data-unit-id": unit.id,
+    		"data-unit-kind": unit.kind,
+    		ref: (node) => registerNode?.(unit.id, node)
     	}, h("div", { className: "context-editor__unit-header" }, h("label", { className: "context-editor__unit-select" }, h("input", {
     		type: "checkbox",
     		checked: selected,
@@ -2276,7 +2435,7 @@ window.__ModuleLoader__.load({
     		onClick: onRestore
     	}, text.restore) : null), h("div", { className: "context-editor__unit-body" }, body));
     }
-    function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, match, disabled, onRestore, text }) {
+    function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, match, disabled, onRestore, registerNode, text }) {
     	const units = unitsForRecord(record);
     	const focused = units.some((unit) => unit.id === focusedUnitId);
     	return h("article", {
@@ -2292,6 +2451,7 @@ window.__ModuleLoader__.load({
     		match: focusedUnitId === unit.id ? match : null,
     		disabled,
     		onRestore: () => onRestore(unit.id),
+    		registerNode,
     		text
     	})))));
     }
@@ -2308,14 +2468,54 @@ window.__ModuleLoader__.load({
     		error: null
     	});
     	const [query, setQuery] = (0, react.useState)("");
+    	const [searchScope, setSearchScope] = (0, react.useState)("dialogue");
     	const [search, setSearch] = (0, react.useState)(null);
     	const [searchIndex, setSearchIndex] = (0, react.useState)(0);
     	const [match, setMatch] = (0, react.useState)(null);
     	const [selected, setSelected] = (0, react.useState)(() => /* @__PURE__ */ new Set());
+    	const [matching, setMatching] = (0, react.useState)(false);
     	const lastSelectedIndex = (0, react.useRef)(null);
     	const loadSequence = (0, react.useRef)(0);
     	const searchSequence = (0, react.useRef)(0);
     	const matchSequence = (0, react.useRef)(0);
+    	const navigationIndexRef = (0, react.useRef)(0);
+    	const requestedIndexRef = (0, react.useRef)(0);
+    	const scrollSequence = (0, react.useRef)(0);
+    	const unitNodes = (0, react.useRef)(/* @__PURE__ */ new Map());
+    	const searchInput = (0, react.useRef)(null);
+    	const controlsNode = (0, react.useRef)(null);
+    	(0, react.useEffect)(() => {
+    		setSearchScope("dialogue");
+    		setSearch(null);
+    		setMatch(null);
+    		setSearchIndex(0);
+    	}, [sessionId]);
+    	const registerUnitNode = (0, react.useCallback)((unitId, node) => {
+    		if (node) unitNodes.current.set(unitId, node);
+    		else unitNodes.current.delete(unitId);
+    	}, []);
+    	const enabledRecordKinds = (0, react.useMemo)(() => enabledRecordKindsForUnits(prefs.enabledUnitKinds), [prefs.enabledUnitKinds]);
+    	const visibleRecords = (0, react.useMemo)(() => {
+    		const records = [];
+    		for (const record of loaded.records) {
+    			if (!enabledRecordKinds.includes(record.kind)) continue;
+    			const units = unitsForRecord(record);
+    			const visibleUnitsForRecord = record.kind === "ai" ? units.filter((unit) => prefs.enabledUnitKinds.includes(unit.kind)) : units;
+    			if (visibleUnitsForRecord.length === 0) continue;
+    			records.push(visibleUnitsForRecord.length === units.length ? record : {
+    				...record,
+    				units: visibleUnitsForRecord
+    			});
+    		}
+    		return records;
+    	}, [
+    		enabledRecordKinds,
+    		loaded.records,
+    		prefs.enabledUnitKinds
+    	]);
+    	const visibleUnits = (0, react.useMemo)(() => visibleRecords.flatMap((record) => unitsForRecord(record)), [visibleRecords]);
+    	const selectedCount = selected.size;
+    	const readOnly = running || loaded.status === "loading" || loaded.status === "refreshing";
     	const refresh = (0, react.useCallback)(async () => {
     		const ticket = ++loadSequence.current;
     		setLoaded((current) => ({
@@ -2348,39 +2548,136 @@ window.__ModuleLoader__.load({
     		if (!running) refresh();
     	}, [running, refresh]);
     	(0, react.useEffect)(() => {
+    		const visibleIds = new Set(visibleUnits.map((unit) => unit.id));
+    		setSelected((current) => {
+    			const next = new Set([...current].filter((id) => visibleIds.has(id)));
+    			if (next.size === current.size && [...next].every((id) => current.has(id))) return current;
+    			return next;
+    		});
+    		lastSelectedIndex.current = null;
+    	}, [visibleUnits]);
+    	(0, react.useEffect)(() => {
+    		const onKeyDown = (event) => {
+    			if (event.key !== "/" || event.defaultPrevented) return;
+    			const target = event.target;
+    			if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+    			event.preventDefault();
+    			searchInput.current?.focus?.();
+    		};
+    		globalThis.addEventListener?.("keydown", onKeyDown);
+    		return () => globalThis.removeEventListener?.("keydown", onKeyDown);
+    	}, []);
+    	(0, react.useEffect)(() => {
     		const ticket = ++searchSequence.current;
     		const matchTicket = ++matchSequence.current;
     		const needle = query.trim();
-    		if (!needle) {
-    			setSearch(null);
-    			setMatch(null);
-    			setSearchIndex(0);
-    			return;
-    		}
+    		setSearch(null);
+    		setMatch(null);
+    		setSearchIndex(0);
+    		setMatching(false);
+    		navigationIndexRef.current = 0;
+    		requestedIndexRef.current = 0;
+    		setSelected(/* @__PURE__ */ new Set());
+    		lastSelectedIndex.current = null;
+    		if (!needle) return;
     		const timer = setTimeout(() => {
     			(async () => {
+    				if (ticket !== searchSequence.current) return;
+    				setMatching(true);
     				try {
-    					const value = await controller.search(needle, prefs.enabledKinds);
+    					const value = await controller.search(needle, enabledRecordKinds, searchScope, prefs.enabledUnitKinds);
     					if (ticket !== searchSequence.current) return;
     					setSearch(value);
-    					setSearchIndex(0);
-    					const first = value.total > 0 ? await controller.match(value.searchId, 0, value.revision) : null;
-    					if (ticket === searchSequence.current && matchTicket === matchSequence.current) setMatch(first);
+    					if (value.total < 1) {
+    						setSearchIndex(0);
+    						setMatching(false);
+    						return;
+    					}
+    					const first = await controller.match(value.searchId, 0, value.revision);
+    					if (ticket === searchSequence.current && matchTicket === matchSequence.current) {
+    						navigationIndexRef.current = 0;
+    						requestedIndexRef.current = 0;
+    						setSearchIndex(0);
+    						setMatch(first);
+    						setMatching(false);
+    					}
     				} catch (error) {
-    					if (ticket === searchSequence.current) setSearch({ error });
+    					if (ticket === searchSequence.current) {
+    						setSearch({ error });
+    						setMatch(null);
+    						setMatching(false);
+    					}
     				}
     			})();
     		}, 120);
     		return () => clearTimeout(timer);
     	}, [
     		controller,
-    		prefs.enabledKinds,
-    		query
+    		enabledRecordKinds,
+    		prefs.enabledUnitKinds,
+    		query,
+    		searchScope
     	]);
-    	const visibleRecords = (0, react.useMemo)(() => loaded.records.filter((record) => prefs.enabledKinds.includes(record.kind)), [loaded.records, prefs.enabledKinds]);
-    	const visibleUnits = (0, react.useMemo)(() => visibleRecords.flatMap((record) => unitsForRecord(record)), [visibleRecords]);
-    	const selectedCount = selected.size;
-    	const readOnly = running || loaded.status === "loading" || loaded.status === "refreshing";
+    	(0, react.useEffect)(() => {
+    		const ticket = ++scrollSequence.current;
+    		const unitId = match?.unitId;
+    		if (!unitId) return void 0;
+    		let frame;
+    		let initialTimer;
+    		let correctionTimer;
+    		let correctionFrame;
+    		const scroll = (behavior) => {
+    			if (ticket !== scrollSequence.current) return;
+    			const node = unitNodes.current.get(unitId);
+    			if (!node) return;
+    			const target = node.querySelector("mark.context-editor__hit") ?? node;
+    			const container = findScrollableContainer(node);
+    			if (!container) return;
+    			const containerRect = elementRect(container, globalThis.innerHeight ?? 0);
+    			const targetRect = elementRect(target);
+    			const controlsRect = elementRect(controlsNode.current);
+    			const currentScrollTop = scrollTopOf(container);
+    			const nextScrollTop = computeCenteredScrollTop({
+    				currentScrollTop,
+    				scrollHeight: container.scrollHeight,
+    				clientHeight: container.clientHeight,
+    				containerTop: containerRect.top,
+    				containerBottom: containerRect.bottom,
+    				controlsBottom: controlsRect.bottom,
+    				targetTop: targetRect.top,
+    				targetBottom: targetRect.bottom
+    			});
+    			if (Math.abs(nextScrollTop - currentScrollTop) > 1) scrollToTop(container, nextScrollTop, behavior);
+    		};
+    		const settle = () => {
+    			if (ticket !== scrollSequence.current) return;
+    			if (typeof globalThis.requestAnimationFrame === "function") correctionFrame = globalThis.requestAnimationFrame(() => scroll("auto"));
+    			else scroll("auto");
+    		};
+    		const schedule = () => {
+    			if (ticket !== scrollSequence.current) return;
+    			scroll("smooth");
+    			correctionTimer = globalThis.setTimeout(settle, 350);
+    		};
+    		if (typeof globalThis.requestAnimationFrame === "function") frame = globalThis.requestAnimationFrame(schedule);
+    		else initialTimer = globalThis.setTimeout(schedule, 0);
+    		return () => {
+    			if (frame !== void 0) globalThis.cancelAnimationFrame?.(frame);
+    			if (initialTimer !== void 0) globalThis.clearTimeout?.(initialTimer);
+    			if (correctionTimer !== void 0) globalThis.clearTimeout?.(correctionTimer);
+    			if (correctionFrame !== void 0) globalThis.cancelAnimationFrame?.(correctionFrame);
+    		};
+    	}, [
+    		loaded.records,
+    		match?.atomId,
+    		match?.end,
+    		match?.field,
+    		match?.start,
+    		match?.unitId,
+    		prefs.enabledUnitKinds,
+    		search?.searchId,
+    		searchIndex
+    	]);
     	const updatePrefs = (0, react.useCallback)((next) => {
     		setPrefs((current) => {
     			const value = {
@@ -2391,9 +2688,23 @@ window.__ModuleLoader__.load({
     			return value;
     		});
     	}, []);
-    	const toggleKind = (kind) => {
-    		const next = prefs.enabledKinds.includes(kind) ? prefs.enabledKinds.filter((value) => value !== kind) : [...prefs.enabledKinds, kind];
-    		updatePrefs({ enabledKinds: next.length ? next : [...ALL_KINDS] });
+    	const toggleUnitKind = (kind) => {
+    		updatePrefs({ enabledUnitKinds: toggleEnabledUnitKind(prefs.enabledUnitKinds, kind) });
+    	};
+    	const toggleAiKind = () => {
+    		const next = prefs.enabledUnitKinds.includes("reasoning") && prefs.enabledUnitKinds.includes("answer") ? prefs.enabledUnitKinds.filter((kind) => kind !== "reasoning" && kind !== "answer") : [.../* @__PURE__ */ new Set([
+    			...prefs.enabledUnitKinds,
+    			"reasoning",
+    			"answer"
+    		])];
+    		updatePrefs({ enabledUnitKinds: next });
+    	};
+    	const toggleSearchScope = () => {
+    		setSearchScope((current) => current === "dialogue" ? "all" : "dialogue");
+    		setSearchIndex(0);
+    		setMatch(null);
+    		setSelected(/* @__PURE__ */ new Set());
+    		lastSelectedIndex.current = null;
     	};
     	const selectUnit = (unit, event) => {
     		const index = visibleUnits.findIndex((value) => value.id === unit.id);
@@ -2440,43 +2751,87 @@ window.__ModuleLoader__.load({
     	};
     	const moveMatch = async (delta) => {
     		if (!search || search.error || search.total < 1) return;
-    		const nextIndex = (searchIndex + delta + search.total) % search.total;
+    		const nextIndex = nextSearchIndex(requestedIndexRef.current, delta, search.total);
+    		requestedIndexRef.current = nextIndex;
     		const ticket = ++matchSequence.current;
-    		setSearchIndex(nextIndex);
+    		setMatching(true);
     		try {
     			const value = await controller.match(search.searchId, nextIndex, search.revision);
-    			if (ticket === matchSequence.current) setMatch(value);
+    			if (ticket === matchSequence.current) {
+    				navigationIndexRef.current = nextIndex;
+    				setSearchIndex(nextIndex);
+    				setMatch(value);
+    				setMatching(false);
+    			}
     		} catch {
-    			setMatch(null);
+    			if (ticket === matchSequence.current) {
+    				requestedIndexRef.current = navigationIndexRef.current;
+    				setMatching(false);
+    				setMatch(null);
+    			}
     		}
     	};
     	const matchUnitId = match?.unitId;
+    	const aiState = aiFilterState(prefs.enabledUnitKinds);
     	return h("section", {
     		className: "context-editor",
     		"aria-label": "Context Editor"
-    	}, h("div", { className: "context-editor__toolbar" }, h("div", { className: "context-editor__filters" }, ALL_KINDS.map((kind) => h(FilterButton, {
-    		key: kind,
-    		kind,
-    		enabled: prefs.enabledKinds.includes(kind),
-    		onClick: () => toggleKind(kind),
+    	}, h("div", {
+    		className: "context-editor__controls",
+    		ref: controlsNode
+    	}, h("div", { className: "context-editor__toolbar" }, h("div", { className: "context-editor__filters" }, h(FilterButton, {
+    		kind: "user",
+    		state: unitFilterState(prefs.enabledUnitKinds, "user"),
+    		onClick: () => toggleUnitKind("user"),
     		text
-    	}))), h("label", { className: "context-editor__toggle" }, h("input", {
+    	}), h("div", { className: "context-editor__filter-group context-editor__filter-group--ai" }, h(FilterButton, {
+    		kind: "ai",
+    		state: aiState,
+    		onClick: toggleAiKind,
+    		text
+    	}), h("div", {
+    		className: "context-editor__subfilters",
+    		"aria-label": text.kind("ai")
+    	}, h(FilterButton, {
+    		kind: "reasoning",
+    		state: unitFilterState(prefs.enabledUnitKinds, "reasoning"),
+    		onClick: () => toggleUnitKind("reasoning"),
+    		text,
+    		label: text.unitKind("reasoning")
+    	}), h(FilterButton, {
+    		kind: "answer",
+    		state: unitFilterState(prefs.enabledUnitKinds, "answer"),
+    		onClick: () => toggleUnitKind("answer"),
+    		text,
+    		label: text.unitKind("answer")
+    	}))), h(FilterButton, {
+    		kind: "tool",
+    		state: unitFilterState(prefs.enabledUnitKinds, "tool"),
+    		onClick: () => toggleUnitKind("tool"),
+    		text
+    	})), h("label", { className: "context-editor__toggle" }, h("input", {
     		type: "checkbox",
     		checked: prefs.showHidden,
     		onChange: (event) => updatePrefs({ showHidden: event.target.checked })
     	}), text.showHidden)), h("div", { className: "context-editor__searchbar" }, h("input", {
+    		ref: searchInput,
     		type: "search",
     		value: query,
-    		placeholder: text.searchPlaceholder,
+    		placeholder: text.searchPlaceholderForScope(searchScope),
     		onChange: (event) => setQuery(event.target.value),
     		"aria-label": text.searchAria
-    	}), h("span", { className: "context-editor__search-summary" }, search?.error ? text.searchFailed(errorText(search.error)) : search ? text.searchSummary(search.total, search.totalOccurrences, match?.occurrenceCount, searchIndex, true) : text.searchSummary(0, 0, void 0, 0)), h("button", {
+    	}), h("button", {
     		type: "button",
-    		disabled: !search || search.total < 1,
+    		className: "context-editor__search-scope",
+    		onClick: toggleSearchScope,
+    		"aria-pressed": searchScope === "all"
+    	}, text.searchScope(searchScope)), h("span", { className: "context-editor__search-summary" }, search?.error ? text.searchFailed(errorText(search.error)) : search ? text.searchSummary(search.total, search.totalOccurrences, match?.occurrenceCount, searchIndex, true, searchScope) : text.searchSummary(0, 0, void 0, 0, false, searchScope)), h("button", {
+    		type: "button",
+    		disabled: !search || search.error || search.total < 1 || matching,
     		onClick: () => void moveMatch(-1)
     	}, text.previous), h("button", {
     		type: "button",
-    		disabled: !search || search.total < 1,
+    		disabled: !search || search.error || search.total < 1 || matching,
     		onClick: () => void moveMatch(1)
     	}, text.next)), h("div", { className: "context-editor__actions" }, h("button", {
     		type: "button",
@@ -2494,7 +2849,7 @@ window.__ModuleLoader__.load({
     		type: "button",
     		disabled: readOnly || !loaded.snapshot?.canUndo,
     		onClick: () => void undo()
-    	}, text.undo), running ? h("span", { className: "context-editor__running" }, text.running) : null, loaded.status === "error" ? h("span", { className: "context-editor__error" }, errorText(loaded.error)) : null), h("div", { className: "context-editor__list" }, visibleRecords.map((record) => h(RecordRow, {
+    	}, text.undo), running ? h("span", { className: "context-editor__running" }, text.running) : null, loaded.status === "error" ? h("span", { className: "context-editor__error" }, errorText(loaded.error)) : null)), h("div", { className: "context-editor__list" }, visibleRecords.map((record) => h(RecordRow, {
     		key: record.id,
     		record,
     		selected,
@@ -2504,6 +2859,7 @@ window.__ModuleLoader__.load({
     		match: matchUnitId === match?.unitId ? match : null,
     		disabled: readOnly,
     		onRestore: (unitId) => void mutate("restore", [unitId]),
+    		registerNode: registerUnitNode,
     		text
     	}))), loaded.status === "loading" ? h("div", { className: "context-editor__state" }, text.loading) : null, loaded.status !== "loading" && visibleRecords.length === 0 ? h("div", { className: "context-editor__state" }, text.noRecords) : null);
     }

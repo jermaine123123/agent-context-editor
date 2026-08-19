@@ -13,6 +13,7 @@ export type ContextState = 'keep' | 'replace' | 'summarize' | 'exclude'
 export type ContextRecordKind = 'user' | 'ai' | 'tool'
 export type ContextEditableUnitKind = 'reasoning' | 'answer' | 'user' | 'tool'
 export type ContextEditableUnitViewState = ViewState | 'mixed'
+export type ContextSearchScope = 'dialogue' | 'all'
 
 export interface SourceRef {
   entryId: string
@@ -108,9 +109,7 @@ export interface ContextEditorSnapshot {
   legacyStateFound: boolean
 }
 
-export interface ContextSearchMatch {
-  index: number
-  total: number
+export interface ContextSearchOccurrence {
   recordId: string
   recordKind: ContextRecordKind
   unitId: string
@@ -122,5 +121,10 @@ export interface ContextSearchMatch {
   start: number
   end: number
   excerpt: string
+}
+
+export interface ContextSearchMatch extends ContextSearchOccurrence {
+  index: number
+  total: number
   occurrenceCount: number
 }

@@ -12,7 +12,9 @@ This adapter targets the official DeepSeek Harness Developer Preview commit
 package adds a `Context Editor` tab beside the normal `Chat` view for the same
 Session; it never creates a second conversation.
 
-Version `0.1.1` supports independent `reasoning` and `answer` units: each can
+Version `0.1.4` adds centered search navigation below the sticky control area;
+the hierarchical AI filters from `0.1.3` remain supported while
+continuing to support independent `reasoning` and `answer` units: each can
 be searched, selected, hidden, restored and persisted separately. The original
 Harness Session log and model input are not rewritten. View state is kept in
 the `context_editor` storage-domain sidecar, and hiding currently does not
@@ -21,6 +23,11 @@ reduce token usage.
 The browser view resolves `navigator.languages` when it opens: `zh-*` locales
 use Chinese labels and all other locales use English. Only editor controls and
 status messages are translated; Session content remains unchanged.
+
+Search defaults to User messages and AI final answers. Use the scope button
+beside the search box to temporarily include reasoning, Tool Call and Tool
+Output atoms. The scope is window-local and is not written to localStorage or
+the `context_editor` sidecar; User/AI/Tool type filters remain the upper bound.
 
 ## Install the tarball
 
@@ -31,7 +38,7 @@ Harness profile:
 node ./scripts/build-core.mjs
 node ./scripts/build-client.mjs
 npm pack --ignore-scripts
-dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.1.1.tgz
+dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.1.4.tgz
 ```
 
 On Windows, `dsh` may not be on `PATH` even when Harness is installed.  Use
@@ -39,8 +46,14 @@ the profile's bundled launcher explicitly from PowerShell:
 
 ```powershell
 $env:DSH_HOME = '<harness-root>\.dsh'
-& '<harness-root>\node_modules\.bin\dsh.cmd' plugin --profile web add '<package-path>\context-editor-deepseek-harness-0.1.1.tgz'
+& '<harness-root>\node_modules\.bin\dsh.cmd' plugin --profile web add '<package-path>\context-editor-deepseek-harness-0.1.4.tgz'
 ```
+
+On Windows, if either the repository path or Harness path contains spaces and
+the CLI reports `ENOENT` for a truncated `editor\adapters\...` path, first
+copy the tarball to a path without spaces (for example
+`D:\context-editor-deepseek-harness-0.1.4.tgz`) and pass that path to the same
+command. The package itself remains installed in the selected Harness profile.
 
 If the launcher reports that `pnpm` is missing, add the Harness-provided pnpm
 directory to `PATH` for that PowerShell process, or install pnpm before running
@@ -70,7 +83,8 @@ stored in the `context_editor` storage-domain sidecar, fenced by Session
 
 ## Current scope
 
-Search, literal match counts, navigation, filters, placeholders, selection,
+Search (dialogue scope by default, with temporary full-scope toggle), literal
+match counts, navigation, filters, placeholders, selection,
 Shift-selection, persistence and CAS/revision handling are included.  While a
 Session is running the Host remains readable/searchable, while mutations are
 rejected until the settled log can be projected again.  Context exclusion,

@@ -1,8 +1,10 @@
 import type {
   ContextEditorSnapshot,
+  ContextEditableUnitKind,
   ContextRecord,
   ContextRecordKind,
   ContextSearchMatch,
+  ContextSearchScope,
   ContextEditorViewEventV2,
 } from './types.js'
 
@@ -52,6 +54,9 @@ export interface ContextSearchRequest {
   readonly locator: ContextSessionLocator
   readonly query: string
   readonly enabledKinds: readonly ContextRecordKind[]
+  /** Optional unit-level filter. Omitted by older clients for V1 behavior. */
+  readonly enabledUnitKinds?: readonly ContextEditableUnitKind[]
+  readonly scope?: ContextSearchScope
 }
 
 export interface ContextSearchSummary {

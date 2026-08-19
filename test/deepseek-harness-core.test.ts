@@ -76,6 +76,42 @@ describe('DeepSeek Harness Context Editor core', () => {
     expect(matches[0]?.total).toBe(1)
   })
 
+  it('defaults to dialogue scope and exposes reasoning/tools only in full scope', () => {
+    const normalized = normalizeSessionEvents(session, [
+      event(0, 'assistant/message', { turn: 1, message: { content: [
+        { type: 'reasoning', text: 'scope needle reasoning' },
+        { type: 'text', text: 'scope needle answer' },
+        { type: 'tool-call', id: 'scope-call', name: 'scope-tool', arguments: 'scope needle args' },
+      ] } }),
+      event(1, 'tool/result', { turn: 1, message: { source: { kind: 'tool', callId: 'scope-call' }, content: [{ type: 'text', text: 'scope needle output' }] } }),
+    ])
+    const records = projectRecords(normalized.atoms)
+    expect(searchRecords(records, 'needle', ['ai', 'tool']).map(match => match.unitKind)).toEqual(['answer'])
+    expect(searchRecords(records, 'needle', ['ai', 'tool'], 'all').map(match => match.unitKind)).toEqual(['reasoning', 'answer', 'tool'])
+  })
+
+  it('intersects record and unit filters for dialogue and full searches', () => {
+    const normalized = normalizeSessionEvents(session, [
+      event(0, 'user/message', { content: [{ type: 'text', text: 'unit-filter needle user' }] }),
+      event(1, 'assistant/message', { turn: 1, message: { content: [
+        { type: 'reasoning', text: 'unit-filter needle reasoning' },
+        { type: 'text', text: 'unit-filter needle answer' },
+        { type: 'tool-call', id: 'unit-filter-call', name: 'unit-filter-tool', arguments: 'unit-filter needle args' },
+      ] } }),
+      event(2, 'tool/result', { turn: 1, message: { source: { kind: 'tool', callId: 'unit-filter-call' }, content: [{ type: 'text', text: 'unit-filter needle output' }] } }),
+    ])
+    const records = projectRecords(normalized.atoms)
+    const enabled = ['user', 'ai', 'tool']
+    expect(searchRecords(records, 'needle', enabled, 'all', new Set(['answer']))).toEqual([
+      expect.objectContaining({ unitKind: 'answer', occurrenceCount: 1 }),
+    ])
+    expect(searchRecords(records, 'needle', enabled, 'all', new Set(['reasoning', 'tool']))
+      .map(match => match.unitKind)).toEqual(['reasoning', 'tool'])
+    expect(searchRecords(records, 'needle', enabled, 'dialogue', new Set(['user', 'reasoning', 'answer', 'tool']))
+      .map(match => match.unitKind)).toEqual(['user', 'answer'])
+    expect(searchRecords(records, 'needle', ['ai'], 'all', new Set(['tool']))).toEqual([])
+  })
+
   it('replays hide, restore and continuous undo events with fingerprints', () => {
     const atoms = normalizeSessionEvents(session, [
       event(0, 'user/message', { content: [{ type: 'text', text: 'one' }] }),
@@ -155,7 +191,7 @@ describe('DeepSeek Harness Context Editor core', () => {
     const states = new Map([[reasoning.atomIds[0]!, 'hide']])
     const projected = projectRecords(normalized.atoms, states)
     expect(projected[0]?.units.find(unit => unit.kind === 'reasoning')?.viewState).toBe('mixed')
-    const matches = searchRecords(projected, '部署', ['ai'])
+    const matches = searchRecords(projected, '部署', ['ai'], 'all')
     expect(matches.map(match => match.unitKind)).toEqual(['reasoning', 'answer'])
     expect(matches.map(match => match.occurrenceCount)).toEqual([2, 1])
   })

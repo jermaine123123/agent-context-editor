@@ -21,12 +21,18 @@ to condense a selected range or the entire session.
 The first phase is available today for Pi and DeepSeek Harness. It provides an
 independent Context Editor view with:
 
-- full-session text search, occurrence counts, and previous/next navigation;
+- dialogue-scoped text search by default (User messages and AI final answers),
+  optional full-session search, occurrence counts, and previous/next navigation;
 - User, AI, and Tool type filters, including combined filters;
 - single, contiguous, and batch selection;
 - reversible visual hiding, restore, reset, and undo;
 - sidecar persistence without deleting or rewriting the original Session;
 - independent reasoning and final-answer units in DeepSeek Harness.
+
+In Pi TUI, `Enter` only expands or collapses the selected unit; `h` and `r`
+persist hiding and restoring. Search activates the first text occurrence,
+centers and highlights it, and `n`/`N` moves through occurrences without
+revealing hidden text unless the user enables it.
 
 Visual hiding currently changes only the Context Editor view. It does not edit
 the host's main chat timeline, remove messages from future model input, or
@@ -37,7 +43,7 @@ The repository currently ships two adapter packages and one desktop fork:
 | Adapter | Package / app | Current scope |
 | --- | --- | --- |
 | Pi extension | `pi-context-editor@0.4.0-alpha.1` | `/ctx` in Pi TUI and Pi Desktop; shared unit editor with visual-only state |
-| DeepSeek Harness | `context-editor-deepseek-harness@0.1.1` | Context Editor tab with independent reasoning/answer units |
+| DeepSeek Harness | `context-editor-deepseek-harness@0.1.4` | Context Editor tab with sticky controls, hierarchical AI filters, and centered search navigation |
 | Pi Context Desktop | `jermaine123123/pi-app` `context-editor-v0.1.4` | Windows x64 community desktop build |
 
 中文说明：[README.zh-CN.md](README.zh-CN.md)
@@ -59,6 +65,12 @@ and preferences are stored in an atomic
 host-native CustomEntry events. Neither path replaces Tool Output or registers
 a context hook, so the model receives the same messages before and after a
 visual edit.
+
+Search defaults to User messages and AI final answers. Pi TUI uses `s` to
+toggle the temporary scope between dialogue and full history; DeepSeek Harness
+exposes the same toggle beside its search box, and Pi Desktop/RPC has a scope
+item in its dialog. The scope is not persisted, and the existing User/AI/Tool
+type filters still apply.
 
 This is an independent community project. It is not affiliated with, endorsed
 by or sponsored by DeepSeek, Pi, or their maintainers.
@@ -100,11 +112,11 @@ Desktop before entering `/ctx`.
 
 ### DeepSeek Harness
 
-Download `context-editor-deepseek-harness-0.1.1.tgz` and install it into a
+Download `context-editor-deepseek-harness-0.1.4.tgz` and install it into a
 Harness profile using the official CLI:
 
 ```sh
-dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.1.1.tgz
+dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.1.4.tgz
 ```
 
 The adapter targets Harness Developer Preview commit
@@ -124,7 +136,7 @@ translated.
 
 ## Support matrix
 
-| Capability | Pi extension 0.4.0-alpha.1 | DeepSeek Harness 0.1.1 | Pi Context Desktop 0.1.4 |
+| Capability | Pi extension 0.4.0-alpha.1 | DeepSeek Harness 0.1.4 | Pi Context Desktop 0.1.4 |
 | --- | ---: | ---: | ---: |
 | Inspect user / AI / tool records | Yes | Yes | Yes |
 | Filter user / AI / tool records | Yes | Yes | Yes |
@@ -146,7 +158,7 @@ translated.
 agent-context-editor/
 ├─ adapters/
 │  ├─ pi-extension/          Pi /ctx adapter 0.4.0-alpha.1
-│  └─ deepseek-harness/      DeepSeek Harness adapter 0.1.1
+│  └─ deepseek-harness/      DeepSeek Harness adapter 0.1.4
 ├─ packages/
 │  └─ context-editor-core/   host-neutral TypeScript Core and tests
 ├─ docs/                     architecture, compatibility and security notes

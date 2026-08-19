@@ -6,6 +6,7 @@ import {
   readViewEvents,
   reduceViewStates,
   atomViewState,
+  searchOccurrences,
   searchRecords,
   type ContextAtom,
   type ContextEditorViewEventV2,
@@ -117,8 +118,40 @@ describe('context editor core', () => {
       sourceRef: { entryId: 'a1', blockIndex: 0 },
     })
     const records = projectRecords([tool])
-    expect(searchRecords(records, 'read', new Set(['tool']))[0]?.field).toBe('tool_name')
-    expect(searchRecords(records, 'app.ts', new Set(['tool']))[0]?.field).toBe('tool_args')
+    expect(searchRecords(records, 'read', new Set(['tool']), 'all')[0]?.field).toBe('tool_name')
+    expect(searchRecords(records, 'app.ts', new Set(['tool']), 'all')[0]?.field).toBe('tool_args')
+  })
+
+  it('returns every text occurrence in stable atom and field order', () => {
+    const first = atom({
+      kind: 'assistant_text',
+      text: 'needle once needle',
+      sourceRef: { entryId: 'a-occ', blockIndex: 0 },
+    })
+    const second = atom({
+      kind: 'reasoning',
+      text: 'needle again',
+      sourceRef: { entryId: 'a-occ', blockIndex: 1 },
+    })
+    const records = projectRecords([first, second])
+    const occurrences = searchOccurrences(records, 'NEEDLE', new Set(['ai']), 'all')
+    expect(occurrences.map((occurrence) => [occurrence.atomId, occurrence.start, occurrence.field])).toEqual([
+      [first.id, 0, 'message'],
+      [first.id, 12, 'message'],
+      [second.id, 0, 'reasoning'],
+    ])
+    expect(searchRecords(records, 'needle', new Set(['ai']), 'all').reduce((sum, match) => sum + match.occurrenceCount, 0)).toBe(3)
+  })
+
+  it('defaults to dialogue atoms and expands to reasoning/tools only in full scope', () => {
+    const answer = atom({ kind: 'assistant_text', text: 'dialogue needle', sourceRef: { entryId: 'scope-a', blockIndex: 0 } })
+    const reasoning = atom({ kind: 'reasoning', text: 'reasoning needle', sourceRef: { entryId: 'scope-a', blockIndex: 1 } })
+    const tool = atom({ kind: 'tool_output', text: 'tool needle', recordId: 'tool:scope:c1', toolCallId: 'c1', sourceRef: { entryId: 'scope-tool', blockIndex: 0 } })
+    const records = projectRecords([answer, reasoning, tool])
+    const dialogue = searchOccurrences(records, 'needle', new Set(['ai', 'tool']))
+    expect(dialogue.map((occurrence) => occurrence.unitKind)).toEqual(['answer'])
+    const all = searchOccurrences(records, 'needle', new Set(['ai', 'tool']), 'all')
+    expect(all.map((occurrence) => occurrence.unitKind)).toEqual(['answer', 'reasoning', 'tool'])
   })
 
   it('replays valid V2 view events and ignores malformed events', () => {

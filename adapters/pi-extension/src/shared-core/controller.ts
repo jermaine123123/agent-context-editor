@@ -3,6 +3,7 @@ import type {
   ContextEditorSnapshot,
   ContextRecordKind,
   ContextSearchMatch,
+  ContextSearchScope,
 } from './types.js'
 
 export type ContextEditorPhase = 'loading' | 'ready' | 'mutating' | 'error'
@@ -33,6 +34,7 @@ export interface ContextEditorTransport {
     workspaceId?: string | null
     query: string
     enabledKinds: readonly ContextRecordKind[]
+    scope?: ContextSearchScope
   }): Promise<ContextEditorSearchInfo>
   getSearchMatch(input: {
     sessionFile: string

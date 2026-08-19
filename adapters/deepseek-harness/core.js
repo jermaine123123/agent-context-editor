@@ -1,9 +1,10 @@
 /*
  * GENERATED FILE - do not edit directly.
- * Canonical Core source digest: 1eafb560f61283d8b66c3fae0f1d906babe91233067cfba9b8e57a397edabbaa
+ * Canonical Core source digest: 733df2bbcbaf478f7a485a8b40ff4d86684cda73539204cf6b9dad6f1c655964
  * Rebuild with: npm run build:deepseek
  */
 import {
+  atomMatchesSearchScope as atomMatchesSharedSearchScope,
   projectRecords as projectSharedRecords,
   searchRecords as searchSharedRecords,
 } from './core-runtime.js'
@@ -213,8 +214,12 @@ export function projectRecords(atoms, states = new Map()) {
   return projectSharedRecords(atoms, states)
 }
 
-export function searchRecords(records, query, enabledKinds = RECORD_KINDS) {
-  return searchSharedRecords(records, query, new Set(enabledKinds))
+export function atomMatchesSearchScope(kind, scope = 'dialogue') {
+  return atomMatchesSharedSearchScope(kind, scope)
+}
+
+export function searchRecords(records, query, enabledKinds = RECORD_KINDS, scope = 'dialogue', enabledUnitKinds) {
+  return searchSharedRecords(records, query, new Set(enabledKinds), scope, enabledUnitKinds === undefined ? undefined : new Set(enabledUnitKinds))
 }
 
 function validViewState(value) {

@@ -1,6 +1,6 @@
 /*
  * GENERATED FILE - do not edit directly.
- * Canonical Core source digest: 1eafb560f61283d8b66c3fae0f1d906babe91233067cfba9b8e57a397edabbaa
+ * Canonical Core source digest: 733df2bbcbaf478f7a485a8b40ff4d86684cda73539204cf6b9dad6f1c655964
  * Rebuild with: npm run build:deepseek
  */
 export const HOST_ID: string
@@ -10,6 +10,7 @@ export const RECORD_KINDS: readonly string[]
 
 export type ContextEditableUnitKind = 'reasoning' | 'answer' | 'user' | 'tool'
 export type ContextEditableUnitViewState = 'show' | 'hide' | 'collapse' | 'mixed'
+export type ContextSearchScope = 'dialogue' | 'all'
 
 export interface SessionIdentity {
   id: string
@@ -73,7 +74,8 @@ export function sessionIdentity(session: unknown): SessionIdentity
 export function sameSessionLifecycle(left: unknown, right: unknown): boolean
 export function normalizeSessionEvents(session: unknown, events: readonly unknown[]): { identity: SessionIdentity; atoms: ContextAtom[]; sourceRevision: number }
 export function projectRecords(atoms: readonly ContextAtom[], states?: ReadonlyMap<string, string>): ContextRecord[]
-export function searchRecords(records: readonly ContextRecord[], query: string, enabledKinds?: readonly string[]): Array<{
+export function atomMatchesSearchScope(kind: string, scope?: ContextSearchScope): boolean
+export function searchRecords(records: readonly ContextRecord[], query: string, enabledKinds?: readonly string[], scope?: ContextSearchScope, enabledUnitKinds?: readonly ContextEditableUnitKind[] | ReadonlySet<ContextEditableUnitKind>): Array<{
   index: number
   total: number
   recordId: string
