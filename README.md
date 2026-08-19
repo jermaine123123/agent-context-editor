@@ -42,7 +42,7 @@ The repository currently ships two adapter packages and one desktop fork:
 
 | Adapter | Package / app | Current scope |
 | --- | --- | --- |
-| Pi extension | `pi-context-editor@0.4.0-alpha.1` | `/ctx` in Pi TUI and Pi Desktop; shared unit editor with visual-only state |
+| Pi extension | `pi-context-editor@0.4.0-alpha.2` | `/ctx` in Pi TUI and Pi Desktop; shared unit editor with visual-only state |
 | DeepSeek Harness | `context-editor-deepseek-harness@0.1.4` | Context Editor tab with sticky controls, hierarchical AI filters, and centered search navigation |
 | Pi Context Desktop | `jermaine123123/pi-app` `context-editor-v0.1.4` | Windows x64 community desktop build |
 
@@ -97,12 +97,12 @@ are planned work; they are not included in the current release.
 
 ### Pi extension
 
-Download `pi-context-editor-0.4.0-alpha.1.tgz` from the
+Download `pi-context-editor-0.4.0-alpha.2.tgz` from the
 [release assets](https://github.com/jermaine123123/agent-context-editor/releases),
 then install it with the Pi package manager:
 
 ```sh
-pi install ./pi-context-editor-0.4.0-alpha.1.tgz
+pi install ./pi-context-editor-0.4.0-alpha.2.tgz
 ```
 
 For Pi Desktop registration, run `adapters/pi-extension/scripts/install-desktop.ps1`
@@ -136,7 +136,7 @@ translated.
 
 ## Support matrix
 
-| Capability | Pi extension 0.4.0-alpha.1 | DeepSeek Harness 0.1.4 | Pi Context Desktop 0.1.4 |
+| Capability | Pi extension 0.4.0-alpha.2 | DeepSeek Harness 0.1.4 | Pi Context Desktop 0.1.4 |
 | --- | ---: | ---: | ---: |
 | Inspect user / AI / tool records | Yes | Yes | Yes |
 | Filter user / AI / tool records | Yes | Yes | Yes |
@@ -157,7 +157,7 @@ translated.
 ```text
 agent-context-editor/
 ├─ adapters/
-│  ├─ pi-extension/          Pi /ctx adapter 0.4.0-alpha.1
+│  ├─ pi-extension/          Pi /ctx adapter 0.4.0-alpha.2
 │  └─ deepseek-harness/      DeepSeek Harness adapter 0.1.4
 ├─ packages/
 │  └─ context-editor-core/   host-neutral TypeScript Core and tests

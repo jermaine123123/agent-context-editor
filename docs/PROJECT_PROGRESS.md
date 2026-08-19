@@ -1,7 +1,7 @@
 # Agent Context Editor 项目进度
 
 更新日期：2026-08-20  
-当前基线：本次同步前主分支 `1e3e98c`，Pi `0.84.2`，DeepSeek Harness Developer Preview
+当前基线：本次发布前主分支 `ca738be`，Pi `0.84.2`，DeepSeek Harness Developer Preview
 
 ## 1. 项目目标
 
@@ -24,7 +24,7 @@
 | 组件 | 当前版本/边界 | 当前状态 |
 | --- | --- | --- |
 | 共享 Core | 根目录 `packages/context-editor-core` | 已完成第一阶段，作为 Pi 与 DeepSeek 的行为基准 |
-| Pi Extension | `pi-context-editor@0.4.0-alpha.1` | 已构建，支持 Pi TUI 与 Pi Desktop/RPC 的 `/ctx` |
+| Pi Extension | `pi-context-editor@0.4.0-alpha.2` | 已构建，支持 Pi TUI 与 Pi Desktop/RPC 的 `/ctx` |
 | Pi TUI | Pi `0.84.2` | 全屏编辑器已实现，自动化验收通过，完整真实宿主回归仍在进行 |
 | Pi Desktop/RPC | Pi Desktop 原生对话框路径 | 可用，但仍是独立管理器，不改主聊天时间线 |
 | DeepSeek Harness | `context-editor-deepseek-harness@0.1.4` | 已完成固定控制区、分层 AI 筛选、搜索结果居中定位和 Developer Preview 契约测试 |

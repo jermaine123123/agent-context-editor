@@ -9,7 +9,7 @@ const run = promisify(execFile)
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const npmCli = resolve(process.execPath, '..', 'node_modules/npm/bin/npm-cli.js')
 const releaseRoot = resolve(root, 'release')
-const mainRelease = join(releaseRoot, 'v0.1.0-alpha.1')
+const mainRelease = join(releaseRoot, 'v0.1.0-alpha.2')
 const desktopRelease = join(releaseRoot, 'context-editor-v0.1.4')
 const includeDesktop = process.argv.includes('--desktop')
 

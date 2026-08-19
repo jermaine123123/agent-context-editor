@@ -36,7 +36,7 @@ English 首页：[README.md](README.md)
 
 ## 当前发布内容
 
-- Pi 扩展 `pi-context-editor@0.4.0-alpha.1`：在 Pi TUI / Pi Desktop 中使用 `/ctx`，共享 Record/Unit Core，并把隐藏限定为视觉状态。
+- Pi 扩展 `pi-context-editor@0.4.0-alpha.2`：在 Pi TUI / Pi Desktop 中使用 `/ctx`，共享 Record/Unit Core，并把隐藏限定为视觉状态。
 - DeepSeek Harness 适配器 `context-editor-deepseek-harness@0.1.4`：在同一 Session 的 Context Editor 视图中，控制区固定在顶部，AI 下可分别筛选思考与回答；搜索结果会在可用内容区域居中定位，搜索默认对话范围并可临时切换全文。
 - Pi Context Desktop `0.1.4`：位于独立 fork [jermaine123123/pi-app](https://github.com/jermaine123123/pi-app) 的 Windows x64 社区构建。
 
@@ -76,7 +76,7 @@ V1 视觉 CustomEntry 兼容路径。Pi 不注册上下文替换 hook，Tool Out
 下载两个 tarball：
 
 ```sh
-pi install ./pi-context-editor-0.4.0-alpha.1.tgz
+pi install ./pi-context-editor-0.4.0-alpha.2.tgz
 dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.1.4.tgz
 ```
 

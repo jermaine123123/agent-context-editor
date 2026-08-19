@@ -1,6 +1,6 @@
 {
   "name": "agent-context-editor",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "private": true,
   "description": "Cross-agent search, filtering, and reversible view management for Coding Agent sessions",
   "type": "module",

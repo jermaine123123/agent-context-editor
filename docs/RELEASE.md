@@ -1,9 +1,9 @@
 # Release checklist
 
 1. Run `npm run verify` from a clean working tree.
-2. Run `npm run release:assets` and inspect `release/v0.1.0-alpha.1`.
+2. Run `npm run release:assets` and inspect `release/v0.1.0-alpha.2`.
 3. Verify every line in `SHA256SUMS.txt` locally before uploading.
-4. Create the annotated tag `v0.1.0-alpha.1` and the GitHub Release only after
+4. Create the annotated tag `v0.1.0-alpha.2` and the GitHub Release only after
    CI is green.
 5. For the separate Pi App fork, use `npm run release:desktop-assets -- --desktop`
    or the equivalent script from the root workspace, then upload only the
