@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 
 const run = promisify(execFile)
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
-const npmCli = resolve(process.execPath, '..', 'node_modules/npm/bin/npm-cli.js')
+const npmCli = process.env.npm_execpath ?? resolve(process.execPath, '..', 'node_modules/npm/bin/npm-cli.js')
 const cache = resolve(root, '.npm-cache')
 const temp = await mkdtemp(join(tmpdir(), 'agent-context-editor-pack-'))
 
