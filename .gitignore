@@ -1,5 +1,8 @@
 node_modules/
 .npm-cache/
+/.pnpm-store/
+/deepseek-harness-latest/
+Start-DeepSeek-Harness.cmd
 *.tgz
 /pi-app/
 /release/

@@ -9,6 +9,7 @@ const input = resolve(root, "adapters/pi-extension/src/index.ts")
 const output = resolve(root, "adapters/pi-extension/dist/index.js")
 const coreFiles = [
   "packages/context-editor-core/src/types.ts",
+  "packages/context-editor-core/src/projection.ts",
   "packages/context-editor-core/src/fingerprint.ts",
   "packages/context-editor-core/src/records.ts",
   "packages/context-editor-core/src/search.ts",

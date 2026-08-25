@@ -1,6 +1,7 @@
 export * from './types.js'
 export * from './fingerprint.js'
 export * from './records.js'
+export * from './projection.js'
 export * from './search.js'
 export * from './state.js'
 export * from './controller.js'

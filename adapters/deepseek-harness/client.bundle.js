@@ -1977,6 +1977,8 @@ window.__ModuleLoader__.load({
     	"getRecord",
     	"searchRecords",
     	"getSearchMatch",
+    	"previewContext",
+    	"commitContext",
     	"commitView",
     	"undoView"
     ]);
@@ -2057,6 +2059,19 @@ window.__ModuleLoader__.load({
     		partiallyHidden: zh ? "部分隐藏" : "Partially hidden",
     		hidden: zh ? "隐藏" : "Hidden",
     		restore: zh ? "恢复" : "Restore",
+    		excludeContext: zh ? "排除上下文" : "Exclude context",
+    		restoreContext: zh ? "恢复上下文" : "Restore context",
+    		contextState: (state) => state === "exclude" ? zh ? "已排除上下文" : "Excluded from context" : state === "mixed" ? zh ? "部分排除" : "Partially excluded" : zh ? "不可用" : "Unavailable",
+    		excludeSelected: (count) => zh ? `\u6392\u9664\u9009\u4e2d${count ? `（${count}）` : ""}` : `Exclude selected${count ? ` (${count})` : ""}`,
+    		restoreContextSelected: zh ? "恢复选中上下文" : "Restore selected context",
+    		contextPreview: (before, after, delta, closureCount) => {
+    			const beforeValue = Number.isFinite(Number(before)) ? Number(before) : 0;
+    			const afterValue = Number.isFinite(Number(after)) ? Number(after) : 0;
+    			const deltaValue = Number.isFinite(Number(delta)) ? Number(delta) : afterValue - beforeValue;
+    			const sign = deltaValue > 0 ? "+" : "";
+    			const closure = closureCount > 0 ? zh ? ` · \u8fde\u5e26\u5355\u5143 ${closureCount} \u4e2a` : ` · ${closureCount} related units` : "";
+    			return zh ? `\u9884\u8ba1\u4e0a\u4e0b\u6587 token：${beforeValue} → ${afterValue}（${sign}${deltaValue}）${closure}。\u786e\u5b9a\u63d0\u4ea4\uff1f` : `Estimated context tokens: ${beforeValue} → ${afterValue} (${sign}${deltaValue})${closure}. Continue?`;
+    		},
     		showHidden: zh ? "显示隐藏内容" : "Show hidden content",
     		searchPlaceholder: zh ? "搜索：用户消息和 AI 回答…" : "Search user messages and AI answers…",
     		searchPlaceholderForScope: (scope) => zh ? scope === "all" ? "搜索：全文…" : "搜索：用户消息和 AI 回答…" : scope === "all" ? "Search full history…" : "Search user messages and AI answers…",
@@ -2148,7 +2163,7 @@ window.__ModuleLoader__.load({
     //#endregion
     //#region \0context-editor-client-css
     const style = document.createElement("style");
-    style.textContent = ".context-editor {\n  display: flex;\n  flex-direction: column;\n  gap: 0.65rem;\n  height: 100%;\n  min-height: 0;\n  padding: 0.85rem 1rem 1.25rem;\n  color: var(--dsh-fg, var(--foreground, inherit));\n}\n\n.context-editor__controls {\n  position: sticky;\n  top: 0;\n  z-index: 10;\n  display: grid;\n  gap: 0.55rem;\n  padding: 0.15rem 0 0.65rem;\n  background: var(--dsh-panel-bg, var(--background, var(--dsh-card-bg, #fff)));\n  border-bottom: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  box-shadow: 0 0.35rem 0.75rem color-mix(in srgb, var(--dsh-shadow, #172033) 12%, transparent);\n}\n\n.context-editor__toolbar,\n.context-editor__searchbar,\n.context-editor__actions {\n  display: flex;\n  align-items: center;\n  gap: 0.45rem;\n  flex-wrap: wrap;\n}\n\n.context-editor__filters { display: flex; align-items: flex-start; gap: 0.35rem; flex-wrap: wrap; }\n.context-editor__filter-group { display: inline-flex; align-items: flex-start; gap: 0.25rem; }\n.context-editor__subfilters { display: inline-flex; gap: 0.25rem; padding-top: 0.1rem; }\n.context-editor__filter,\n.context-editor__actions button,\n.context-editor__searchbar button,\n.context-editor__row button {\n  border: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  border-radius: 0.45rem;\n  background: var(--dsh-control-bg, var(--background, transparent));\n  color: inherit;\n  padding: 0.28rem 0.55rem;\n  cursor: pointer;\n}\n.context-editor__filter.is-active,\n.context-editor__filter.is-mixed { background: var(--dsh-accent-soft, #e8efff); border-color: var(--dsh-accent, #7190e8); }\n.context-editor__filter.is-mixed { background: linear-gradient(90deg, var(--dsh-accent-soft, #e8efff) 50%, var(--dsh-control-bg, var(--background, transparent)) 50%); }\n.context-editor button:disabled { cursor: not-allowed; opacity: 0.45; }\n.context-editor__toggle { display: inline-flex; align-items: center; gap: 0.3rem; margin-left: auto; }\n.context-editor__searchbar input { flex: 1 1 20rem; min-width: 12rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.38rem 0.55rem; background: var(--dsh-input-bg, transparent); color: inherit; }\n.context-editor__search-summary { color: var(--dsh-muted, #687386); font-size: 0.82rem; }\n.context-editor__actions { padding-bottom: 0.15rem; }\n.context-editor__running { color: var(--dsh-muted, #687386); font-size: 0.82rem; }\n.context-editor__error { color: var(--dsh-danger, #b42318); font-size: 0.82rem; }\n.context-editor__list { overflow: visible; min-height: 0; display: flex; flex-direction: column; gap: 0.5rem; padding-right: 0.2rem; }\n.context-editor__row { display: flex; align-items: flex-start; gap: 0.6rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.55rem; padding: 0.65rem; background: var(--dsh-card-bg, transparent); }\n.context-editor__row.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }\n.context-editor__row.is-hidden { opacity: 0.82; }\n.context-editor__row--placeholder { align-items: center; min-height: 2.4rem; border-style: dashed; }\n.context-editor__row--placeholder input { margin-top: 0.2rem; }\n.context-editor__placeholder-text { flex: 1; color: var(--dsh-muted, #687386); font-size: 0.9rem; }\n.context-editor__row-content { flex: 1; min-width: 0; }\n.context-editor__row-meta { display: flex; align-items: center; gap: 0.45rem; color: var(--dsh-muted, #687386); font-size: 0.75rem; margin-bottom: 0.35rem; }\n.context-editor__kind { font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }\n.context-editor__hidden-badge { color: var(--dsh-warning, #996b00); }\n.context-editor__units { display: grid; gap: 0.45rem; }\n.context-editor__unit { border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.45rem 0.55rem; }\n.context-editor__unit.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }\n.context-editor__unit.is-hidden { opacity: 0.82; }\n.context-editor__unit-header { display: flex; align-items: center; gap: 0.45rem; min-height: 1.65rem; color: var(--dsh-muted, #687386); font-size: 0.78rem; }\n.context-editor__unit-select { display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer; }\n.context-editor__unit-kind { font-weight: 600; }\n.context-editor__unit-header button { margin-left: auto; }\n.context-editor__unit-body { min-width: 0; }\n.context-editor__unit-placeholder { color: var(--dsh-muted, #687386); padding: 0.35rem 0; font-size: 0.9rem; }\n.context-editor__record-body { display: grid; gap: 0.25rem; }\n.context-editor__atom { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }\n.context-editor__atom--reasoning { color: var(--dsh-muted, #687386); }\n.context-editor__tool-name { font-weight: 600; }\n.context-editor__hit { border-radius: 0.18rem; background: var(--dsh-highlight, #ffe28a); color: inherit; padding: 0 0.08rem; }\n.context-editor__state { color: var(--dsh-muted, #687386); padding: 2rem 0; text-align: center; }\n.context-editor__empty { color: var(--dsh-muted, #687386); }\n\n@media (max-width: 42rem) {\n  .context-editor__searchbar input { flex-basis: 100%; min-width: 0; }\n  .context-editor__toggle { margin-left: 0; }\n  .context-editor__search-summary { flex: 1 1 100%; }\n}\n";
+    style.textContent = ".context-editor {\n  display: flex;\n  flex-direction: column;\n  gap: 0.65rem;\n  height: 100%;\n  min-height: 0;\n  padding: 0.85rem 1rem 1.25rem;\n  color: var(--dsh-fg, var(--foreground, inherit));\n}\n\n.context-editor__controls {\n  position: sticky;\n  top: 0;\n  z-index: 10;\n  display: grid;\n  gap: 0.55rem;\n  padding: 0.15rem 0 0.65rem;\n  background: var(--dsh-panel-bg, var(--background, var(--dsh-card-bg, #fff)));\n  border-bottom: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  box-shadow: 0 0.35rem 0.75rem color-mix(in srgb, var(--dsh-shadow, #172033) 12%, transparent);\n}\n\n.context-editor__toolbar,\n.context-editor__searchbar,\n.context-editor__actions {\n  display: flex;\n  align-items: center;\n  gap: 0.45rem;\n  flex-wrap: wrap;\n}\n\n.context-editor__filters { display: flex; align-items: flex-start; gap: 0.35rem; flex-wrap: wrap; }\n.context-editor__filter-group { display: inline-flex; align-items: flex-start; gap: 0.25rem; }\n.context-editor__subfilters { display: inline-flex; gap: 0.25rem; padding-top: 0.1rem; }\n.context-editor__filter,\n.context-editor__actions button,\n.context-editor__searchbar button,\n.context-editor__row button {\n  border: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  border-radius: 0.45rem;\n  background: var(--dsh-control-bg, var(--background, transparent));\n  color: inherit;\n  padding: 0.28rem 0.55rem;\n  cursor: pointer;\n}\n.context-editor__filter.is-active,\n.context-editor__filter.is-mixed { background: var(--dsh-accent-soft, #e8efff); border-color: var(--dsh-accent, #7190e8); }\n.context-editor__filter.is-mixed { background: linear-gradient(90deg, var(--dsh-accent-soft, #e8efff) 50%, var(--dsh-control-bg, var(--background, transparent)) 50%); }\n.context-editor button:disabled { cursor: not-allowed; opacity: 0.45; }\n.context-editor__toggle { display: inline-flex; align-items: center; gap: 0.3rem; margin-left: auto; }\n.context-editor__searchbar input { flex: 1 1 20rem; min-width: 12rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.38rem 0.55rem; background: var(--dsh-input-bg, transparent); color: inherit; }\n.context-editor__search-summary { color: var(--dsh-muted, #687386); font-size: 0.82rem; }\n.context-editor__actions { padding-bottom: 0.15rem; }\n.context-editor__running { color: var(--dsh-muted, #687386); font-size: 0.82rem; }\n.context-editor__error { color: var(--dsh-danger, #b42318); font-size: 0.82rem; }\n.context-editor__list { overflow: visible; min-height: 0; display: flex; flex-direction: column; gap: 0.5rem; padding-right: 0.2rem; }\n.context-editor__row { display: flex; align-items: flex-start; gap: 0.6rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.55rem; padding: 0.65rem; background: var(--dsh-card-bg, transparent); }\n.context-editor__row.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }\n.context-editor__row.is-hidden { opacity: 0.82; }\n.context-editor__row--placeholder { align-items: center; min-height: 2.4rem; border-style: dashed; }\n.context-editor__row--placeholder input { margin-top: 0.2rem; }\n.context-editor__placeholder-text { flex: 1; color: var(--dsh-muted, #687386); font-size: 0.9rem; }\n.context-editor__row-content { flex: 1; min-width: 0; }\n.context-editor__row-meta { display: flex; align-items: center; gap: 0.45rem; color: var(--dsh-muted, #687386); font-size: 0.75rem; margin-bottom: 0.35rem; }\n.context-editor__kind { font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }\n.context-editor__hidden-badge { color: var(--dsh-warning, #996b00); }\n.context-editor__context-badge { color: var(--dsh-accent, #4568c4); font-weight: 600; }\n.context-editor__context-badge.is-unavailable { color: var(--dsh-muted, #687386); }\n.context-editor__unit.is-context-excluded { border-color: color-mix(in srgb, var(--dsh-accent, #7190e8) 55%, var(--dsh-border, #d7dbe2)); }\n.context-editor__context-toggle { margin-left: auto; }\n.context-editor__units { display: grid; gap: 0.45rem; }\n.context-editor__unit { border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.45rem 0.55rem; }\n.context-editor__unit.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }\n.context-editor__unit.is-hidden { opacity: 0.82; }\n.context-editor__unit-header { display: flex; align-items: center; gap: 0.45rem; min-height: 1.65rem; color: var(--dsh-muted, #687386); font-size: 0.78rem; }\n.context-editor__unit-select { display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer; }\n.context-editor__unit-kind { font-weight: 600; }\n.context-editor__unit-header button { margin-left: auto; }\n.context-editor__unit-body { min-width: 0; }\n.context-editor__unit-placeholder { color: var(--dsh-muted, #687386); padding: 0.35rem 0; font-size: 0.9rem; }\n.context-editor__record-body { display: grid; gap: 0.25rem; }\n.context-editor__atom { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }\n.context-editor__atom--reasoning { color: var(--dsh-muted, #687386); }\n.context-editor__tool-name { font-weight: 600; }\n.context-editor__hit { border-radius: 0.18rem; background: var(--dsh-highlight, #ffe28a); color: inherit; padding: 0 0.08rem; }\n.context-editor__state { color: var(--dsh-muted, #687386); padding: 2rem 0; text-align: center; }\n.context-editor__empty { color: var(--dsh-muted, #687386); }\n\n@media (max-width: 42rem) {\n  .context-editor__searchbar input { flex-basis: 100%; min-width: 0; }\n  .context-editor__toggle { margin-left: 0; }\n  .context-editor__search-summary { flex: 1 1 100%; }\n}\n";
     document.head.appendChild(style);
     //#endregion
     //#region adapters/deepseek-harness/client.js
@@ -2222,7 +2237,8 @@ window.__ModuleLoader__.load({
     		atomIds: atoms.map((atom) => atom.id),
     		atoms,
     		viewState: record.viewState,
-    		mutable: record.mutable
+    		mutable: record.mutable,
+    		projectionState: record.projectionState ?? "include"
     	}];
     }
     function highlight(text, match) {
@@ -2385,6 +2401,21 @@ window.__ModuleLoader__.load({
     	async undo(baseRevision) {
     		return this.call("undoView", { baseRevision });
     	}
+    	async previewContext(action, expectedRevision, unitIds) {
+    		return this.call("previewContext", {
+    			action,
+    			expectedRevision,
+    			...unitIds === void 0 ? {} : { unitIds }
+    		});
+    	}
+    	async commitContext(operationId, action, expectedRevision, unitIds) {
+    		return this.call("commitContext", {
+    			operationId,
+    			action,
+    			expectedRevision,
+    			...unitIds === void 0 ? {} : { unitIds }
+    		});
+    	}
     };
     function FilterButton({ kind, state, onClick, text, label }) {
     	const enabled = state === "on";
@@ -2411,31 +2442,40 @@ window.__ModuleLoader__.load({
     		}, toolName, h("span", null, atomMatch ? highlight(atom.text ?? "", match) : atom.text ?? ""));
     	}));
     }
-    function UnitSection({ unit, selected, onSelect, focused, showHidden, match, disabled, onRestore, registerNode, text }) {
+    function UnitSection({ unit, selected, onSelect, focused, showHidden, match, disabled, onRestore, onContextToggle, registerNode, text }) {
     	const hidden = unit.viewState === "hide" || unit.viewState === "mixed";
     	const mixed = unit.viewState === "mixed";
+    	const projectionState = unit.projectionState ?? "include";
+    	const contextExcluded = projectionState === "exclude" || projectionState === "mixed";
+    	const contextUnavailable = projectionState === "unavailable";
     	const body = hidden && !showHidden ? h("div", { className: "context-editor__unit-placeholder" }, mixed ? text.mixedPlaceholder : text.hiddenPlaceholder(unit.kind)) : h(UnitBody, {
     		unit,
     		match,
     		text
     	});
     	return h("div", {
-    		className: `context-editor__unit ${focused ? "is-focused" : ""} ${hidden ? "is-hidden" : ""}`,
+    		className: `context-editor__unit ${focused ? "is-focused" : ""} ${hidden ? "is-hidden" : ""} ${contextExcluded ? "is-context-excluded" : ""}`,
     		"data-unit-id": unit.id,
     		"data-unit-kind": unit.kind,
+    		"data-context-state": projectionState,
     		ref: (node) => registerNode?.(unit.id, node)
     	}, h("div", { className: "context-editor__unit-header" }, h("label", { className: "context-editor__unit-select" }, h("input", {
     		type: "checkbox",
     		checked: selected,
     		disabled,
     		onChange: (event) => onSelect(event)
-    	}), h("span", { className: "context-editor__unit-kind" }, text.unitKind(unit.kind))), mixed ? h("span", { className: "context-editor__hidden-badge" }, text.partiallyHidden) : null, hidden && !mixed ? h("span", { className: "context-editor__hidden-badge" }, text.hidden) : null, hidden ? h("button", {
+    	}), h("span", { className: "context-editor__unit-kind" }, text.unitKind(unit.kind))), mixed ? h("span", { className: "context-editor__hidden-badge" }, text.partiallyHidden) : null, hidden && !mixed ? h("span", { className: "context-editor__hidden-badge" }, text.hidden) : null, contextExcluded ? h("span", { className: "context-editor__context-badge" }, text.contextState(projectionState)) : null, contextUnavailable ? h("span", { className: "context-editor__context-badge is-unavailable" }, text.contextState(projectionState)) : null, hidden ? h("button", {
     		type: "button",
     		disabled,
     		onClick: onRestore
-    	}, text.restore) : null), h("div", { className: "context-editor__unit-body" }, body));
+    	}, text.restore) : null, h("button", {
+    		type: "button",
+    		className: "context-editor__context-toggle",
+    		disabled: disabled || contextUnavailable,
+    		onClick: onContextToggle
+    	}, contextExcluded ? text.restoreContext : text.excludeContext)), h("div", { className: "context-editor__unit-body" }, body));
     }
-    function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, match, disabled, onRestore, registerNode, text }) {
+    function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, match, disabled, onRestore, onContextToggle, registerNode, text }) {
     	const units = unitsForRecord(record);
     	const focused = units.some((unit) => unit.id === focusedUnitId);
     	return h("article", {
@@ -2451,6 +2491,7 @@ window.__ModuleLoader__.load({
     		match: focusedUnitId === unit.id ? match : null,
     		disabled,
     		onRestore: () => onRestore(unit.id),
+    		onContextToggle: () => onContextToggle(unit),
     		registerNode,
     		text
     	})))));
@@ -2474,6 +2515,7 @@ window.__ModuleLoader__.load({
     	const [match, setMatch] = (0, react.useState)(null);
     	const [selected, setSelected] = (0, react.useState)(() => /* @__PURE__ */ new Set());
     	const [matching, setMatching] = (0, react.useState)(false);
+    	const [contextMutating, setContextMutating] = (0, react.useState)(false);
     	const lastSelectedIndex = (0, react.useRef)(null);
     	const loadSequence = (0, react.useRef)(0);
     	const searchSequence = (0, react.useRef)(0);
@@ -2515,7 +2557,8 @@ window.__ModuleLoader__.load({
     	]);
     	const visibleUnits = (0, react.useMemo)(() => visibleRecords.flatMap((record) => unitsForRecord(record)), [visibleRecords]);
     	const selectedCount = selected.size;
-    	const readOnly = running || loaded.status === "loading" || loaded.status === "refreshing";
+    	const readOnly = running || loaded.status === "loading" || loaded.status === "refreshing" || contextMutating;
+    	const contextAvailable = loaded.snapshot?.capabilities?.contextExclusion === true;
     	const refresh = (0, react.useCallback)(async () => {
     		const ticket = ++loadSequence.current;
     		setLoaded((current) => ({
@@ -2736,6 +2779,40 @@ window.__ModuleLoader__.load({
     			}));
     		}
     	};
+    	const mutateContext = async (action, unitIds) => {
+    		if (readOnly || !contextAvailable || loaded.snapshot === null) return;
+    		setContextMutating(true);
+    		try {
+    			const preview = await controller.previewContext(action, loaded.snapshot.revision, unitIds);
+    			if (preview?.conflict) {
+    				await refresh();
+    				return;
+    			}
+    			const estimate = preview?.tokenEstimate ?? {};
+    			const closureCount = Math.max(0, (preview?.effectiveTargets?.length ?? 0) - (preview?.normalizedTargets?.length ?? 0));
+    			const warning = text.contextPreview(estimate.before, estimate.after, estimate.delta, closureCount);
+    			let confirmed = true;
+    			if (typeof globalThis.confirm === "function") try {
+    				confirmed = globalThis.confirm(warning);
+    			} catch {
+    				confirmed = true;
+    			}
+    			if (!confirmed) return;
+    			if ((await controller.commitContext(preview.operationId, action, preview.expectedRevision ?? loaded.snapshot.revision, unitIds))?.conflict) {
+    				await refresh();
+    				return;
+    			}
+    			await refresh();
+    		} catch (error) {
+    			setLoaded((current) => ({
+    				...current,
+    				status: "error",
+    				error
+    			}));
+    		} finally {
+    			setContextMutating(false);
+    		}
+    	};
     	const undo = async () => {
     		if (readOnly || loaded.snapshot === null || !loaded.snapshot.canUndo) return;
     		try {
@@ -2847,6 +2924,14 @@ window.__ModuleLoader__.load({
     		onClick: () => void mutate("reset")
     	}, text.restoreAll), h("button", {
     		type: "button",
+    		disabled: readOnly || !contextAvailable || selectedCount === 0,
+    		onClick: () => void mutateContext("exclude", [...selected])
+    	}, text.excludeSelected(selectedCount)), h("button", {
+    		type: "button",
+    		disabled: readOnly || !contextAvailable || selectedCount === 0,
+    		onClick: () => void mutateContext("restore", [...selected])
+    	}, text.restoreContextSelected), h("button", {
+    		type: "button",
     		disabled: readOnly || !loaded.snapshot?.canUndo,
     		onClick: () => void undo()
     	}, text.undo), running ? h("span", { className: "context-editor__running" }, text.running) : null, loaded.status === "error" ? h("span", { className: "context-editor__error" }, errorText(loaded.error)) : null)), h("div", { className: "context-editor__list" }, visibleRecords.map((record) => h(RecordRow, {
@@ -2859,6 +2944,7 @@ window.__ModuleLoader__.load({
     		match: matchUnitId === match?.unitId ? match : null,
     		disabled: readOnly,
     		onRestore: (unitId) => void mutate("restore", [unitId]),
+    		onContextToggle: (unit) => void mutateContext(unit.projectionState === "exclude" || unit.projectionState === "mixed" ? "restore" : "exclude", [unit.id]),
     		registerNode: registerUnitNode,
     		text
     	}))), loaded.status === "loading" ? h("div", { className: "context-editor__state" }, text.loading) : null, loaded.status !== "loading" && visibleRecords.length === 0 ? h("div", { className: "context-editor__state" }, text.noRecords) : null);

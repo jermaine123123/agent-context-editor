@@ -195,4 +195,40 @@ describe('DeepSeek Harness Context Editor core', () => {
     expect(matches.map(match => match.unitKind)).toEqual(['reasoning', 'answer'])
     expect(matches.map(match => match.occurrenceCount)).toEqual([2, 1])
   })
+
+  it('keeps display atoms stable while native projection states change', () => {
+    const events = [
+      event(0, 'user/message', { role: 'user', content: [{ type: 'text', text: 'keep' }] }),
+      event(1, 'assistant/message', {
+        turn: 1,
+        message: {
+          role: 'assistant',
+          source: { kind: 'model' },
+          content: [{ type: 'reasoning', text: 'think' }, { type: 'text', text: 'answer' }],
+        },
+      }),
+    ]
+    const projectionEvent = event(2, 'context/projection', {
+      schemaVersion: 1,
+      owner: 'test-owner',
+      operationId: 'test-operation',
+      baseSeq: 1,
+      changes: [{
+        rootEventSeq: 1,
+        mode: 'replace',
+        message: {
+          id: 'replacement',
+          role: 'assistant',
+          source: { kind: 'model' },
+          content: [{ type: 'text', text: 'answer' }],
+        },
+      }],
+    })
+    const before = buildProjection(session, events)
+    const after = buildProjection(session, [...events, projectionEvent])
+    expect(after.records.map(record => record.atoms)).toEqual(before.records.map(record => record.atoms))
+    const ai = after.records.find(record => record.kind === 'ai')!
+    expect(after.projectionStates.get(ai.units.find(unit => unit.kind === 'reasoning')!.atomIds[0]!)).toBe('exclude')
+    expect(after.projectionStates.get(ai.units.find(unit => unit.kind === 'answer')!.atomIds[0]!)).toBe('include')
+  })
 })

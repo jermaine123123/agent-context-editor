@@ -2,14 +2,16 @@
  * DeepSeek Harness Host adapter.
  *
  * The adapter reads the complete durable Session event log, projects only
- * finalized user/AI/tool records, and stores V2 view events in a separate
- * storage-domain sidecar.  Nothing is appended to the Session log, so normal
- * Chat and model requests remain untouched.
+ * finalized user/AI/tool records, stores visual V2 view events in a separate
+ * storage-domain sidecar, and folds native `context/projection` events into
+ * model-derived messages. Surface events and normal Chat display remain unchanged.
  */
 
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { z } from 'zod'
+import { foldSurface } from '@deepseek-ai/dsh-session'
+import { selectProjectionTargets } from './core-runtime.js'
 import {
   buildProjection,
   buildViewEvent,
@@ -23,7 +25,7 @@ import {
 } from './core.js'
 import { PACKAGE_NAME } from './typert.js'
 
-export const inject = ['storageDomain', 'sessionPersistence', 'sessions']
+export const inject = ['storageDomain', 'sessionPersistence', 'sessions', 'agents']
 
 const viewStateSchema = z.enum(['show', 'collapse', 'hide'])
 const nonNegativeSafeInteger = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
@@ -92,8 +94,10 @@ function asPageCursor(value) {
   return Number.isSafeInteger(number) && number >= 0 ? number : 0
 }
 
-function isBusySession(sessions, sessionId) {
-  const live = sessions?.get?.(sessionId)
+function isBusySession(ctx, sessionId) {
+  const agent = ctx?.agents?.get?.(sessionId)
+  if (agent !== undefined) return agent.status === 'running'
+  const live = ctx?.sessions?.get?.(sessionId)
   if (live === undefined) return false
   const snapshot = live.getSnapshot?.()
   return Boolean(snapshot?.running ?? live.running ?? live.status === 'running')
@@ -101,6 +105,169 @@ function isBusySession(sessions, sessionId) {
 
 function success(snapshot, extra = {}) {
   return { ok: true, ...extra, snapshot }
+}
+
+function messageForRoot(event) {
+  const value = event && typeof event === 'object' ? event : {}
+  const data = value.data && typeof value.data === 'object' ? value.data : {}
+  if (value.type === 'user/message') return data
+  if (value.type === 'assistant/message') return data.message
+  if (value.type === 'tool/result') return data.message
+  return undefined
+}
+
+function cloneReplacementMessage(original, excludedBlockIndices, replacementId) {
+  const copy = structuredClone(original)
+  const blocks = Array.isArray(copy?.content) ? copy.content : []
+  copy.content = blocks.filter((_block, index) => !excludedBlockIndices.has(index))
+  copy.id = replacementId ?? globalThis.crypto?.randomUUID?.() ?? randomId('context-message')
+  if (copy.role === 'assistant' && copy.source?.kind === 'model') {
+    const source = copy.source
+    const { replayState: _replayState, ...safeSource } = source
+    copy.source = safeSource
+  }
+  return copy
+}
+
+function sameJson(left, right) {
+  try {
+    return JSON.stringify(left) === JSON.stringify(right)
+  } catch {
+    return false
+  }
+}
+
+function sameIdSet(left, right) {
+  if (left.size !== right.size) return false
+  for (const value of left) if (!right.has(value)) return false
+  return true
+}
+
+function sameOptionalIdList(left, right) {
+  if (left === undefined || right === undefined) return left === right
+  return sameIdSet(new Set(left.map(String)), new Set(right.map(String)))
+}
+
+function assertContextOperationReuse(stored, sessionId, action, unitIds, recordIds) {
+  if (stored === undefined) return
+  if (stored.sessionId !== sessionId || stored.action !== action
+    || !sameOptionalIdList(stored.unitIds, unitIds)
+    || !sameOptionalIdList(stored.recordIds, recordIds)) {
+    throw new Error('CONTEXT_EDITOR_OPERATION_REUSED')
+  }
+}
+
+function buildNativeContextChanges(projection, action, request) {
+  if (action !== 'exclude' && action !== 'restore') throw new Error('CONTEXT_EDITOR_CONTEXT_ACTION_INVALID')
+  const selection = selectProjectionTargets(
+    projection.records,
+    Array.isArray(request?.unitIds) ? request.unitIds.map(String) : undefined,
+    Array.isArray(request?.recordIds) ? request.recordIds.map(String) : undefined,
+  )
+  if (selection.unavailableUnitIds.length > 0) {
+    throw new Error('CONTEXT_EDITOR_CONTEXT_UNAVAILABLE:' + selection.unavailableUnitIds.join(','))
+  }
+
+  const units = projection.records.flatMap(record => (record.units ?? []).map(unit => ({ record, unit })))
+  const selectedAtomIds = new Set(
+    units
+      .filter(item => selection.effectiveUnitIds.includes(item.unit.id))
+      .flatMap(item => item.unit.atomIds),
+  )
+  const atomsByRoot = new Map()
+  for (const atom of projection.atoms) {
+    const root = Number(atom.sourceRef?.entryId)
+    if (!Number.isSafeInteger(root)) continue
+    const group = atomsByRoot.get(root)
+    if (group) group.push(atom)
+    else atomsByRoot.set(root, [atom])
+  }
+
+  const sourceEvents = projection.sourceEvents ?? []
+  const changes = []
+  const nextExcludedByRoot = new Map()
+  const beforeExcludedByRoot = new Map()
+  for (const [root, atoms] of atomsByRoot) {
+    const selected = new Set(atoms.filter(atom => selectedAtomIds.has(atom.id)).map(atom => atom.id))
+    if (selected.size === 0) continue
+    const currentExcluded = new Set(atoms.filter(atom => projection.projectionStates?.get(atom.id) === 'exclude').map(atom => atom.id))
+    const unavailable = atoms.some(atom => projection.projectionStates?.get(atom.id) === 'unavailable')
+    if (unavailable) throw new Error('CONTEXT_EDITOR_CONTEXT_UNAVAILABLE:root-' + root)
+    const nextExcluded = action === 'exclude'
+      ? new Set([...currentExcluded, ...selected])
+      : new Set([...currentExcluded].filter(id => !selected.has(id)))
+    beforeExcludedByRoot.set(root, currentExcluded)
+    nextExcludedByRoot.set(root, nextExcluded)
+    if (sameIdSet(currentExcluded, nextExcluded)) continue
+
+    const overlay = projection.contextOverlays?.get(root)
+    if (nextExcluded.size === 0) {
+      if (overlay !== undefined) changes.push({ rootEventSeq: root, mode: 'clear' })
+      continue
+    }
+    if (nextExcluded.size >= atoms.length) {
+      if (overlay?.mode === 'remove') continue
+      changes.push({ rootEventSeq: root, mode: 'remove' })
+      continue
+    }
+
+    const original = messageForRoot(sourceEvents.find(event => Number(event?.seq) === root) ?? sourceEvents[root])
+    if (original === undefined || !Array.isArray(original.content)) {
+      throw new Error('CONTEXT_EDITOR_CONTEXT_UNAVAILABLE:root-' + root)
+    }
+    const excludedBlockIndices = new Set(
+      atoms
+        .filter(atom => nextExcluded.has(atom.id))
+        .map(atom => atom.sourceRef.blockIndex),
+    )
+    const replacementId = request?.operationId === undefined
+      ? undefined
+      : `context-${String(request.operationId)}-${root}`
+    const message = cloneReplacementMessage(original, excludedBlockIndices, replacementId)
+    if (message.content.length === 0) {
+      changes.push({ rootEventSeq: root, mode: 'remove' })
+    } else {
+      changes.push({ rootEventSeq: root, mode: 'replace', message })
+    }
+  }
+
+  let beforeTokens = 0
+  let afterTokens = 0
+  for (const atom of projection.atoms) {
+    const root = Number(atom.sourceRef?.entryId)
+    const current = projection.projectionStates?.get(atom.id) ?? 'include'
+    if (current === 'include') beforeTokens += atom.approxTokens ?? 0
+    const nextExcluded = nextExcludedByRoot.get(root)
+    const excluded = nextExcluded === undefined
+      ? current === 'exclude'
+      : nextExcluded.has(atom.id)
+    if (!excluded && current !== 'unavailable') afterTokens += atom.approxTokens ?? 0
+  }
+  return {
+    changes,
+    selection,
+    tokenEstimate: {
+      before: beforeTokens,
+      after: afterTokens,
+      delta: afterTokens - beforeTokens,
+    },
+    beforeExcludedByRoot,
+  }
+}
+
+async function withSourceAgent(ctx, sessionId, operation) {
+  const live = ctx?.agents?.get?.(sessionId)
+  if (live !== undefined) {
+    if (live.status === 'running') throw new Error('CONTEXT_EDITOR_BUSY')
+    return live.runMaintenance(() => operation(live))
+  }
+  if (ctx?.agents?.resume === undefined) throw new Error('CONTEXT_EDITOR_AGENT_UNAVAILABLE')
+  const handle = await ctx.agents.resume({ resumeSessionId: sessionId })
+  try {
+    return await handle.agent.runMaintenance(() => operation(handle.agent))
+  } finally {
+    await handle.dispose()
+  }
 }
 
 /** One Host service instance owns all sidecar writes and search caches. */
@@ -113,6 +280,7 @@ export class ContextEditorHost extends TypertRemoteService {
     this.operationTails = new Map()
     this.searchCache = new Map()
     this.searchSequence = 0
+    this.contextOperations = new Map()
     this.mutationAdmissionOpen = true
   }
 
@@ -162,10 +330,20 @@ export class ContextEditorHost extends TypertRemoteService {
     const inspection = await this.inspect(sessionId)
     const identity = identityFromInspection(inspection, sessionId)
     const row = this.rowFor(identity)
-    return buildProjection(identity, inspection.events ?? [], row)
+    const events = inspection.events ?? []
+    const activeSurfaceSeqs = foldSurface(events).nodes
+    return buildProjection(identity, events, row, { activeSurfaceSeqs })
   }
 
-  snapshotOf(projection, running = isBusySession(this.ctx.sessions, projection.identity.id)) {
+  projectionFromSession(session) {
+    const identity = identityFromInspection({ meta: session.header }, session.id)
+    const row = this.rowFor(identity)
+    const events = session.events ?? []
+    const activeSurfaceSeqs = foldSurface(events).nodes
+    return buildProjection(identity, events, row, { activeSurfaceSeqs })
+  }
+
+  snapshotOf(projection, running = isBusySession(this.ctx, projection.identity.id)) {
     return {
       host: 'deepseek-harness',
       sessionId: projection.identity.id,
@@ -177,6 +355,7 @@ export class ContextEditorHost extends TypertRemoteService {
         id: record.id,
         kind: record.kind,
         viewState: record.viewState,
+        projectionState: record.projectionState,
         mutable: record.mutable,
         units: (record.units ?? []).map(unit => ({
           id: unit.id,
@@ -184,6 +363,7 @@ export class ContextEditorHost extends TypertRemoteService {
           kind: unit.kind,
           atomIds: unit.atomIds,
           viewState: unit.viewState,
+          projectionState: unit.projectionState,
           mutable: unit.mutable,
         })),
         ...(record.entryId === undefined ? {} : { entryId: record.entryId }),
@@ -200,7 +380,9 @@ export class ContextEditorHost extends TypertRemoteService {
         viewMutation: !running,
         undo: !running,
         persistence: true,
-        contextExclusion: false,
+        // rc.8 Host/Browser composition, regression coverage, and a real
+        // DeepSeek API smoke request have passed; advertise native projection.
+        contextExclusion: true,
       },
     }
   }
@@ -294,10 +476,159 @@ export class ContextEditorHost extends TypertRemoteService {
     })
   }
 
+  async previewContext(request) {
+    const sessionId = requestSessionId(request)
+    if (isBusySession(this.ctx, sessionId)) throw new Error('CONTEXT_EDITOR_BUSY')
+    const projection = await this.readProjection(sessionId)
+    const requestedRevision = request?.expectedRevision ?? request?.baseRevision
+    if (requestedRevision !== undefined && String(requestedRevision) !== projection.revision) {
+      return {
+        ok: false,
+        conflict: true,
+        expectedRevision: projection.revision,
+        snapshot: this.snapshotOf(projection),
+      }
+    }
+    const action = request?.action
+    const unitIds = Array.isArray(request?.unitIds) ? request.unitIds.map(String) : undefined
+    const recordIds = Array.isArray(request?.recordIds) ? request.recordIds.map(String) : undefined
+    const operationId = String(request?.operationId ?? randomId('context-operation'))
+    const calculated = buildNativeContextChanges(projection, action, { ...request, unitIds, recordIds, operationId })
+    assertContextOperationReuse(this.contextOperations.get(operationId), sessionId, action, unitIds, recordIds)
+    this.contextOperations.set(operationId, {
+      sessionId,
+      expectedRevision: projection.revision,
+      action,
+      unitIds,
+      recordIds,
+      changes: structuredClone(calculated.changes),
+      tokenEstimate: calculated.tokenEstimate,
+    })
+    return {
+      ok: true,
+      operationId,
+      expectedRevision: projection.revision,
+      action,
+      normalizedTargets: calculated.selection.requestedUnitIds,
+      effectiveTargets: calculated.selection.effectiveUnitIds,
+      autoExpandedTargets: calculated.selection.autoExpandedUnitIds,
+      unavailableUnitIds: calculated.selection.unavailableUnitIds,
+      tokenEstimate: calculated.tokenEstimate,
+      changes: calculated.changes.map(change => ({
+        rootEventSeq: change.rootEventSeq,
+        mode: change.mode,
+      })),
+    }
+  }
+
+  async commitContext(request) {
+    const sessionId = requestSessionId(request)
+    return this.enqueue(sessionId, async () => {
+      const operationId = String(request?.operationId ?? randomId('context-operation'))
+      const stored = this.contextOperations.get(operationId)
+      const action = request?.action ?? stored?.action
+      const unitIds = Array.isArray(request?.unitIds)
+        ? request.unitIds.map(String)
+        : stored?.unitIds
+      const recordIds = Array.isArray(request?.recordIds)
+        ? request.recordIds.map(String)
+        : stored?.recordIds
+      assertContextOperationReuse(stored, sessionId, action, unitIds, recordIds)
+      const expectedRevision = String(
+        request?.expectedRevision
+        ?? request?.baseRevision
+        ?? stored?.expectedRevision
+        ?? '',
+      )
+      if (!expectedRevision) throw new Error('CONTEXT_EDITOR_REVISION_REQUIRED')
+
+      return withSourceAgent(this.ctx, sessionId, async (agent) => {
+        const session = agent.session
+        const projection = this.projectionFromSession(session)
+        const priorEvent = (session.events ?? []).find(event => event?.type === 'context/projection'
+          && event?.data?.owner === 'context-editor-deepseek-harness'
+          && event?.data?.operationId === operationId)
+        if (priorEvent !== undefined) {
+          if (stored?.changes !== undefined && !sameJson(stored.changes, priorEvent.data.changes)) {
+            throw new Error('CONTEXT_EDITOR_OPERATION_REUSED')
+          }
+          if (stored === undefined && action !== undefined) {
+            const priorIndex = session.events.indexOf(priorEvent)
+            const beforeSession = {
+              id: session.id,
+              header: session.header,
+              events: session.events.slice(0, priorIndex),
+            }
+            const priorProjection = this.projectionFromSession(beforeSession)
+            const expectedChanges = buildNativeContextChanges(priorProjection, action, {
+              unitIds,
+              recordIds,
+              operationId,
+            }).changes
+            if (!sameJson(expectedChanges, priorEvent.data.changes)) {
+              throw new Error('CONTEXT_EDITOR_OPERATION_REUSED')
+            }
+          }
+          await this.ctx.sessions.flush(session)
+          this.searchCache.clear()
+          const next = this.projectionFromSession(session)
+          return success(this.snapshotOf(next, false), {
+            operationId,
+            eventId: priorEvent.seq,
+            expectedRevision: next.revision,
+            tokenEstimate: stored?.tokenEstimate ?? { before: 0, after: 0, delta: 0 },
+          })
+        }
+        if (expectedRevision !== projection.revision) {
+          return {
+            ok: false,
+            conflict: true,
+            expectedRevision: projection.revision,
+            snapshot: this.snapshotOf(projection, false),
+          }
+        }
+        const calculated = buildNativeContextChanges(projection, action, {
+          unitIds,
+          recordIds,
+          operationId,
+        })
+        if (calculated.changes.length === 0) {
+          return success(this.snapshotOf(projection, false), {
+            operationId,
+            expectedRevision: projection.revision,
+            tokenEstimate: calculated.tokenEstimate,
+          })
+        }
+
+        const baseSeq = session.events.at(-1)?.seq ?? -1
+        if (baseSeq < 0) throw new Error('CONTEXT_EDITOR_SESSION_EMPTY')
+        const data = {
+          schemaVersion: 1,
+          owner: 'context-editor-deepseek-harness',
+          operationId,
+          baseSeq,
+          changes: calculated.changes,
+        }
+        const event = typeof session.appendContextProjection === 'function'
+          ? session.appendContextProjection(data)
+          : session.append('context/projection', data)
+        await this.ctx.sessions.flush(session)
+        this.searchCache.clear()
+        const next = this.projectionFromSession(session)
+        return success(this.snapshotOf(next, false), {
+          operationId,
+          eventId: event.seq,
+          expectedRevision: next.revision,
+          tokenEstimate: calculated.tokenEstimate,
+        })
+      })
+    })
+  }
+
   async commitView(request) {
     const sessionId = requestSessionId(request)
     return this.enqueue(sessionId, async () => {
-      if (isBusySession(this.ctx.sessions, sessionId)) throw new Error('CONTEXT_EDITOR_BUSY')
+      if (isBusySession(this.ctx, sessionId)) throw new Error('CONTEXT_EDITOR_BUSY')
       const projection = await this.readProjection(sessionId)
       if (String(request?.baseRevision ?? '') !== projection.revision) {
         return { ok: false, conflict: true, snapshot: this.snapshotOf(projection) }
@@ -343,7 +674,7 @@ export class ContextEditorHost extends TypertRemoteService {
   async undoView(request) {
     const sessionId = requestSessionId(request)
     return this.enqueue(sessionId, async () => {
-      if (isBusySession(this.ctx.sessions, sessionId)) throw new Error('CONTEXT_EDITOR_BUSY')
+      if (isBusySession(this.ctx, sessionId)) throw new Error('CONTEXT_EDITOR_BUSY')
       const projection = await this.readProjection(sessionId)
       if (String(request?.baseRevision ?? '') !== projection.revision) {
         return { ok: false, conflict: true, snapshot: this.snapshotOf(projection) }

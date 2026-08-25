@@ -1,8 +1,100 @@
 /*
  * GENERATED FILE - do not edit directly.
- * Canonical Core source digest: 733df2bbcbaf478f7a485a8b40ff4d86684cda73539204cf6b9dad6f1c655964
+ * Canonical Core source digest: 5b40cd1f4132deba15505e61db10055c5247c189d9a7562aaefc0ff37bc3658e
  * Rebuild with: npm run build:deepseek
  */
+//#region packages/context-editor-core/src/projection.ts
+function stateForAtom(states, atom) {
+	return states.get(atom.id) ?? "include";
+}
+function reduceProjectionStates(atoms, events) {
+	const result = /* @__PURE__ */ new Map();
+	const byId = new Map(atoms.map((atom) => [atom.id, atom]));
+	for (const atom of atoms) result.set(atom.id, "include");
+	for (const event of events) for (const change of event.changes) {
+		const atom = byId.get(change.atomId);
+		if (!atom) continue;
+		if (atom.fingerprint !== change.fingerprint || atom.sourceRef.entryId !== change.sourceRef.entryId || atom.sourceRef.blockIndex !== change.sourceRef.blockIndex) {
+			result.set(atom.id, "unavailable");
+			continue;
+		}
+		const current = result.get(atom.id) ?? "include";
+		if (current === "unavailable") continue;
+		if (current !== change.before && current !== change.after) {
+			result.set(atom.id, "unavailable");
+			continue;
+		}
+		result.set(atom.id, change.after);
+	}
+	return result;
+}
+function projectionStateForAtoms(atoms, states) {
+	if (!atoms.length) return "unavailable";
+	const values = atoms.map((atom) => stateForAtom(states, atom));
+	if (values.some((value) => value === "unavailable")) return "unavailable";
+	if (values.every((value) => value === "exclude")) return "exclude";
+	if (values.every((value) => value === "include")) return "include";
+	return "mixed";
+}
+function unitHasToolCall(unit, callIds) {
+	return unit.atoms.some((atom) => !!atom.toolCallId && callIds.has(atom.toolCallId));
+}
+function unitHasSignedReasoning(unit) {
+	return unit.kind === "reasoning" && unit.atoms.some((atom) => atom.hasSignature === true);
+}
+function unitHasKindAndTurn(unit, kind, turnIds) {
+	return unit.kind === kind && unit.atoms.some((atom) => turnIds.has(atom.turnId));
+}
+/**
+* Expand a user selection to a provider-safe context closure. Tool calls and
+* results are paired by call id. A signed reasoning block is kept with all
+* tool blocks in the same logical turn; the final answer remains independent.
+*/
+function selectProjectionTargets(records, unitIds, recordIds) {
+	const units = records.flatMap((record) => record.units.map((unit) => ({
+		record,
+		unit
+	})));
+	const requested = /* @__PURE__ */ new Set();
+	if (recordIds) {
+		for (const item of units) if (recordIds.includes(item.record.id)) requested.add(item.unit.id);
+	}
+	if (unitIds) {
+		for (const id of unitIds) if (units.some((item) => item.unit.id === id)) requested.add(id);
+	}
+	if (!unitIds && !recordIds) for (const item of units) requested.add(item.unit.id);
+	const effective = new Set(requested);
+	const selectedUnits = units.filter((item) => requested.has(item.unit.id)).map((item) => item.unit);
+	const callIds = new Set(selectedUnits.flatMap((unit) => unit.atoms.map((atom) => atom.toolCallId).filter((id) => !!id)));
+	for (const item of units) if (unitHasToolCall(item.unit, callIds)) effective.add(item.unit.id);
+	const selectedTurns = new Set(selectedUnits.flatMap((unit) => unit.atoms.map((atom) => atom.turnId)));
+	const selectedTool = selectedUnits.some((unit) => unit.kind === "tool");
+	const selectedSignedReasoning = selectedUnits.some(unitHasSignedReasoning);
+	if (selectedTool || selectedSignedReasoning) {
+		const hasSignedReasoning = units.some((item) => unitHasSignedReasoning(item.unit) && item.unit.atoms.some((atom) => selectedTurns.has(atom.turnId)));
+		const hasTool = units.some((item) => item.unit.kind === "tool" && item.unit.atoms.some((atom) => selectedTurns.has(atom.turnId)));
+		if (hasSignedReasoning && hasTool) {
+			for (const item of units) if (unitHasKindAndTurn(item.unit, "reasoning", selectedTurns) || unitHasKindAndTurn(item.unit, "tool", selectedTurns)) effective.add(item.unit.id);
+		}
+	}
+	const effectiveItems = units.filter((item) => effective.has(item.unit.id));
+	const recentTurnId = [...units].reverse().flatMap((item) => item.unit.atoms.map((atom) => atom.turnId))[0];
+	const requestedAtomIds = units.filter((item) => requested.has(item.unit.id)).flatMap((item) => item.unit.atomIds);
+	const effectiveAtomIds = effectiveItems.flatMap((item) => item.unit.atomIds);
+	const unavailableUnitIds = effectiveItems.filter((item) => !item.unit.mutable || item.unit.projectionState === "unavailable").map((item) => item.unit.id);
+	const requestedUnitIds = units.filter((item) => requested.has(item.unit.id)).map((item) => item.unit.id);
+	const effectiveUnitIds = effectiveItems.map((item) => item.unit.id);
+	return {
+		requestedUnitIds,
+		effectiveUnitIds,
+		autoExpandedUnitIds: effectiveUnitIds.filter((id) => !requested.has(id)),
+		requestedAtomIds,
+		effectiveAtomIds,
+		unavailableUnitIds,
+		touchesRecentTurn: !!recentTurnId && effectiveItems.some((item) => item.unit.atoms.some((atom) => atom.turnId === recentTurnId))
+	};
+}
+//#endregion
 //#region packages/context-editor-core/src/records.ts
 function recordIdFor(atom) {
 	if (atom.recordId) return atom.recordId;
@@ -40,7 +132,7 @@ function unitViewState(atoms, states) {
 	if (values.every((value) => value === "collapse")) return "collapse";
 	return "mixed";
 }
-function projectUnits(recordId, atoms, states) {
+function projectUnits(recordId, atoms, states, projectionStates) {
 	const order = [];
 	const groups = /* @__PURE__ */ new Map();
 	for (const atom of atoms) {
@@ -62,11 +154,12 @@ function projectUnits(recordId, atoms, states) {
 			atomIds: grouped.map((atom) => atom.id),
 			atoms: grouped,
 			viewState: unitViewState(grouped, states),
+			projectionState: projectionStateForAtoms(grouped, projectionStates ?? /* @__PURE__ */ new Map()),
 			mutable: true
 		};
 	});
 }
-function projectRecords(atoms, states) {
+function projectRecords(atoms, states, projectionStates) {
 	const order = [];
 	const groups = /* @__PURE__ */ new Map();
 	for (const atom of atoms) {
@@ -87,7 +180,7 @@ function projectRecords(atoms, states) {
 		const allHidden = grouped.length > 0 && grouped.every((atom) => states?.get(atom.id) === "hide");
 		const first = grouped[0];
 		const mutable = kind !== "tool" || grouped.every((atom) => !!atom.sourceRef.entryId);
-		const units = projectUnits(id, grouped, states).map((unit) => ({
+		const units = projectUnits(id, grouped, states, projectionStates).map((unit) => ({
 			...unit,
 			mutable
 		}));
@@ -103,6 +196,7 @@ function projectRecords(atoms, states) {
 			toolCallId: grouped.find((atom) => atom.toolCallId)?.toolCallId,
 			searchableText: grouped.map(fieldText).filter(Boolean).join("\n"),
 			viewState: allHidden ? "hide" : "show",
+			projectionState: projectionStateForAtoms(grouped, projectionStates ?? /* @__PURE__ */ new Map()),
 			mutable
 		};
 	});
@@ -155,6 +249,7 @@ function searchOccurrences(records, query, enabledKinds, scope = "dialogue", ena
 			atomIds: record.atomIds,
 			atoms: record.atoms,
 			viewState: record.viewState,
+			projectionState: record.projectionState,
 			mutable: record.mutable
 		}];
 		for (const unit of units) {
@@ -190,4 +285,4 @@ function searchRecords(records, query, enabledKinds, scope = "dialogue", enabled
 	});
 }
 //#endregion
-export { atomMatchesSearchScope, projectRecords, searchRecords };
+export { atomMatchesSearchScope, projectRecords, reduceProjectionStates, searchRecords, selectProjectionTargets };

@@ -35,7 +35,7 @@ describe("Pi sidecar", () => {
     expect(id).toBe("tx-1");
     const withPrefs = writeSidecarPrefs(sessionFile, "session-1", { version: 2, enabledKinds: ["ai"], showHidden: true });
     expect(withPrefs.document.events[0]?.anchorEntryId).toBe("leaf-1");
-    expect(withPrefs.document.prefs).toEqual({ version: 2, enabledKinds: ["ai"], showHidden: true });
+    expect(withPrefs.document.prefs).toEqual({ version: 3, enabledUnitKinds: ["reasoning", "answer"], showHidden: true });
     expect(JSON.parse(readFileSync(sidecarPath(sessionFile), "utf8")).schemaVersion).toBe(1);
   });
 
@@ -66,6 +66,6 @@ describe("Pi sidecar", () => {
     }), "utf8");
     const parsed = readSidecar(sessionFile, "session-1");
     expect(parsed.document.sessionId).toBe("session-1");
-    expect(parsed.document.prefs.enabledKinds).toEqual(["user", "ai", "tool"]);
+    expect(parsed.document.prefs.enabledUnitKinds).toEqual(["user", "reasoning", "answer", "tool"]);
   });
 });

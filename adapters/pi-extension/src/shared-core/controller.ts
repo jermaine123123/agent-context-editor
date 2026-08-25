@@ -1,5 +1,6 @@
 /* GENERATED FROM packages/context-editor-core; do not edit directly. */
 import type {
+  ContextEditableUnitKind,
   ContextEditorSnapshot,
   ContextRecordKind,
   ContextSearchMatch,
@@ -34,6 +35,7 @@ export interface ContextEditorTransport {
     workspaceId?: string | null
     query: string
     enabledKinds: readonly ContextRecordKind[]
+    enabledUnitKinds?: readonly ContextEditableUnitKind[]
     scope?: ContextSearchScope
   }): Promise<ContextEditorSearchInfo>
   getSearchMatch(input: {

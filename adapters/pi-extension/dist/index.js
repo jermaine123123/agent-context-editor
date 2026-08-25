@@ -1,8 +1,9 @@
 /* GENERATED FILE - rebuild with npm run build:pi. */
-/* Canonical Core source digest: 903a4588d3a0f0ac1d5bc66796a6557dfa249698a4b5737a8b9b59c1809626d9 */
+/* Canonical Core source digest: 24f3e81e3644d0df5cf93fedf44d57f6b655f315476061cb36a2e0fbe5d7881f */
 import { decodeKittyPrintable, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
 //#region adapters/pi-extension/src/shared-core/fingerprint.ts
 /** Deterministic identity check; this is not intended as a security hash. */
 function stableFingerprint(parts) {
@@ -39,6 +40,98 @@ function branchRevision(leafId, atoms, extra = []) {
 		...atoms.map((atom) => `${atom.id}:${atom.fingerprint}`),
 		...extra
 	]);
+}
+//#endregion
+//#region adapters/pi-extension/src/shared-core/projection.ts
+function stateForAtom(states, atom) {
+	return states.get(atom.id) ?? "include";
+}
+function reduceProjectionStates(atoms, events) {
+	const result = /* @__PURE__ */ new Map();
+	const byId = new Map(atoms.map((atom) => [atom.id, atom]));
+	for (const atom of atoms) result.set(atom.id, "include");
+	for (const event of events) for (const change of event.changes) {
+		const atom = byId.get(change.atomId);
+		if (!atom) continue;
+		if (atom.fingerprint !== change.fingerprint || atom.sourceRef.entryId !== change.sourceRef.entryId || atom.sourceRef.blockIndex !== change.sourceRef.blockIndex) {
+			result.set(atom.id, "unavailable");
+			continue;
+		}
+		const current = result.get(atom.id) ?? "include";
+		if (current === "unavailable") continue;
+		if (current !== change.before && current !== change.after) {
+			result.set(atom.id, "unavailable");
+			continue;
+		}
+		result.set(atom.id, change.after);
+	}
+	return result;
+}
+function projectionStateForAtoms(atoms, states) {
+	if (!atoms.length) return "unavailable";
+	const values = atoms.map((atom) => stateForAtom(states, atom));
+	if (values.some((value) => value === "unavailable")) return "unavailable";
+	if (values.every((value) => value === "exclude")) return "exclude";
+	if (values.every((value) => value === "include")) return "include";
+	return "mixed";
+}
+function unitHasToolCall(unit, callIds) {
+	return unit.atoms.some((atom) => !!atom.toolCallId && callIds.has(atom.toolCallId));
+}
+function unitHasSignedReasoning(unit) {
+	return unit.kind === "reasoning" && unit.atoms.some((atom) => atom.hasSignature === true);
+}
+function unitHasKindAndTurn(unit, kind, turnIds) {
+	return unit.kind === kind && unit.atoms.some((atom) => turnIds.has(atom.turnId));
+}
+/**
+* Expand a user selection to a provider-safe context closure. Tool calls and
+* results are paired by call id. A signed reasoning block is kept with all
+* tool blocks in the same logical turn; the final answer remains independent.
+*/
+function selectProjectionTargets(records, unitIds, recordIds) {
+	const units = records.flatMap((record) => record.units.map((unit) => ({
+		record,
+		unit
+	})));
+	const requested = /* @__PURE__ */ new Set();
+	if (recordIds) {
+		for (const item of units) if (recordIds.includes(item.record.id)) requested.add(item.unit.id);
+	}
+	if (unitIds) {
+		for (const id of unitIds) if (units.some((item) => item.unit.id === id)) requested.add(id);
+	}
+	if (!unitIds && !recordIds) for (const item of units) requested.add(item.unit.id);
+	const effective = new Set(requested);
+	const selectedUnits = units.filter((item) => requested.has(item.unit.id)).map((item) => item.unit);
+	const callIds = new Set(selectedUnits.flatMap((unit) => unit.atoms.map((atom) => atom.toolCallId).filter((id) => !!id)));
+	for (const item of units) if (unitHasToolCall(item.unit, callIds)) effective.add(item.unit.id);
+	const selectedTurns = new Set(selectedUnits.flatMap((unit) => unit.atoms.map((atom) => atom.turnId)));
+	const selectedTool = selectedUnits.some((unit) => unit.kind === "tool");
+	const selectedSignedReasoning = selectedUnits.some(unitHasSignedReasoning);
+	if (selectedTool || selectedSignedReasoning) {
+		const hasSignedReasoning = units.some((item) => unitHasSignedReasoning(item.unit) && item.unit.atoms.some((atom) => selectedTurns.has(atom.turnId)));
+		const hasTool = units.some((item) => item.unit.kind === "tool" && item.unit.atoms.some((atom) => selectedTurns.has(atom.turnId)));
+		if (hasSignedReasoning && hasTool) {
+			for (const item of units) if (unitHasKindAndTurn(item.unit, "reasoning", selectedTurns) || unitHasKindAndTurn(item.unit, "tool", selectedTurns)) effective.add(item.unit.id);
+		}
+	}
+	const effectiveItems = units.filter((item) => effective.has(item.unit.id));
+	const recentTurnId = [...units].reverse().flatMap((item) => item.unit.atoms.map((atom) => atom.turnId))[0];
+	const requestedAtomIds = units.filter((item) => requested.has(item.unit.id)).flatMap((item) => item.unit.atomIds);
+	const effectiveAtomIds = effectiveItems.flatMap((item) => item.unit.atomIds);
+	const unavailableUnitIds = effectiveItems.filter((item) => !item.unit.mutable || item.unit.projectionState === "unavailable").map((item) => item.unit.id);
+	const requestedUnitIds = units.filter((item) => requested.has(item.unit.id)).map((item) => item.unit.id);
+	const effectiveUnitIds = effectiveItems.map((item) => item.unit.id);
+	return {
+		requestedUnitIds,
+		effectiveUnitIds,
+		autoExpandedUnitIds: effectiveUnitIds.filter((id) => !requested.has(id)),
+		requestedAtomIds,
+		effectiveAtomIds,
+		unavailableUnitIds,
+		touchesRecentTurn: !!recentTurnId && effectiveItems.some((item) => item.unit.atoms.some((atom) => atom.turnId === recentTurnId))
+	};
 }
 //#endregion
 //#region adapters/pi-extension/src/shared-core/records.ts
@@ -78,7 +171,7 @@ function unitViewState(atoms, states) {
 	if (values.every((value) => value === "collapse")) return "collapse";
 	return "mixed";
 }
-function projectUnits(recordId, atoms, states) {
+function projectUnits(recordId, atoms, states, projectionStates) {
 	const order = [];
 	const groups = /* @__PURE__ */ new Map();
 	for (const atom of atoms) {
@@ -100,11 +193,12 @@ function projectUnits(recordId, atoms, states) {
 			atomIds: grouped.map((atom) => atom.id),
 			atoms: grouped,
 			viewState: unitViewState(grouped, states),
+			projectionState: projectionStateForAtoms(grouped, projectionStates ?? /* @__PURE__ */ new Map()),
 			mutable: true
 		};
 	});
 }
-function projectRecords(atoms, states) {
+function projectRecords(atoms, states, projectionStates) {
 	const order = [];
 	const groups = /* @__PURE__ */ new Map();
 	for (const atom of atoms) {
@@ -125,7 +219,7 @@ function projectRecords(atoms, states) {
 		const allHidden = grouped.length > 0 && grouped.every((atom) => states?.get(atom.id) === "hide");
 		const first = grouped[0];
 		const mutable = kind !== "tool" || grouped.every((atom) => !!atom.sourceRef.entryId);
-		const units = projectUnits(id, grouped, states).map((unit) => ({
+		const units = projectUnits(id, grouped, states, projectionStates).map((unit) => ({
 			...unit,
 			mutable
 		}));
@@ -141,6 +235,7 @@ function projectRecords(atoms, states) {
 			toolCallId: grouped.find((atom) => atom.toolCallId)?.toolCallId,
 			searchableText: grouped.map(fieldText).filter(Boolean).join("\n"),
 			viewState: allHidden ? "hide" : "show",
+			projectionState: projectionStateForAtoms(grouped, projectionStates ?? /* @__PURE__ */ new Map()),
 			mutable
 		};
 	});
@@ -193,6 +288,7 @@ function searchOccurrences(records, query, enabledKinds, scope = "dialogue", ena
 			atomIds: record.atomIds,
 			atoms: record.atoms,
 			viewState: record.viewState,
+			projectionState: record.projectionState,
 			mutable: record.mutable
 		}];
 		for (const unit of units) {
@@ -352,27 +448,58 @@ function inverseChanges(event) {
 }
 //#endregion
 //#region adapters/pi-extension/src/shared-core/prefs.ts
+const CONTEXT_EDITOR_UNIT_KINDS = [
+	"user",
+	"reasoning",
+	"answer",
+	"tool"
+];
 const DEFAULT_CONTEXT_EDITOR_PREFS = {
-	version: 2,
-	enabledKinds: [
+	version: 3,
+	enabledUnitKinds: [...CONTEXT_EDITOR_UNIT_KINDS],
+	showHidden: false
+};
+function migrateRecordKindsToUnitKinds(enabledKinds) {
+	const enabled = new Set(enabledKinds);
+	return CONTEXT_EDITOR_UNIT_KINDS.filter((kind) => {
+		if (kind === "reasoning" || kind === "answer") return enabled.has("ai");
+		return enabled.has(kind);
+	});
+}
+function recordKindsForUnitKinds(enabledUnitKinds) {
+	const enabled = new Set(enabledUnitKinds);
+	return [
 		"user",
 		"ai",
 		"tool"
-	],
-	showHidden: false
-};
+	].filter((kind) => {
+		if (kind === "ai") return enabled.has("reasoning") || enabled.has("answer");
+		return enabled.has(kind);
+	});
+}
 /**
 * Migrate persisted preferences without treating an explicit empty filter as
-* corrupt. An empty enabledKinds array is the user's valid "show no
-* conversation kinds" choice; missing or malformed values use defaults.
+* corrupt. An empty filter is the user's valid "show no conversation kinds"
+* choice; missing or malformed values use defaults.
 */
 function normalizeContextEditorPrefs(value) {
-	if (!value || typeof value !== "object") return { ...DEFAULT_CONTEXT_EDITOR_PREFS };
+	if (!value || typeof value !== "object") return {
+		...DEFAULT_CONTEXT_EDITOR_PREFS,
+		enabledUnitKinds: [...DEFAULT_CONTEXT_EDITOR_PREFS.enabledUnitKinds]
+	};
 	const raw = value;
-	if (!Array.isArray(raw.enabledKinds)) return { ...DEFAULT_CONTEXT_EDITOR_PREFS };
+	let enabledUnitKinds;
+	if (Array.isArray(raw.enabledUnitKinds)) {
+		const enabled = new Set(raw.enabledUnitKinds.filter((kind) => CONTEXT_EDITOR_UNIT_KINDS.includes(kind)));
+		enabledUnitKinds = CONTEXT_EDITOR_UNIT_KINDS.filter((kind) => enabled.has(kind));
+	} else if (Array.isArray(raw.enabledKinds)) enabledUnitKinds = migrateRecordKindsToUnitKinds(Array.from(new Set(raw.enabledKinds.filter((kind) => kind === "user" || kind === "ai" || kind === "tool"))));
+	else return {
+		...DEFAULT_CONTEXT_EDITOR_PREFS,
+		enabledUnitKinds: [...DEFAULT_CONTEXT_EDITOR_PREFS.enabledUnitKinds]
+	};
 	return {
-		version: 2,
-		enabledKinds: Array.from(new Set(raw.enabledKinds.filter((kind) => kind === "user" || kind === "ai" || kind === "tool"))),
+		version: 3,
+		enabledUnitKinds,
 		showHidden: raw.showHidden === true
 	};
 }
@@ -383,6 +510,7 @@ function recordSnapshot(record) {
 		id: record.id,
 		kind: record.kind,
 		viewState: record.viewState,
+		projectionState: record.projectionState,
 		mutable: record.mutable,
 		units: record.units.map((unit) => ({
 			id: unit.id,
@@ -390,6 +518,7 @@ function recordSnapshot(record) {
 			kind: unit.kind,
 			atomIds: unit.atomIds,
 			viewState: unit.viewState,
+			projectionState: unit.projectionState,
 			mutable: unit.mutable
 		})),
 		...record.entryId ? { entryId: record.entryId } : {},
@@ -402,6 +531,13 @@ function currentState(adapter) {
 	const current = adapter.read();
 	const legacy = readLatestLegacyState(current.entries);
 	const persistedEvents = current.viewEvents ?? [];
+	const projectionEvents = current.projectionEvents ?? [];
+	const seenProjection = /* @__PURE__ */ new Set();
+	const projectionEventsUnique = projectionEvents.filter((event) => {
+		if (seenProjection.has(event.transactionId)) return false;
+		seenProjection.add(event.transactionId);
+		return true;
+	});
 	const sessionEvents = readViewEvents(current.entries);
 	const seen = /* @__PURE__ */ new Set();
 	const events = [...sessionEvents, ...persistedEvents].filter((event) => {
@@ -410,14 +546,21 @@ function currentState(adapter) {
 		return true;
 	});
 	const states = reduceViewStates(current.atoms, legacy, events);
-	const records = projectRecords(current.atoms, states);
+	const projectionStates = current.projectionAvailable === false ? new Map(current.atoms.map((atom) => [atom.id, "unavailable"])) : reduceProjectionStates(current.atoms, projectionEventsUnique);
+	const records = projectRecords(current.atoms, states, projectionStates);
 	return {
 		...current,
 		legacy,
 		events,
+		projectionEvents: projectionEventsUnique,
 		states,
+		projectionStates,
 		records
 	};
+}
+function appendProjectionEvent(adapter, event) {
+	if (adapter.appendProjectionEvent) return adapter.appendProjectionEvent(event);
+	throw new Error("CONTEXT_EDITOR_PERSISTENCE_UNSUPPORTED");
 }
 function appendViewEvent(adapter, event) {
 	if (adapter.appendViewEvent) return adapter.appendViewEvent(event);
@@ -430,7 +573,9 @@ function snapshotOf(state) {
 		sourceLeafId: state.leafId,
 		records: state.records.map(recordSnapshot),
 		canUndo: !!latestUndoableEvent(state.events),
-		legacyStateFound: !!state.legacy
+		legacyStateFound: !!state.legacy,
+		...state.projectionAvailable !== void 0 ? { projectionAvailable: state.projectionAvailable } : {},
+		...state.projectionError ? { projectionError: state.projectionError } : {}
 	};
 }
 function atomCurrentView(state, atomId) {
@@ -548,6 +693,80 @@ var ContextEditorService = class {
 			snapshot: snapshotOf(latest)
 		};
 		const eventId = appendViewEvent(adapter, makeEvent(state, input.action, changes));
+		this.searchCache.clear();
+		return {
+			ok: true,
+			eventId,
+			snapshot: snapshotOf(currentState(adapter))
+		};
+	}
+	previewContextProjection(adapter, input) {
+		if (adapter.isBusy()) throw new Error("AGENT_RUNTIME_BUSY");
+		const state = currentState(adapter);
+		if (state.projectionAvailable === false) throw new Error(state.projectionError || "CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
+		if (input.baseRevision !== state.revision) throw new Error("CONTEXT_EDITOR_CONFLICT");
+		const recordIds = Array.isArray(input.recordIds) ? input.recordIds.filter((id) => typeof id === "string") : void 0;
+		const unitIds = Array.isArray(input.unitIds) ? input.unitIds.filter((id) => typeof id === "string") : void 0;
+		const selection = selectProjectionTargets(state.records, unitIds, recordIds);
+		const stateByUnitId = {};
+		for (const record of state.records) for (const unit of record.units) stateByUnitId[unit.id] = unit.projectionState;
+		return {
+			baseRevision: state.revision,
+			action: input.action,
+			...selection,
+			stateByUnitId
+		};
+	}
+	commitContextProjection(adapter, input) {
+		if (adapter.isBusy()) throw new Error("AGENT_RUNTIME_BUSY");
+		const state = currentState(adapter);
+		if (state.projectionAvailable === false) throw new Error(state.projectionError || "CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
+		if (input.baseRevision !== state.revision) return {
+			ok: false,
+			conflict: true,
+			snapshot: snapshotOf(currentState(adapter))
+		};
+		const preview = this.previewContextProjection(adapter, input);
+		if (preview.unavailableUnitIds.length) throw new Error("CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
+		const target = input.action === "exclude" ? "exclude" : "include";
+		const atoms = new Map(state.atoms.map((atom) => [atom.id, atom]));
+		const changes = [];
+		const seen = /* @__PURE__ */ new Set();
+		for (const atomId of preview.effectiveAtomIds) {
+			if (seen.has(atomId)) continue;
+			seen.add(atomId);
+			const atom = atoms.get(atomId);
+			if (!atom) continue;
+			const before = state.projectionStates.get(atomId) ?? "include";
+			if (before === "unavailable") throw new Error("CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
+			if (before === target) continue;
+			changes.push({
+				atomId,
+				sourceRef: atom.sourceRef,
+				fingerprint: atom.fingerprint,
+				before,
+				after: target
+			});
+		}
+		if (!changes.length) return {
+			ok: true,
+			snapshot: snapshotOf(currentState(adapter))
+		};
+		if (adapter.isBusy()) throw new Error("AGENT_RUNTIME_BUSY");
+		const latest = currentState(adapter);
+		if (latest.revision !== state.revision) return {
+			ok: false,
+			conflict: true,
+			snapshot: snapshotOf(latest)
+		};
+		const eventId = appendProjectionEvent(adapter, {
+			version: 1,
+			transactionId: "context-projection-" + Date.now() + "-" + Math.random().toString(36).slice(2, 9),
+			createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+			baseRevision: state.revision,
+			action: input.action,
+			changes
+		});
 		this.searchCache.clear();
 		return {
 			ok: true,
@@ -948,6 +1167,20 @@ function createPiText(locale) {
 				atom.toolName ? `Tool: ${atom.toolName}` : void 0
 			]).filter(Boolean).join("\n");
 		},
+		contextState: (state) => {
+			if (zh) return state === "exclude" ? "模型排除" : state === "mixed" ? "模型部分排除" : state === "unavailable" ? "模型不可用" : "模型保留";
+			return state === "exclude" ? "Model excluded" : state === "mixed" ? "Model mixed" : state === "unavailable" ? "Model unavailable" : "Model included";
+		},
+		contextConfirmTitle: () => zh ? "确认模型上下文变更" : "Confirm model context change",
+		contextConfirmHint: () => zh ? "Enter/y 确认 · Esc/n 取消" : "Enter/y confirm · Esc/n cancel",
+		contextAwaiting: () => zh ? "等待确认" : "Awaiting confirmation",
+		contextConfirm: (action, requested, effective, autoExpanded, recent) => {
+			const actionLabel = action === "exclude" ? zh ? "排除" : "excluding" : zh ? "恢复" : "restoring";
+			const recentWarning = recent ? zh ? "; 涉及最近一轮及其后续工具链，请确认任务连续性影响" : "; this touches the latest turn and may affect task continuity" : "";
+			const expansion = autoExpanded > 0 ? zh ? "; 结构闭包自动扩展 " + autoExpanded + " 个单元" : "; structural closure adds " + autoExpanded + " units" : "";
+			return zh ? "确认" + actionLabel + "模型上下文？请求 " + requested + " 个单元，最终影响 " + effective + " 个单元" + expansion + recentWarning + "。原始 Session 不会修改。" : "Confirm " + actionLabel + " model context? Requested " + requested + " unit(s), affecting " + effective + expansion + recentWarning + ". The original Session will not be modified.";
+		},
+		contextUnavailableAction: () => zh ? "模型投影 sidecar 不可用，已禁用 x；视觉隐藏仍可用。" : "The model projection sidecar is unavailable; x is disabled. View actions remain available.",
 		truncatedDetail: (maxChars) => zh ? `[详情仅显示前 ${maxChars} 个字符；原始内容未修改]` : `[Only the first ${maxChars} characters are shown; original content is unchanged]`,
 		readOnlyTitle: (kind) => zh ? `查看 ${kindLabel(locale, kind)} 记录（只读）` : `View ${kindLabel(locale, kind)} record (read-only)`,
 		readOnlyChanged: () => zh ? "预览窗口中的修改不会保存，原始对话记录没有变化。" : "Edits in the preview are not saved; the original conversation record is unchanged.",
@@ -987,27 +1220,29 @@ function createPiText(locale) {
 			if (mode === "search") return zh ? "输入关键词 · Enter 跳转 · Esc 结束搜索" : "Type a query · Enter jump · Esc finish search";
 			if (mode === "results") return zh ? "n 下一个命中，N 上一个命中 · s 切换范围 · / 修改搜索 · ? 帮助 · q 关闭" : "n next / N previous occurrence · s toggle scope · / edit search · ? help · q close";
 			if (mode === "help") return zh ? "? Esc 返回编辑器" : "? / Esc return to editor";
-			return zh ? "j/k · Enter 查看/收起 · h 隐藏 · r 恢复 · / 搜索 · ? 帮助 · q 关闭" : "j/k move · Enter view/collapse · h hide · r restore · / search · ? help · q close";
+			return zh ? "j/k · Enter 查看/收起 · h 隐藏 · r 恢复 · x 排除/恢复模型上下文 · / 搜索 · ? 帮助 · q 关闭" : "j/k move · Enter view/collapse · h hide · r restore · x exclude/restore model context · / search · ? help · q close";
 		},
 		tuiHelpTitle: () => zh ? "Context Editor 快捷键" : "Context Editor help",
 		tuiHelpLines: () => zh ? [
 			"Enter  临时展开/收起，不保存",
+			"x      排除/恢复模型上下文；Enter/y 确认，Esc/n 取消，不修改 Session JSONL",
 			"h      持久隐藏；r      恢复隐藏单元",
 			"Space  选择/取消；Shift+↑/↓ 连续选择",
 			"j/k、↑/↓、PgUp/PgDn 导航；g/G 跳到首尾",
 			"/      搜索；n 下一个，N 上一个命中",
 			"s      切换对话/全文搜索范围",
-			"1/2/3  筛选用户、AI、工具；a 全选当前结果",
+			"1/2/3  筛选用户、AI、工具；4/5 筛选思考、回答；a 全选当前结果",
 			"u 撤销；v 临时显示隐藏正文",
 			"R  恢复全部隐藏单元（兼容键）"
 		] : [
 			"Enter  temporarily expand/collapse; does not persist",
+			"x      exclude/restore model context; Enter/y confirm, Esc/n cancel; Session JSONL stays unchanged",
 			"h      persistently hide; r      restore hidden",
 			"Space  select; Shift+↑/↓ extend the selection",
 			"j/k, arrows, PgUp/PgDn navigate; g/G jump to ends",
 			"/      search; n next, N previous occurrence",
 			"s      dialogue/full search scope",
-			"1/2/3 filter User, AI, Tool; a select all visible matches",
+			"1/2/3 filter User, AI, Tool; 4/5 filter Reasoning, Answer; a select all visible matches",
 			"u undo; v reveal hidden content temporarily",
 			"R restore all hidden units (compatibility shortcut)"
 		],
@@ -1254,11 +1489,7 @@ async function runDesktopContextEditor(deps) {
 }
 //#endregion
 //#region adapters/pi-extension/src/ui.ts
-const RECORD_KINDS = [
-	"user",
-	"ai",
-	"tool"
-];
+const UNIT_KINDS = CONTEXT_EDITOR_UNIT_KINDS;
 function colorForKind(kind) {
 	return kind === "user" ? "accent" : kind === "ai" ? "text" : "toolOutput";
 }
@@ -1274,8 +1505,10 @@ var ContextEditorComponent = class {
 	undoMutation;
 	persistPrefs;
 	notify;
-	confirm;
 	done;
+	previewContext;
+	commitContext;
+	projectionAvailable;
 	text;
 	records;
 	prefs;
@@ -1295,6 +1528,8 @@ var ContextEditorComponent = class {
 	matchIndex = -1;
 	lastRenderWidth = 0;
 	lastRenderRows = 0;
+	pendingConfirmation = null;
+	operationInFlight = false;
 	bodyCache = /* @__PURE__ */ new Map();
 	constructor(tui, theme, records, snapshot, prefs, deps, done) {
 		this.tui = tui;
@@ -1302,9 +1537,12 @@ var ContextEditorComponent = class {
 		this.records = [...records];
 		this.revision = snapshot.revision;
 		this.canUndo = snapshot.canUndo;
+		this.previewContext = deps.previewContext;
+		this.commitContext = deps.commitContext;
+		this.projectionAvailable = snapshot.projectionAvailable !== false && !!deps.previewContext && !!deps.commitContext;
 		this.prefs = {
 			...prefs,
-			enabledKinds: [...prefs.enabledKinds]
+			enabledUnitKinds: [...prefs.enabledUnitKinds]
 		};
 		this.loadRecords = deps.loadRecords;
 		this.loadSnapshot = deps.loadSnapshot;
@@ -1312,19 +1550,19 @@ var ContextEditorComponent = class {
 		this.undoMutation = deps.undo;
 		this.persistPrefs = deps.persistPrefs;
 		this.notify = deps.notify;
-		this.confirm = deps.confirm ?? (async () => true);
 		this.done = done;
 		this.text = createPiText(deps.locale ?? detectPiLocale());
 	}
 	flatUnits() {
-		const enabled = new Set(this.prefs.enabledKinds);
-		return this.records.flatMap((record) => {
-			if (!enabled.has(record.kind)) return [];
-			return record.units.map((unit) => ({
-				record,
-				unit
-			}));
-		});
+		const enabled = new Set(this.prefs.enabledUnitKinds);
+		return this.records.flatMap((record) => record.units.filter((unit) => enabled.has(unit.kind)).map((unit) => ({
+			record,
+			unit
+		})));
+	}
+	searchOccurrencesForPrefs() {
+		const enabledUnitKinds = new Set(this.prefs.enabledUnitKinds);
+		return searchOccurrences(this.records, this.query, new Set(recordKindsForUnitKinds(this.prefs.enabledUnitKinds)), this.searchScope, enabledUnitKinds);
 	}
 	selectedUnitIds() {
 		return [...this.selected].filter((id) => this.flatUnits().some(({ unit }) => unit.id === id));
@@ -1379,7 +1617,8 @@ var ContextEditorComponent = class {
 		const checkbox = selected ? "[x]" : "[ ]";
 		const hidden = this.unitIsHidden(unit);
 		const state = hidden ? unit.viewState === "mixed" ? "partial" : "hidden" : "shown";
-		const base = `${cursor} ${checkbox} ${this.text.unitKind(unit.kind)} · ${this.text.recordKind(record.kind)} · ${this.text.unitState(state)} · ${unit.atoms.reduce((sum, atom) => sum + atom.approxTokens, 0)} tok`;
+		const modelState = unit.projectionState ?? "include";
+		const base = `${cursor} ${checkbox} ${this.text.unitKind(unit.kind)} · ${this.text.recordKind(record.kind)} · ${this.text.unitState(state)} · ${this.text.contextState(modelState)} · ${unit.atoms.reduce((sum, atom) => sum + atom.approxTokens, 0)} tok`;
 		if (hidden && !this.prefs.showHidden) return base;
 		const tool = this.toolNameForUnit(unit);
 		if (!tool) return base;
@@ -1521,27 +1760,119 @@ var ContextEditorComponent = class {
 		this.records = this.loadRecords();
 		this.revision = snapshot.revision;
 		this.canUndo = snapshot.canUndo;
+		this.projectionAvailable = snapshot.projectionAvailable !== false && !!this.previewContext && !!this.commitContext;
 		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.flatUnits().length - 1));
 		this.manualScroll = false;
 		this.resetSelection();
-		this.matches = this.query.trim() ? searchOccurrences(this.records, this.query, new Set(this.prefs.enabledKinds), this.searchScope) : [];
+		this.matches = this.query.trim() ? this.searchOccurrencesForPrefs() : [];
 		this.matchIndex = -1;
 		this.ensureSelectionVisible();
 		this.tui.requestRender();
 	}
 	syncExternalState() {
 		const snapshot = this.loadSnapshot();
-		if (snapshot.revision === this.revision) return;
+		if (snapshot.revision === this.revision) return false;
 		this.records = this.loadRecords();
 		this.revision = snapshot.revision;
 		this.canUndo = snapshot.canUndo;
+		this.projectionAvailable = snapshot.projectionAvailable !== false && !!this.previewContext && !!this.commitContext;
 		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.flatUnits().length - 1));
 		this.scrollOffset = 0;
 		this.manualScroll = false;
 		this.resetSelection();
-		this.matches = this.query.trim() ? searchOccurrences(this.records, this.query, new Set(this.prefs.enabledKinds), this.searchScope) : [];
+		this.matches = this.query.trim() ? this.searchOccurrencesForPrefs() : [];
 		this.matchIndex = -1;
+		this.pendingConfirmation = null;
 		this.notify(this.text.sessionChanged(), "info");
+		return true;
+	}
+	async beginContextProjection() {
+		if (this.operationInFlight || this.pendingConfirmation) return;
+		if (!this.projectionAvailable || !this.previewContext || !this.commitContext) {
+			this.notify(this.text.contextUnavailableAction(), "warning");
+			return;
+		}
+		const selected = this.selectedUnitIds();
+		const unitIds = selected.length > 0 ? selected : [this.currentUnit()?.unit.id].filter((id) => !!id);
+		const units = this.flatUnits().filter(({ unit }) => unitIds.includes(unit.id));
+		if (units.length === 0) return;
+		const action = units.some(({ unit }) => unit.projectionState !== "exclude") ? "exclude" : "restore";
+		this.operationInFlight = true;
+		try {
+			const preview = await this.previewContext({
+				baseRevision: this.revision,
+				action,
+				unitIds
+			});
+			if (preview.unavailableUnitIds.length > 0) {
+				this.notify(this.text.contextUnavailableAction(), "warning");
+				return;
+			}
+			this.pendingConfirmation = {
+				kind: "projection",
+				action,
+				unitIds: [...unitIds],
+				preview,
+				message: this.text.contextConfirm(action, preview.requestedUnitIds.length, preview.effectiveUnitIds.length, preview.autoExpandedUnitIds.length, preview.touchesRecentTurn)
+			};
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (message === "CONTEXT_EDITOR_CONFLICT") {
+				this.notify(this.text.sidecarChanged(), "warning");
+				this.refreshData();
+			} else this.notify(message === "AGENT_RUNTIME_BUSY" ? this.text.busy() : this.text.operationFailed(message), "warning");
+		} finally {
+			this.operationInFlight = false;
+			this.tui.requestRender();
+		}
+	}
+	async commitPendingProjection(pending) {
+		if (this.operationInFlight || !this.commitContext) return;
+		this.operationInFlight = true;
+		try {
+			const result = await this.commitContext({
+				baseRevision: this.revision,
+				action: pending.action,
+				unitIds: pending.unitIds
+			});
+			if (!result.ok || result.conflict) {
+				this.notify(this.text.sidecarChanged(), "warning");
+				this.refreshData();
+				return;
+			}
+			this.refreshData();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (message === "CONTEXT_EDITOR_CONFLICT") {
+				this.notify(this.text.sidecarChanged(), "warning");
+				this.refreshData();
+			} else this.notify(message === "AGENT_RUNTIME_BUSY" ? this.text.busy() : this.text.operationFailed(message), "warning");
+		} finally {
+			this.operationInFlight = false;
+			this.tui.requestRender();
+		}
+	}
+	beginResetConfirmation() {
+		if (this.operationInFlight || this.pendingConfirmation) return;
+		this.pendingConfirmation = {
+			kind: "reset",
+			message: this.text.restoreAllConfirmMessage()
+		};
+		this.tui.requestRender();
+	}
+	handleConfirmationInput(data) {
+		const isConfirm = matchesKey(data, "enter") || data === "y" || data === "Y";
+		const isCancel = matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data === "n" || data === "N";
+		if (!isConfirm && !isCancel) return;
+		const pending = this.pendingConfirmation;
+		this.pendingConfirmation = null;
+		this.tui.requestRender();
+		if (isCancel || !pending) return;
+		if (pending.kind === "reset") {
+			this.applyMutation("reset");
+			return;
+		}
+		this.commitPendingProjection(pending);
 	}
 	applyMutation(action) {
 		const unitIds = action === "reset" ? void 0 : this.selectedUnitIds().length > 0 ? this.selectedUnitIds() : [this.currentUnit()?.unit.id].filter((id) => !!id);
@@ -1578,14 +1909,14 @@ var ContextEditorComponent = class {
 		this.tui.requestRender();
 	}
 	refreshSearch() {
-		this.matches = searchOccurrences(this.records, this.query, new Set(this.prefs.enabledKinds), this.searchScope);
+		this.matches = this.searchOccurrencesForPrefs();
 		this.matchIndex = -1;
 		this.resetSelection();
 		this.tui.requestRender();
 	}
 	toggleSearchScope() {
 		this.searchScope = this.searchScope === "dialogue" ? "all" : "dialogue";
-		this.matches = searchOccurrences(this.records, this.query, new Set(this.prefs.enabledKinds), this.searchScope);
+		this.matches = this.searchOccurrencesForPrefs();
 		this.matchIndex = -1;
 		this.resetSelection();
 		if (this.query.trim() && this.matches.length > 0) this.focusSearchHit(0);
@@ -1596,13 +1927,10 @@ var ContextEditorComponent = class {
 		const start = this.matchIndex < 0 ? delta < 0 ? this.matches.length - 1 : 0 : this.matchIndex + delta;
 		this.focusSearchHit((start + this.matches.length) % this.matches.length);
 	}
-	toggleKind(kind) {
-		const enabled = new Set(this.prefs.enabledKinds);
-		if (enabled.has(kind)) enabled.delete(kind);
-		else enabled.add(kind);
+	setEnabledUnitKinds(enabled) {
 		this.prefs = {
 			...this.prefs,
-			enabledKinds: RECORD_KINDS.filter((candidate) => enabled.has(candidate))
+			enabledUnitKinds: UNIT_KINDS.filter((kind) => enabled.has(kind))
 		};
 		this.savePrefs();
 		this.selectedIndex = 0;
@@ -1610,6 +1938,23 @@ var ContextEditorComponent = class {
 		this.manualScroll = false;
 		this.resetSelection();
 		this.refreshSearch();
+	}
+	toggleUnitKind(kind) {
+		const enabled = new Set(this.prefs.enabledUnitKinds);
+		if (enabled.has(kind)) enabled.delete(kind);
+		else enabled.add(kind);
+		this.setEnabledUnitKinds(enabled);
+	}
+	toggleAiKind() {
+		const enabled = new Set(this.prefs.enabledUnitKinds);
+		if (enabled.has("reasoning") && enabled.has("answer")) {
+			enabled.delete("reasoning");
+			enabled.delete("answer");
+		} else {
+			enabled.add("reasoning");
+			enabled.add("answer");
+		}
+		this.setEnabledUnitKinds(enabled);
 	}
 	toggleAll() {
 		const allUnits = this.flatUnits();
@@ -1646,11 +1991,25 @@ var ContextEditorComponent = class {
 			this.refreshSearch();
 		}
 	}
-	async resetAllWithConfirmation() {
-		if (await this.confirm(this.text.restoreAllConfirmTitle())) this.applyMutation("reset");
+	confirmationLines(width) {
+		const pending = this.pendingConfirmation;
+		if (!pending) return [];
+		const title = pending.kind === "projection" ? this.text.contextConfirmTitle() : this.text.restoreAllConfirmTitle();
+		const hint = this.text.contextConfirmHint();
+		const body = wrapTextWithAnsi(pending.message, Math.max(8, width - 4));
+		return [
+			this.theme.fg("warning", `⚠ ${title}`),
+			...body.map((line) => this.theme.fg("dim", `  ${line}`)),
+			this.theme.fg("accent", hint)
+		];
 	}
 	handleInput(data) {
-		this.syncExternalState();
+		if (this.syncExternalState()) return;
+		if (this.pendingConfirmation) {
+			this.handleConfirmationInput(data);
+			return;
+		}
+		if (this.operationInFlight) return;
 		if (this.searchMode) {
 			this.handleSearchInput(data);
 			return;
@@ -1725,15 +2084,23 @@ var ContextEditorComponent = class {
 			return;
 		}
 		if (data === "1") {
-			this.toggleKind("user");
+			this.toggleUnitKind("user");
 			return;
 		}
 		if (data === "2") {
-			this.toggleKind("ai");
+			this.toggleAiKind();
 			return;
 		}
 		if (data === "3") {
-			this.toggleKind("tool");
+			this.toggleUnitKind("tool");
+			return;
+		}
+		if (data === "4") {
+			this.toggleUnitKind("reasoning");
+			return;
+		}
+		if (data === "5") {
+			this.toggleUnitKind("answer");
 			return;
 		}
 		if (data === "a" || data === "A") {
@@ -1782,12 +2149,16 @@ var ContextEditorComponent = class {
 			this.applyMutation("hide");
 			return;
 		}
+		if (data === "x" || data === "X") {
+			this.beginContextProjection();
+			return;
+		}
 		if (data === "r") {
 			this.applyMutation("restore");
 			return;
 		}
 		if (data === "R") {
-			this.resetAllWithConfirmation();
+			this.beginResetConfirmation();
 			return;
 		}
 		if (data === "u") {
@@ -1805,7 +2176,8 @@ var ContextEditorComponent = class {
 		const safeWidth = Math.max(24, width);
 		const viewport = this.availableRows();
 		let visible;
-		if (this.helpMode) visible = this.helpLines().slice(0, viewport);
+		if (this.pendingConfirmation) visible = this.confirmationLines(safeWidth).slice(0, viewport);
+		else if (this.helpMode) visible = this.helpLines().slice(0, viewport);
 		else {
 			const layoutChanged = this.lastRenderWidth !== safeWidth || this.lastRenderRows !== this.tui.terminal.rows;
 			if (this.matchIndex >= 0 && layoutChanged) this.positionSearchHit(safeWidth);
@@ -1818,12 +2190,16 @@ var ContextEditorComponent = class {
 		this.lastRenderWidth = safeWidth;
 		this.lastRenderRows = this.tui.terminal.rows;
 		while (visible.length < viewport) visible.push("");
-		const enabled = (kind) => this.prefs.enabledKinds.includes(kind) ? this.theme.fg("accent", this.text.recordKind(kind)) : this.theme.fg("dim", this.text.recordKind(kind));
+		const enabled = (kind) => this.prefs.enabledUnitKinds.includes(kind) ? this.theme.fg("accent", this.text.unitKind(kind)) : this.theme.fg("dim", this.text.unitKind(kind));
+		const reasoningEnabled = this.prefs.enabledUnitKinds.includes("reasoning");
+		const answerEnabled = this.prefs.enabledUnitKinds.includes("answer");
+		const aiState = reasoningEnabled && answerEnabled ? "on" : reasoningEnabled || answerEnabled ? "mixed" : "off";
+		const aiLabel = this.theme.fg(aiState === "on" ? "accent" : aiState === "mixed" ? "warning" : "dim", `${this.text.recordKind("ai")}${aiState === "mixed" ? " ±" : ""}`);
 		const title = this.helpMode ? this.theme.fg("accent", this.text.tuiHelpTitle()) : this.theme.fg("accent", "Pi Context Editor") + this.theme.fg("dim", `  ${this.text.unitCount(this.flatUnits().length)}`);
-		const mode = this.helpMode ? this.theme.fg("dim", "") : this.searchMode ? this.theme.fg("warning", this.text.tuiSearch(this.query, this.matches.length, this.matchIndex, this.searchScope)) : this.theme.fg("dim", this.text.tuiSearchIdle(this.query, this.matches.length, this.matchIndex, this.searchScope));
-		const filterLine = this.helpMode ? "" : `${enabled("user")} [1]  ${enabled("ai")} [2]  ${enabled("tool")} [3]`;
+		const mode = this.pendingConfirmation ? this.theme.fg("warning", this.text.contextAwaiting()) : this.helpMode ? this.theme.fg("dim", "") : this.searchMode ? this.theme.fg("warning", this.text.tuiSearch(this.query, this.matches.length, this.matchIndex, this.searchScope)) : this.theme.fg("dim", this.text.tuiSearchIdle(this.query, this.matches.length, this.matchIndex, this.searchScope));
+		const filterLine = this.helpMode || this.pendingConfirmation ? "" : `${enabled("user")} [1]  ${aiLabel} [2] (${enabled("reasoning")} [4]  ${enabled("answer")} [5])  ${enabled("tool")} [3]`;
 		const statusMode = this.helpMode ? "help" : this.searchMode ? "search" : this.matches.length > 0 ? "results" : "normal";
-		const status = this.theme.fg("dim", this.text.tuiStatus(statusMode, this.searchScope));
+		const status = this.pendingConfirmation ? this.theme.fg("dim", this.text.contextConfirmHint()) : this.theme.fg("dim", this.text.tuiStatus(statusMode, this.searchScope));
 		return [
 			visiblePad(title, safeWidth),
 			visiblePad(filterLine, safeWidth),
@@ -1836,6 +2212,197 @@ var ContextEditorComponent = class {
 	}
 	invalidate() {}
 };
+function defaultDocument$1(sessionId) {
+	return {
+		schemaVersion: 1,
+		sessionId,
+		events: []
+	};
+}
+function isProjectionEvent(value) {
+	if (!value || typeof value !== "object") return false;
+	const row = value;
+	if (row.version !== 1 || typeof row.transactionId !== "string" || typeof row.createdAt !== "string" || typeof row.baseRevision !== "string" || row.action !== "exclude" && row.action !== "restore" || !Array.isArray(row.changes) || row.changes.length === 0) return false;
+	return row.changes.every((candidate) => {
+		if (!candidate || typeof candidate !== "object") return false;
+		const change = candidate;
+		const sourceRef = change.sourceRef;
+		if (!sourceRef || typeof sourceRef !== "object" || typeof sourceRef.entryId !== "string" || !Number.isInteger(sourceRef.blockIndex)) return false;
+		return typeof change.atomId === "string" && typeof change.fingerprint === "string" && (change.before === "include" || change.before === "exclude") && (change.after === "include" || change.after === "exclude") && change.before !== change.after;
+	});
+}
+function parseDocument$1(raw, sessionId) {
+	if (!raw || typeof raw !== "object") return {
+		document: defaultDocument$1(sessionId),
+		error: "projection sidecar JSON is malformed"
+	};
+	const row = raw;
+	if (row.schemaVersion !== 1) return {
+		document: defaultDocument$1(sessionId),
+		error: "projection sidecar schema version is unsupported"
+	};
+	if (row.sessionId !== sessionId) return {
+		document: defaultDocument$1(sessionId),
+		error: "projection sidecar Session id does not match"
+	};
+	if (!Array.isArray(row.events)) return {
+		document: defaultDocument$1(sessionId),
+		error: "projection sidecar events are malformed"
+	};
+	const events = [];
+	for (const candidate of row.events) {
+		if (!candidate || typeof candidate !== "object") return {
+			document: defaultDocument$1(sessionId),
+			error: "projection sidecar envelope is malformed"
+		};
+		const envelope = candidate;
+		if (typeof envelope.anchorEntryId !== "string" || !isProjectionEvent(envelope.event)) return {
+			document: defaultDocument$1(sessionId),
+			error: "projection sidecar event is malformed"
+		};
+		events.push({
+			anchorEntryId: envelope.anchorEntryId,
+			event: envelope.event
+		});
+	}
+	return { document: {
+		schemaVersion: 1,
+		sessionId,
+		events
+	} };
+}
+function revisionOf$1(path, raw, document, integrity) {
+	let stat = "missing";
+	try {
+		const value = statSync(path);
+		stat = String(value.size) + ":" + String(value.mtimeMs);
+	} catch {}
+	return stableFingerprint([
+		path,
+		stat,
+		integrity,
+		raw ?? JSON.stringify(document)
+	]);
+}
+function projectionRevisionOf(document) {
+	return stableFingerprint([document.sessionId, JSON.stringify(document.events)]);
+}
+function projectionSidecarPath(sessionFile) {
+	return resolve(sessionFile) + ".context-editor.projection.json";
+}
+function readProjectionSidecar(sessionFile, sessionId) {
+	const path = projectionSidecarPath(sessionFile);
+	if (!existsSync(path)) {
+		const document = defaultDocument$1(sessionId);
+		return {
+			path,
+			document,
+			revision: revisionOf$1(path, void 0, document, "missing"),
+			projectionRevision: projectionRevisionOf(document),
+			integrity: "missing"
+		};
+	}
+	let rawText;
+	try {
+		rawText = readFileSync(path, "utf8");
+	} catch {
+		const document = defaultDocument$1(sessionId);
+		return {
+			path,
+			document,
+			revision: revisionOf$1(path, void 0, document, "invalid"),
+			projectionRevision: projectionRevisionOf(document),
+			integrity: "invalid",
+			error: "projection sidecar could not be read"
+		};
+	}
+	let raw;
+	try {
+		raw = JSON.parse(rawText);
+	} catch {
+		const document = defaultDocument$1(sessionId);
+		return {
+			path,
+			document,
+			revision: revisionOf$1(path, rawText, document, "invalid"),
+			projectionRevision: projectionRevisionOf(document),
+			integrity: "invalid",
+			error: "projection sidecar JSON is malformed"
+		};
+	}
+	const parsed = parseDocument$1(raw, sessionId);
+	if (parsed.error) return {
+		path,
+		document: parsed.document,
+		revision: revisionOf$1(path, rawText, parsed.document, "invalid"),
+		projectionRevision: projectionRevisionOf(parsed.document),
+		integrity: "invalid",
+		error: parsed.error
+	};
+	return {
+		path,
+		document: parsed.document,
+		revision: revisionOf$1(path, rawText, parsed.document, "ok"),
+		projectionRevision: projectionRevisionOf(parsed.document),
+		integrity: "ok"
+	};
+}
+function withLock$1(path, fn) {
+	const lockPath = path + ".lock";
+	const deadline = Date.now() + 2e3;
+	let handle;
+	while (handle === void 0 && Date.now() < deadline) try {
+		handle = openSync(lockPath, "wx");
+		writeFileSync(handle, JSON.stringify({
+			pid: process.pid,
+			createdAt: (/* @__PURE__ */ new Date()).toISOString()
+		}));
+		fsyncSync(handle);
+	} catch (error) {
+		if (error.code !== "EEXIST") throw error;
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+	}
+	if (handle === void 0) throw new Error("CONTEXT_EDITOR_SIDECAR_BUSY");
+	try {
+		return fn();
+	} finally {
+		try {
+			closeSync(handle);
+		} catch {}
+		try {
+			unlinkSync(lockPath);
+		} catch {}
+	}
+}
+function writeDocument$1(path, document) {
+	mkdirSync(dirname(path), { recursive: true });
+	const tempPath = path + "." + process.pid + "." + Date.now() + ".tmp";
+	const handle = openSync(tempPath, "w");
+	try {
+		writeFileSync(handle, JSON.stringify(document, null, 2) + "\n", "utf8");
+		fsyncSync(handle);
+	} finally {
+		closeSync(handle);
+	}
+	renameSync(tempPath, path);
+}
+function appendProjectionSidecarEvent(sessionFile, sessionId, anchorEntryId, event, expectedRevision) {
+	const path = projectionSidecarPath(sessionFile);
+	return withLock$1(path, () => {
+		const current = readProjectionSidecar(sessionFile, sessionId);
+		if (current.integrity === "invalid") throw new Error("CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
+		if (current.revision !== expectedRevision) throw new Error("CONTEXT_EDITOR_CONFLICT");
+		const next = {
+			...current.document,
+			events: [...current.document.events, {
+				anchorEntryId,
+				event
+			}]
+		};
+		writeDocument$1(path, next);
+		return event.transactionId;
+	});
+}
 function defaultDocument(sessionId) {
 	return {
 		schemaVersion: 1,
@@ -1989,7 +2556,7 @@ var PiContextEditorHost = class {
 		viewMutation: true,
 		undo: true,
 		persistence: true,
-		contextExclusion: false
+		contextExclusion: true
 	};
 	constructor(ctx) {
 		this.ctx = ctx;
@@ -2008,10 +2575,16 @@ var PiContextEditorHost = class {
 		const atoms = normalizeSessionEntries(entries);
 		const leafId = this.ctx.sessionManager.getLeafId();
 		const sidecar = readSidecar(this.sessionFile, this.sessionId);
+		const projection = readProjectionSidecar(this.sessionFile, this.sessionId);
 		const branchIds = new Set(entries.map((entry) => String(entry.id ?? "")));
 		const viewEvents = sidecar.document.events.filter((envelope) => envelope.anchorEntryId.length === 0 || branchIds.has(envelope.anchorEntryId)).map((envelope) => envelope.event);
+		const projectionEvents = projection.integrity === "ok" ? projection.document.events.filter((envelope) => envelope.anchorEntryId.length === 0 || branchIds.has(envelope.anchorEntryId)).map((envelope) => envelope.event) : [];
 		const branchParts = contextEditorBranchRevisionParts(entries);
-		const revision = branchRevision(leafId, atoms, [...branchParts, sidecar.viewRevision]);
+		const revision = branchRevision(leafId, atoms, [
+			...branchParts,
+			sidecar.viewRevision,
+			projection.revision
+		]);
 		return {
 			entries,
 			atoms,
@@ -2022,10 +2595,15 @@ var PiContextEditorHost = class {
 				this.sessionId,
 				leafId ?? "",
 				sidecar.viewRevision,
+				projection.revision,
 				revision,
 				...branchParts
 			]),
-			viewEvents
+			viewEvents,
+			projectionEvents,
+			projectionAvailable: projection.integrity !== "invalid",
+			...projection.error ? { projectionError: projection.error } : {},
+			projectionRevision: projection.revision
 		};
 	}
 	appendViewEvent(event) {
@@ -2035,6 +2613,16 @@ var PiContextEditorHost = class {
 		const sidecar = readSidecar(this.sessionFile, this.sessionId);
 		if (this.read().revision !== current.revision) throw new Error("CONTEXT_EDITOR_CONFLICT");
 		return appendSidecarEvent(this.sessionFile, this.sessionId, current.leafId ?? "", event, sidecar.revision);
+	}
+	appendProjectionEvent(event) {
+		if (!this.ctx.isIdle()) throw new Error("AGENT_RUNTIME_BUSY");
+		const current = this.read();
+		if (current.projectionAvailable === false) throw new Error("CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
+		if (current.revision !== event.baseRevision) throw new Error("CONTEXT_EDITOR_CONFLICT");
+		const sidecar = readProjectionSidecar(this.sessionFile, this.sessionId);
+		if (sidecar.integrity === "invalid") throw new Error("CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
+		if (this.read().revision !== current.revision) throw new Error("CONTEXT_EDITOR_CONFLICT");
+		return appendProjectionSidecarEvent(this.sessionFile, this.sessionId, current.leafId ?? "", event, sidecar.revision);
 	}
 	isBusy() {
 		return !this.ctx.isIdle();
@@ -2052,10 +2640,11 @@ var PiContextEditorHost = class {
 	snapshot() {
 		return service.getSnapshot(this);
 	}
-	search(query, enabledKinds, scope) {
+	search(query, enabledKinds, scope, enabledUnitKinds) {
 		return service.searchContextRecords(this, {
 			query,
 			enabledKinds,
+			enabledUnitKinds,
 			scope
 		});
 	}
@@ -2113,7 +2702,7 @@ var PiContextEditorHost = class {
 	}
 	async searchRecords(request) {
 		asLocator(request.locator, this.sessionId);
-		return this.search(request.query, request.enabledKinds, request.scope);
+		return this.search(request.query, request.enabledKinds, request.scope, request.enabledUnitKinds);
 	}
 	async getSearchMatch(request) {
 		asLocator(request.locator, this.sessionId);
@@ -2127,18 +2716,290 @@ var PiContextEditorHost = class {
 		asLocator(locator, this.sessionId);
 		return this.undo(baseRevision);
 	}
+	async previewContext(request) {
+		asLocator(request.locator, this.sessionId);
+		return service.previewContextProjection(this, request);
+	}
+	async commitContext(request) {
+		asLocator(request.locator, this.sessionId);
+		try {
+			return service.commitContextProjection(this, request);
+		} catch (error) {
+			if (error instanceof Error && (error.message === "CONTEXT_EDITOR_CONFLICT" || error.message === "CONTEXT_EDITOR_SIDECAR_BUSY")) return {
+				ok: false,
+				conflict: true,
+				snapshot: this.snapshot()
+			};
+			throw error;
+		}
+	}
 };
+//#endregion
+//#region adapters/pi-extension/src/projection-hook.ts
+var ProjectionAlignmentError = class extends Error {
+	constructor(message) {
+		super(message);
+		this.name = "ProjectionAlignmentError";
+	}
+};
+function roleOf(message) {
+	return typeof message === "object" && message !== null && "role" in message ? String(message.role ?? "") : "";
+}
+function structuralShape(message) {
+	const content = message.content;
+	const blocks = typeof content === "string" ? "string" : Array.isArray(content) ? content.map((part) => {
+		if (!part || typeof part !== "object") return typeof part;
+		const value = part;
+		return [
+			value.type,
+			value.id,
+			value.toolCallId,
+			value.name
+		].map((item) => String(item ?? "")).join(":");
+	}).join("|") : "";
+	return roleOf(message) + "|" + blocks;
+}
+function messageIdentityCompatible(baseline, current) {
+	if (roleOf(baseline) !== roleOf(current)) return false;
+	const baselineRow = baseline;
+	const currentRow = current;
+	if (roleOf(baseline) === "user") return JSON.stringify(baselineRow.content) === JSON.stringify(currentRow.content);
+	if (roleOf(baseline) === "toolResult") return String(baselineRow.toolCallId ?? "") === String(currentRow.toolCallId ?? "") && String(baselineRow.toolName ?? "") === String(currentRow.toolName ?? "") && JSON.stringify(baselineRow.content) === JSON.stringify(currentRow.content);
+	return false;
+}
+function structurallyCompatible(baseline, current) {
+	if (roleOf(baseline) !== roleOf(current)) return false;
+	if (structuralShape(baseline) === structuralShape(current)) return true;
+	const baselineContent = baseline.content;
+	const currentContent = current.content;
+	if (Array.isArray(baselineContent) && Array.isArray(currentContent)) {
+		const baselineKinds = baselineContent.map((part) => typeof part === "object" && part ? String(part.type ?? "") : "");
+		const currentKinds = currentContent.map((part) => typeof part === "object" && part ? String(part.type ?? "") : "");
+		if (baselineKinds.length === currentKinds.length && baselineKinds.every((kind, index) => kind === currentKinds[index])) return true;
+	}
+	return messageIdentityCompatible(baseline, current);
+}
+function contentKinds(message) {
+	const content = message.content;
+	if (!Array.isArray(content)) return void 0;
+	return content.map((part) => typeof part === "object" && part ? String(part.type ?? "") : "");
+}
+function isKindSubsequence(baseline, current) {
+	const baselineKinds = contentKinds(baseline);
+	const currentKinds = contentKinds(current);
+	if (!baselineKinds || !currentKinds) return false;
+	let cursor = 0;
+	for (const kind of currentKinds) {
+		const index = baselineKinds.indexOf(kind, cursor);
+		if (index < 0) return false;
+		cursor = index + 1;
+	}
+	return true;
+}
+function restoreCompatible(baseline, current) {
+	const role = roleOf(baseline);
+	if (role === "user" || role === "toolResult") return messageIdentityCompatible(baseline, current);
+	return role === roleOf(current) && (structurallyCompatible(baseline, current) || isKindSubsequence(baseline, current));
+}
+function rowsForEntries(entries) {
+	const rows = [];
+	for (const raw of entries) {
+		const entry = raw;
+		const entryId = String(entry.id ?? "");
+		if (!entryId) continue;
+		for (const baseline of sessionEntryToContextMessages(entry)) rows.push({
+			entryId,
+			baseline
+		});
+	}
+	return rows;
+}
+function activeAtomsByEntry(atoms, events) {
+	const states = reduceProjectionStates(atoms, events);
+	const result = /* @__PURE__ */ new Map();
+	for (const atom of atoms) {
+		if ((states.get(atom.id) ?? "include") === "unavailable") throw new ProjectionAlignmentError("an active projection fingerprint no longer matches");
+		const group = result.get(atom.sourceRef.entryId);
+		if (group) group.push(atom);
+		else result.set(atom.sourceRef.entryId, [atom]);
+	}
+	return {
+		states,
+		byEntry: result
+	};
+}
+function restoredAtomIds(atoms, events, states) {
+	const ids = /* @__PURE__ */ new Set();
+	const known = new Set(atoms.map((atom) => atom.id));
+	for (const event of events) {
+		if (event.action !== "restore") continue;
+		for (const change of event.changes) if (known.has(change.atomId) && states.get(change.atomId) === "include") ids.add(change.atomId);
+	}
+	return ids;
+}
+function projectOneMessage(message, atoms, states) {
+	const excluded = new Set(atoms.filter((atom) => states.get(atom.id) === "exclude").map((atom) => atom.id));
+	if (excluded.size === 0) return message;
+	const role = roleOf(message);
+	if (role === "user" || role === "toolResult") return void 0;
+	if (role !== "assistant") throw new ProjectionAlignmentError("unsupported active message role");
+	const content = message.content;
+	if (!Array.isArray(content)) throw new ProjectionAlignmentError("assistant message content is not an array");
+	const nextContent = content.filter((_part, blockIndex) => {
+		const atom = atoms.find((candidate) => candidate.sourceRef.blockIndex === blockIndex && candidate.kind !== "tool_output");
+		return !atom || !excluded.has(atom.id);
+	});
+	if (nextContent.length === 0) return void 0;
+	return {
+		...message,
+		content: nextContent
+	};
+}
+function projectModelContext(input) {
+	const rows = rowsForEntries(input.entries);
+	const { states, byEntry } = activeAtomsByEntry(input.atoms, input.projectionEvents);
+	const restoredIds = restoredAtomIds(input.atoms, input.projectionEvents, states);
+	const output = [];
+	let cursor = 0;
+	for (const row of rows) {
+		let match = -1;
+		let reconstructed = false;
+		const rowAtoms = byEntry.get(row.entryId) ?? [];
+		const hasExcluded = rowAtoms.some((atom) => states.get(atom.id) === "exclude");
+		const hasRestored = rowAtoms.some((atom) => restoredIds.has(atom.id));
+		for (let index = cursor; index < input.messages.length; index += 1) {
+			const candidate = input.messages[index];
+			if (candidate && (hasRestored ? restoreCompatible(row.baseline, candidate) : structurallyCompatible(row.baseline, candidate))) {
+				match = index;
+				reconstructed = hasRestored && !structurallyCompatible(row.baseline, candidate);
+				break;
+			}
+		}
+		if (match < 0) {
+			if (hasExcluded) throw new ProjectionAlignmentError("excluded message could not be aligned with the active context");
+			if (hasRestored) {
+				const candidates = input.messages.map((candidate, index) => ({
+					candidate,
+					index
+				})).filter(({ candidate, index }) => index >= cursor && restoreCompatible(row.baseline, candidate));
+				if (candidates.length > 1) throw new ProjectionAlignmentError("restored message could not be aligned unambiguously");
+				if (candidates.length === 1) {
+					match = candidates[0].index;
+					reconstructed = true;
+				} else {
+					const restored = projectOneMessage(row.baseline, rowAtoms, states);
+					if (restored) output.push(restored);
+					continue;
+				}
+			}
+			if (match < 0) continue;
+		}
+		for (let index = cursor; index < match; index += 1) {
+			const extra = input.messages[index];
+			if (extra) output.push(extra);
+		}
+		const current = input.messages[match];
+		if (current) {
+			const projected = projectOneMessage(reconstructed ? row.baseline : current, rowAtoms, states);
+			if (projected) output.push(projected);
+		}
+		cursor = match + 1;
+	}
+	for (let index = cursor; index < input.messages.length; index += 1) {
+		const extra = input.messages[index];
+		if (extra) output.push(extra);
+	}
+	return output;
+}
+function projectionOverlapsEntryIds(entryIds, atoms, projectionEvents) {
+	const states = reduceProjectionStates(atoms, projectionEvents);
+	if ([...states.values()].some((state) => state === "unavailable")) throw new ProjectionAlignmentError("active projection is unavailable");
+	return atoms.some((atom) => entryIds.has(atom.sourceRef.entryId) && states.get(atom.id) === "exclude");
+}
 //#endregion
 //#region adapters/pi-extension/src/index.ts
 function sourceLeafId(ctx) {
 	return ctx.sessionManager.getLeafId() ?? void 0;
 }
+function notifyProjectionFailure(ctx, error) {
+	const message = error instanceof Error ? error.message : String(error);
+	if (ctx.hasUI) ctx.ui.notify("Context projection blocked this operation: " + message, "error");
+}
+function projectionEntryIdsBeforeFirstKept(event) {
+	const ids = /* @__PURE__ */ new Set();
+	const first = event.branchEntries.findIndex((entry) => entry.id === event.preparation.firstKeptEntryId);
+	if (first < 0) return ids;
+	for (let index = 0; index < first; index += 1) {
+		const entry = event.branchEntries[index];
+		if (entry) ids.add(entry.id);
+	}
+	if (event.preparation.turnPrefixMessages.length > 0) {
+		const entry = event.branchEntries[first];
+		if (entry) ids.add(entry.id);
+	}
+	return ids;
+}
+function projectionSummaryOverlap(ctx, entries, entryIds) {
+	const current = new PiContextEditorHost(ctx).read();
+	if (current.projectionAvailable === false) throw new Error(current.projectionError || "CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
+	return projectionOverlapsEntryIds(entryIds, normalizeSessionEntries(entries), current.projectionEvents ?? []);
+}
+function registerProjectionHooks(pi) {
+	pi.on("context", async (event, ctx) => {
+		try {
+			const current = new PiContextEditorHost(ctx).read();
+			if (!current.projectionEvents?.length && current.projectionAvailable !== false) return;
+			if (current.projectionAvailable === false) throw new Error(current.projectionError || "CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
+			const entries = ctx.sessionManager.buildContextEntries();
+			const atoms = normalizeSessionEntries(entries);
+			return { messages: projectModelContext({
+				messages: event.messages,
+				entries,
+				atoms,
+				projectionEvents: current.projectionEvents ?? []
+			}) };
+		} catch (error) {
+			notifyProjectionFailure(ctx, error);
+			ctx.abort();
+			return { messages: [] };
+		}
+	});
+	pi.on("session_before_compact", async (event, ctx) => {
+		try {
+			const current = new PiContextEditorHost(ctx).read();
+			if (current.projectionAvailable === false) throw new Error(current.projectionError || "CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
+			const ids = projectionEntryIdsBeforeFirstKept(event);
+			if (ids.size > 0 && projectionSummaryOverlap(ctx, event.branchEntries, ids)) {
+				if (ctx.hasUI) ctx.ui.notify("Compaction cancelled because it would summarize excluded context.", "warning");
+				return { cancel: true };
+			}
+		} catch (error) {
+			notifyProjectionFailure(ctx, error);
+			return { cancel: true };
+		}
+	});
+	pi.on("session_before_tree", async (event, ctx) => {
+		if (!event.preparation.userWantsSummary) return;
+		try {
+			const current = new PiContextEditorHost(ctx).read();
+			if (current.projectionAvailable === false) throw new Error(current.projectionError || "CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
+			const ids = new Set(event.preparation.entriesToSummarize.map((entry) => entry.id));
+			if (ids.size > 0 && projectionSummaryOverlap(ctx, event.preparation.entriesToSummarize, ids)) {
+				if (ctx.hasUI) ctx.ui.notify("Branch summary cancelled because it would summarize excluded context.", "warning");
+				return { cancel: true };
+			}
+		} catch (error) {
+			notifyProjectionFailure(ctx, error);
+			return { cancel: true };
+		}
+	});
+}
 function contextEditorExtension(pi) {
+	registerProjectionHooks(pi);
 	pi.registerCommand("ctx", {
 		description: "Inspect the active Pi context (usage: /ctx)",
 		handler: async (_args, ctx) => {
 			const locale = detectPiLocale();
-			const text = createPiText(locale);
 			if (ctx.mode === "json" || ctx.mode === "print") {
 				ctx.ui.notify("/ctx requires interactive Pi TUI or Pi Desktop mode.", "warning");
 				return;
@@ -2174,16 +3035,27 @@ function contextEditorExtension(pi) {
 				return;
 			}
 			const snapshot = host.snapshot();
+			const locator = {
+				host: "pi",
+				sessionId: host.sessionId
+			};
 			const prefs = host.getPrefs();
 			await ctx.ui.custom((tui, theme, _keybindings, done) => new ContextEditorComponent(tui, theme, records, snapshot, prefs, {
 				loadRecords: () => host.records(),
 				loadSnapshot: () => host.snapshot(),
 				mutate: (input) => host.commit(input),
+				previewContext: (input) => host.previewContext({
+					locator,
+					...input
+				}),
+				commitContext: (input) => host.commitContext({
+					locator,
+					...input
+				}),
 				undo: (baseRevision) => host.undo(baseRevision),
 				persistPrefs: (nextPrefs) => host.setPrefs(nextPrefs),
 				notify: (message, type = "info") => ctx.ui.notify(message, type),
-				locale,
-				confirm: () => ctx.ui.confirm(text.restoreAllConfirmTitle(), text.restoreAllConfirmMessage())
+				locale
 			}, () => done(void 0)));
 		}
 	});

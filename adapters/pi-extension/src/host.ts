@@ -5,7 +5,7 @@ import {
   ContextEditorService,
   stableFingerprint,
   type ContextEditorHostAdapter,
-  type ContextEditorPrefsV2,
+  type ContextEditorPrefs,
   type ContextEditorSessionAdapter,
   type ContextEditorSnapshot,
   type ContextEditorViewEventV2,
@@ -15,11 +15,16 @@ import {
   type ContextRecordPage,
   type ContextSearchMatch,
   type ContextSearchMatchRequest,
+  type ContextSearchRequest,
   type ContextSearchScope,
   type ContextSearchSummary,
   type ContextSessionLocator,
   type ContextViewMutationRequest,
+  type ContextProjectionMutationRequest,
+  type ContextProjectionPreview,
+  type ContextProjectionEventV1,
 } from "./shared-core/index.js";
+import { appendProjectionSidecarEvent, readProjectionSidecar } from "./projection-sidecar.js";
 import { readSidecar, appendSidecarEvent, writeSidecarPrefs } from "./sidecar.js";
 import { normalizeSessionEntries } from "./normalize.js";
 
@@ -36,7 +41,7 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
     viewMutation: true,
     undo: true,
     persistence: true,
-    contextExclusion: false as const,
+    contextExclusion: true as const,
   };
 
   constructor(private readonly ctx: ExtensionContext) {}
@@ -58,21 +63,33 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
     const atoms = normalizeSessionEntries(entries);
     const leafId = this.ctx.sessionManager.getLeafId();
     const sidecar = readSidecar(this.sessionFile, this.sessionId);
+    const projection = readProjectionSidecar(this.sessionFile, this.sessionId);
     const branchIds = new Set(entries.map((entry) => String((entry as { id?: unknown }).id ?? "")));
     const viewEvents = sidecar.document.events
       .filter((envelope) => envelope.anchorEntryId.length === 0 || branchIds.has(envelope.anchorEntryId))
       .map((envelope) => envelope.event);
+    const projectionEvents = projection.integrity === "ok"
+      ? projection.document.events
+        .filter((envelope) => envelope.anchorEntryId.length === 0 || branchIds.has(envelope.anchorEntryId))
+        .map((envelope) => envelope.event)
+      : [];
     const branchParts = contextEditorBranchRevisionParts(entries);
-    const revision = branchRevision(leafId, atoms, [...branchParts, sidecar.viewRevision]);
+    const revision = branchRevision(leafId, atoms, [...branchParts, sidecar.viewRevision, projection.revision]);
     const revisionProbe = stableFingerprint([
       this.sessionFile,
       this.sessionId,
       leafId ?? "",
       sidecar.viewRevision,
+      projection.revision,
       revision,
       ...branchParts,
     ]);
-    return { entries, atoms, leafId, revision, revisionProbe, viewEvents };
+    return {
+      entries, atoms, leafId, revision, revisionProbe, viewEvents, projectionEvents,
+      projectionAvailable: projection.integrity !== "invalid",
+      ...(projection.error ? { projectionError: projection.error } : {}),
+      projectionRevision: projection.revision,
+    };
   }
 
   appendViewEvent(event: ContextEditorViewEventV2): string {
@@ -95,15 +112,33 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
     );
   }
 
+  appendProjectionEvent(event: ContextProjectionEventV1): string {
+    if (!this.ctx.isIdle()) throw new Error("AGENT_RUNTIME_BUSY");
+    const current = this.read();
+    if (current.projectionAvailable === false) throw new Error("CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
+    if (current.revision !== event.baseRevision) throw new Error("CONTEXT_EDITOR_CONFLICT");
+    const sidecar = readProjectionSidecar(this.sessionFile, this.sessionId);
+    if (sidecar.integrity === "invalid") throw new Error("CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
+    const latest = this.read();
+    if (latest.revision !== current.revision) throw new Error("CONTEXT_EDITOR_CONFLICT");
+    return appendProjectionSidecarEvent(
+      this.sessionFile,
+      this.sessionId,
+      current.leafId ?? "",
+      event,
+      sidecar.revision,
+    );
+  }
+
   isBusy(): boolean {
     return !this.ctx.isIdle();
   }
 
-  getPrefs(): ContextEditorPrefsV2 {
+  getPrefs(): ContextEditorPrefs {
     return readSidecar(this.sessionFile, this.sessionId).document.prefs;
   }
 
-  setPrefs(prefs: ContextEditorPrefsV2): void {
+  setPrefs(prefs: ContextEditorPrefs): void {
     if (!this.ctx.isIdle()) return;
     writeSidecarPrefs(this.sessionFile, this.sessionId, prefs);
   }
@@ -116,8 +151,8 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
     return service.getSnapshot(this);
   }
 
-  search(query: string, enabledKinds: readonly ("user" | "ai" | "tool")[], scope?: ContextSearchScope): ContextSearchSummary {
-    return service.searchContextRecords(this, { query, enabledKinds, scope });
+  search(query: string, enabledKinds: readonly ("user" | "ai" | "tool")[], scope?: ContextSearchScope, enabledUnitKinds?: ContextSearchRequest["enabledUnitKinds"]): ContextSearchSummary {
+    return service.searchContextRecords(this, { query, enabledKinds, enabledUnitKinds, scope });
   }
 
   searchMatch(input: { searchId: string; revision?: string; index: number }): ContextSearchMatch | null {
@@ -170,9 +205,9 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
     return record ? { record, sourceRevision: current.revision, viewRevision: current.revision } : null;
   }
 
-  async searchRecords(request: { locator: ContextSessionLocator; query: string; enabledKinds: readonly ("user" | "ai" | "tool")[]; scope?: ContextSearchScope }): Promise<ContextSearchSummary> {
+  async searchRecords(request: ContextSearchRequest): Promise<ContextSearchSummary> {
     asLocator(request.locator, this.sessionId);
-    return this.search(request.query, request.enabledKinds, request.scope);
+    return this.search(request.query, request.enabledKinds, request.scope, request.enabledUnitKinds);
   }
 
   async getSearchMatch(request: ContextSearchMatchRequest): Promise<ContextSearchMatch | null> {
@@ -188,5 +223,22 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
   async undoView(locator: ContextSessionLocator, baseRevision: string): Promise<ContextMutationResult> {
     asLocator(locator, this.sessionId);
     return this.undo(baseRevision);
+  }
+
+  async previewContext(request: ContextProjectionMutationRequest): Promise<ContextProjectionPreview> {
+    asLocator(request.locator, this.sessionId);
+    return service.previewContextProjection(this, request);
+  }
+
+  async commitContext(request: ContextProjectionMutationRequest): Promise<ContextMutationResult> {
+    asLocator(request.locator, this.sessionId);
+    try {
+      return service.commitContextProjection(this, request);
+    } catch (error) {
+      if (error instanceof Error && (error.message === "CONTEXT_EDITOR_CONFLICT" || error.message === "CONTEXT_EDITOR_SIDECAR_BUSY")) {
+        return { ok: false, conflict: true, snapshot: this.snapshot() };
+      }
+      throw error;
+    }
   }
 }

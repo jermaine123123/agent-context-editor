@@ -65,6 +65,7 @@ export function searchOccurrences(
           atomIds: record.atomIds,
           atoms: record.atoms,
           viewState: record.viewState,
+          projectionState: record.projectionState,
           mutable: record.mutable,
     } satisfies ContextEditableUnit]
     for (const unit of units) {

@@ -1,6 +1,6 @@
 /*
  * GENERATED FILE - do not edit directly.
- * Canonical Core source digest: 733df2bbcbaf478f7a485a8b40ff4d86684cda73539204cf6b9dad6f1c655964
+ * Canonical Core source digest: 5b40cd1f4132deba15505e61db10055c5247c189d9a7562aaefc0ff37bc3658e
  * Rebuild with: npm run build:deepseek
  */
 import {
@@ -116,6 +116,7 @@ function atom(identity, event, blockIndex, kind, text, options = {}) {
     ...(options.toolCallId === undefined ? {} : { toolCallId: String(options.toolCallId) }),
     ...(options.toolName === undefined ? {} : { toolName: String(options.toolName) }),
     ...(options.isError === undefined ? {} : { isError: Boolean(options.isError) }),
+    ...(options.hasSignature === undefined ? {} : { hasSignature: Boolean(options.hasSignature) }),
     mutable: true,
   }
 }
@@ -161,6 +162,7 @@ export function normalizeSessionEvents(session, events) {
           atoms.push(atom(identity, value, blockIndex, kind, candidate.text, {
             recordId: `ai-turn:${stableRecord(identity, 'ai-turn', turnId)}`,
             turnId,
+            hasSignature: candidate.signature !== undefined || candidate.signed === true,
           }))
         } else if (candidate.type === 'tool-call') {
           const callId = String(candidate.id ?? candidate.callId ?? `seq-${seq}-block-${blockIndex}`)
@@ -209,9 +211,94 @@ export function normalizeSessionEvents(session, events) {
   return { identity, atoms, sourceRevision }
 }
 
+function eventForSeq(events, seq) {
+  const target = Number(seq)
+  return (Array.isArray(events) ? events.find(event => Number(event?.seq) === target) : undefined) ?? events?.[target]
+}
+
+function surfaceMessage(event) {
+  const value = asObject(event)
+  const data = asObject(value.data)
+  if (value.type === 'user/message') return data
+  if (value.type === 'assistant/message') return asObject(data.message)
+  if (value.type === 'tool/result') return asObject(data.message)
+  return undefined
+}
+
+function blockKey(block) {
+  try {
+    return JSON.stringify(block)
+  } catch {
+    return ''
+  }
+}
+
+function replacementMatchesOriginal(original, replacement, blockIndex) {
+  const originalBlocks = Array.isArray(original?.content) ? original.content : []
+  const replacementBlocks = Array.isArray(replacement?.content) ? replacement.content : []
+  const used = new Set()
+  for (let index = 0; index < originalBlocks.length; index += 1) {
+    const key = blockKey(originalBlocks[index])
+    let matched = false
+    for (let candidate = 0; candidate < replacementBlocks.length; candidate += 1) {
+      if (used.has(candidate) || blockKey(replacementBlocks[candidate]) !== key) continue
+      used.add(candidate)
+      matched = true
+      break
+    }
+    if (index === blockIndex) return matched
+  }
+  return false
+}
+
+function reduceContextProjectionStates(events, atoms, activeSurfaceSeqs) {
+  const overlays = new Map()
+  for (const event of Array.isArray(events) ? events : []) {
+    const value = asObject(event)
+    if (value.type !== 'context/projection') continue
+    const data = asObject(value.data)
+    for (const change of Array.isArray(data.changes) ? data.changes : []) {
+      const root = Number(change?.rootEventSeq)
+      if (!Number.isSafeInteger(root) || root < 0) continue
+      if (change.mode === 'clear') {
+        overlays.delete(root)
+      } else if (change.mode === 'remove' || change.mode === 'replace') {
+        overlays.set(root, {
+          owner: String(data.owner ?? ''),
+          operationId: String(data.operationId ?? ''),
+          mode: change.mode,
+          ...(change.mode === 'replace' ? { message: change.message } : {}),
+          eventSeq: value.seq,
+        })
+      }
+    }
+  }
+  const active = Array.isArray(activeSurfaceSeqs) ? new Set(activeSurfaceSeqs) : undefined
+  const states = new Map()
+  for (const value of atoms) {
+    const root = Number(value.sourceRef?.entryId)
+    if (active !== undefined && (!active.has(root) || !Number.isSafeInteger(root))) {
+      states.set(value.id, 'unavailable')
+      continue
+    }
+    const overlay = overlays.get(root)
+    if (overlay === undefined) {
+      states.set(value.id, 'include')
+      continue
+    }
+    if (overlay.mode === 'remove') {
+      states.set(value.id, 'exclude')
+      continue
+    }
+    const original = surfaceMessage(eventForSeq(events, root))
+    states.set(value.id, replacementMatchesOriginal(original, overlay.message, value.sourceRef.blockIndex) ? 'include' : 'exclude')
+  }
+  return { states, overlays }
+}
+
 /** Project and search through the canonical host-neutral Core bundle. */
-export function projectRecords(atoms, states = new Map()) {
-  return projectSharedRecords(atoms, states)
+export function projectRecords(atoms, states = new Map(), projectionStates = new Map()) {
+  return projectSharedRecords(atoms, states, projectionStates)
 }
 
 export function atomMatchesSearchScope(kind, scope = 'dialogue') {
@@ -350,16 +437,20 @@ export function buildViewEvent(options) {
 }
 
 /** Build an adapter snapshot from a normalized event log and sidecar row. */
-export function buildProjection(identity, events, row) {
+export function buildProjection(identity, events, row, options = {}) {
   const normalized = normalizeSessionEvents(identity, events)
   const viewEvents = normalizeViewEvents(row?.events)
   const states = reduceViewStates(normalized.atoms, viewEvents)
-  const records = projectRecords(normalized.atoms, states)
+  const contextProjection = reduceContextProjectionStates(events, normalized.atoms, options.activeSurfaceSeqs)
+  const records = projectRecords(normalized.atoms, states, contextProjection.states)
   const revision = revisionFor(normalized.identity, normalized.sourceRevision, viewEvents)
   return {
     ...normalized,
+    sourceEvents: Array.isArray(events) ? events : [],
     events: viewEvents,
     states,
+    projectionStates: contextProjection.states,
+    contextOverlays: contextProjection.overlays,
     records,
     revision,
     canUndo: latestUndoableEvent(viewEvents) !== undefined,
@@ -371,6 +462,7 @@ export function recordSnapshot(record) {
     id: record.id,
     kind: record.kind,
     viewState: record.viewState,
+    projectionState: record.projectionState,
     mutable: record.mutable,
     atomIds: record.atomIds,
     units: (record.units ?? []).map(unit => ({
@@ -379,6 +471,7 @@ export function recordSnapshot(record) {
       kind: unit.kind,
       atomIds: unit.atomIds,
       viewState: unit.viewState,
+      projectionState: unit.projectionState,
       mutable: unit.mutable,
     })),
     searchableText: record.searchableText,

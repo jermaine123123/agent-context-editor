@@ -1,11 +1,15 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { decodeKittyPrintable, matchesKey, truncateToWidth, wrapTextWithAnsi, type Component, type TUI } from "@earendil-works/pi-tui";
 import {
+  CONTEXT_EDITOR_UNIT_KINDS,
+  recordKindsForUnitKinds,
   searchOccurrences,
   type ContextEditableUnit,
-  type ContextEditorPrefsV2,
+  type ContextEditableUnitKind,
+  type ContextEditorPrefs,
   type ContextEditorSnapshot,
   type ContextMutationResult,
+  type ContextProjectionPreview,
   type ContextRecord,
   type ContextRecordKind,
   type ContextSearchOccurrence,
@@ -14,15 +18,20 @@ import {
 import { createPiText, detectPiLocale, type PiLocale, type PiText } from "./locale.js";
 
 type FlatUnit = { record: ContextRecord; unit: ContextEditableUnit };
-type PersistPrefs = (prefs: ContextEditorPrefsV2) => void;
+type PersistPrefs = (prefs: ContextEditorPrefs) => void;
 type LoadRecords = () => ContextRecord[];
 type LoadSnapshot = () => ContextEditorSnapshot;
 type Mutate = (input: { baseRevision: string; action: "hide" | "restore" | "reset"; unitIds?: readonly string[] }) => ContextMutationResult;
 type Undo = (baseRevision: string) => ContextMutationResult;
+type PreviewContext = (input: { baseRevision: string; action: "exclude" | "restore"; unitIds?: readonly string[] }) => ContextProjectionPreview | Promise<ContextProjectionPreview>;
+type CommitContext = (input: { baseRevision: string; action: "exclude" | "restore"; unitIds?: readonly string[] }) => ContextMutationResult | Promise<ContextMutationResult>;
 type Notify = (message: string, type?: "info" | "warning" | "error") => void;
 type Confirm = (message: string) => Promise<boolean>;
+type PendingConfirmation =
+  | { kind: "projection"; action: "exclude" | "restore"; unitIds: string[]; preview: ContextProjectionPreview; message: string }
+  | { kind: "reset"; message: string };
 
-const RECORD_KINDS: readonly ContextRecordKind[] = ["user", "ai", "tool"];
+const UNIT_KINDS = CONTEXT_EDITOR_UNIT_KINDS;
 
 function colorForKind(kind: ContextRecordKind): Parameters<Theme["fg"]>[0] {
   return kind === "user" ? "accent" : kind === "ai" ? "text" : "toolOutput";
@@ -41,12 +50,14 @@ export class ContextEditorComponent implements Component {
   private readonly undoMutation: Undo;
   private readonly persistPrefs: PersistPrefs;
   private readonly notify: Notify;
-  private readonly confirm: Confirm;
   private readonly done: () => void;
+  private readonly previewContext?: PreviewContext;
+  private readonly commitContext?: CommitContext;
+  private projectionAvailable: boolean;
   private readonly text: PiText;
 
   private records: ContextRecord[];
-  private prefs: ContextEditorPrefsV2;
+  private prefs: ContextEditorPrefs;
   private query = "";
   private revision: string;
   private canUndo: boolean;
@@ -63,6 +74,8 @@ export class ContextEditorComponent implements Component {
   private matchIndex = -1;
   private lastRenderWidth = 0;
   private lastRenderRows = 0;
+  private pendingConfirmation: PendingConfirmation | null = null;
+  private operationInFlight = false;
   private readonly bodyCache = new Map<string, { width: number; text: string; highlightKey: string; lines: string[] }>();
 
   constructor(
@@ -70,7 +83,7 @@ export class ContextEditorComponent implements Component {
     theme: Theme,
     records: readonly ContextRecord[],
     snapshot: ContextEditorSnapshot,
-    prefs: ContextEditorPrefsV2,
+    prefs: ContextEditorPrefs,
     deps: {
       loadRecords: LoadRecords;
       loadSnapshot: LoadSnapshot;
@@ -79,6 +92,8 @@ export class ContextEditorComponent implements Component {
       persistPrefs: PersistPrefs;
       notify: Notify;
       confirm?: Confirm;
+      previewContext?: PreviewContext;
+      commitContext?: CommitContext;
       locale?: PiLocale;
     },
     done: () => void,
@@ -88,24 +103,36 @@ export class ContextEditorComponent implements Component {
     this.records = [...records];
     this.revision = snapshot.revision;
     this.canUndo = snapshot.canUndo;
-    this.prefs = { ...prefs, enabledKinds: [...prefs.enabledKinds] };
+    this.previewContext = deps.previewContext;
+    this.commitContext = deps.commitContext;
+    this.projectionAvailable = snapshot.projectionAvailable !== false && !!deps.previewContext && !!deps.commitContext;
+    this.prefs = { ...prefs, enabledUnitKinds: [...prefs.enabledUnitKinds] };
     this.loadRecords = deps.loadRecords;
     this.loadSnapshot = deps.loadSnapshot;
     this.mutate = deps.mutate;
     this.undoMutation = deps.undo;
     this.persistPrefs = deps.persistPrefs;
     this.notify = deps.notify;
-    this.confirm = deps.confirm ?? (async () => true);
     this.done = done;
     this.text = createPiText(deps.locale ?? detectPiLocale());
   }
 
   private flatUnits(): FlatUnit[] {
-    const enabled = new Set(this.prefs.enabledKinds);
-    return this.records.flatMap((record) => {
-      if (!enabled.has(record.kind)) return [];
-      return record.units.map((unit) => ({ record, unit }));
-    });
+    const enabled = new Set(this.prefs.enabledUnitKinds);
+    return this.records.flatMap((record) => record.units
+      .filter((unit) => enabled.has(unit.kind))
+      .map((unit) => ({ record, unit })));
+  }
+
+  private searchOccurrencesForPrefs(): ContextSearchOccurrence[] {
+    const enabledUnitKinds = new Set(this.prefs.enabledUnitKinds);
+    return searchOccurrences(
+      this.records,
+      this.query,
+      new Set(recordKindsForUnitKinds(this.prefs.enabledUnitKinds)),
+      this.searchScope,
+      enabledUnitKinds,
+    );
   }
 
   private selectedUnitIds(): string[] {
@@ -163,7 +190,8 @@ export class ContextEditorComponent implements Component {
     const checkbox = selected ? "[x]" : "[ ]";
     const hidden = this.unitIsHidden(unit);
     const state = hidden ? (unit.viewState === "mixed" ? "partial" : "hidden") : "shown";
-    const base = `${cursor} ${checkbox} ${this.text.unitKind(unit.kind)} · ${this.text.recordKind(record.kind)} · ${this.text.unitState(state)} · ${unit.atoms.reduce((sum, atom) => sum + atom.approxTokens, 0)} tok`;
+    const modelState = unit.projectionState ?? "include";
+    const base = `${cursor} ${checkbox} ${this.text.unitKind(unit.kind)} · ${this.text.recordKind(record.kind)} · ${this.text.unitState(state)} · ${this.text.contextState(modelState)} · ${unit.atoms.reduce((sum, atom) => sum + atom.approxTokens, 0)} tok`;
     if (hidden && !this.prefs.showHidden) return base;
     const tool = this.toolNameForUnit(unit);
     if (!tool) return base;
@@ -332,30 +360,126 @@ export class ContextEditorComponent implements Component {
     this.records = this.loadRecords();
     this.revision = snapshot.revision;
     this.canUndo = snapshot.canUndo;
+    this.projectionAvailable = snapshot.projectionAvailable !== false && !!this.previewContext && !!this.commitContext;
     this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.flatUnits().length - 1));
     this.manualScroll = false;
     this.resetSelection();
-    this.matches = this.query.trim() ? searchOccurrences(this.records, this.query, new Set(this.prefs.enabledKinds), this.searchScope) : [];
+    this.matches = this.query.trim() ? this.searchOccurrencesForPrefs() : [];
     this.matchIndex = -1;
     this.ensureSelectionVisible();
     this.tui.requestRender();
   }
 
-  private syncExternalState(): void {
+  private syncExternalState(): boolean {
     const snapshot = this.loadSnapshot();
-    if (snapshot.revision === this.revision) return;
+    if (snapshot.revision === this.revision) return false;
     this.records = this.loadRecords();
     this.revision = snapshot.revision;
     this.canUndo = snapshot.canUndo;
+    this.projectionAvailable = snapshot.projectionAvailable !== false && !!this.previewContext && !!this.commitContext;
     this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.flatUnits().length - 1));
     this.scrollOffset = 0;
     this.manualScroll = false;
     this.resetSelection();
-    this.matches = this.query.trim() ? searchOccurrences(this.records, this.query, new Set(this.prefs.enabledKinds), this.searchScope) : [];
+    this.matches = this.query.trim() ? this.searchOccurrencesForPrefs() : [];
     this.matchIndex = -1;
+    this.pendingConfirmation = null;
     this.notify(this.text.sessionChanged(), "info");
+    return true;
   }
 
+  private async beginContextProjection(): Promise<void> {
+    if (this.operationInFlight || this.pendingConfirmation) return;
+    if (!this.projectionAvailable || !this.previewContext || !this.commitContext) {
+      this.notify(this.text.contextUnavailableAction(), "warning");
+      return;
+    }
+    const selected = this.selectedUnitIds();
+    const unitIds = selected.length > 0
+      ? selected
+      : [this.currentUnit()?.unit.id].filter((id): id is string => !!id);
+    const units = this.flatUnits().filter(({ unit }) => unitIds.includes(unit.id));
+    if (units.length === 0) return;
+    const action: "exclude" | "restore" = units.some(({ unit }) => unit.projectionState !== "exclude") ? "exclude" : "restore";
+    this.operationInFlight = true;
+    try {
+      const preview = await this.previewContext({ baseRevision: this.revision, action, unitIds });
+      if (preview.unavailableUnitIds.length > 0) {
+        this.notify(this.text.contextUnavailableAction(), "warning");
+        return;
+      }
+      this.pendingConfirmation = {
+        kind: "projection",
+        action,
+        unitIds: [...unitIds],
+        preview,
+        message: this.text.contextConfirm(
+          action,
+          preview.requestedUnitIds.length,
+          preview.effectiveUnitIds.length,
+          preview.autoExpandedUnitIds.length,
+          preview.touchesRecentTurn,
+        ),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message === "CONTEXT_EDITOR_CONFLICT") {
+        this.notify(this.text.sidecarChanged(), "warning");
+        this.refreshData();
+      } else {
+        this.notify(message === "AGENT_RUNTIME_BUSY" ? this.text.busy() : this.text.operationFailed(message), "warning");
+      }
+    } finally {
+      this.operationInFlight = false;
+      this.tui.requestRender();
+    }
+  }
+
+  private async commitPendingProjection(pending: Extract<PendingConfirmation, { kind: "projection" }>): Promise<void> {
+    if (this.operationInFlight || !this.commitContext) return;
+    this.operationInFlight = true;
+    try {
+      const result = await this.commitContext({ baseRevision: this.revision, action: pending.action, unitIds: pending.unitIds });
+      if (!result.ok || result.conflict) {
+        this.notify(this.text.sidecarChanged(), "warning");
+        this.refreshData();
+        return;
+      }
+      this.refreshData();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message === "CONTEXT_EDITOR_CONFLICT") {
+        this.notify(this.text.sidecarChanged(), "warning");
+        this.refreshData();
+      } else {
+        this.notify(message === "AGENT_RUNTIME_BUSY" ? this.text.busy() : this.text.operationFailed(message), "warning");
+      }
+    } finally {
+      this.operationInFlight = false;
+      this.tui.requestRender();
+    }
+  }
+
+  private beginResetConfirmation(): void {
+    if (this.operationInFlight || this.pendingConfirmation) return;
+    this.pendingConfirmation = { kind: "reset", message: this.text.restoreAllConfirmMessage() };
+    this.tui.requestRender();
+  }
+
+  private handleConfirmationInput(data: string): void {
+    const isConfirm = matchesKey(data, "enter") || data === "y" || data === "Y";
+    const isCancel = matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data === "n" || data === "N";
+    if (!isConfirm && !isCancel) return;
+    const pending = this.pendingConfirmation;
+    this.pendingConfirmation = null;
+    this.tui.requestRender();
+    if (isCancel || !pending) return;
+    if (pending.kind === "reset") {
+      this.applyMutation("reset");
+      return;
+    }
+    void this.commitPendingProjection(pending);
+  }
   private applyMutation(action: "hide" | "restore" | "reset"): void {
     const unitIds = action === "reset" ? undefined : this.selectedUnitIds().length > 0 ? this.selectedUnitIds() : [this.currentUnit()?.unit.id].filter((id): id is string => !!id);
     try {
@@ -391,7 +515,7 @@ export class ContextEditorComponent implements Component {
   }
 
   private refreshSearch(): void {
-    this.matches = searchOccurrences(this.records, this.query, new Set(this.prefs.enabledKinds), this.searchScope);
+    this.matches = this.searchOccurrencesForPrefs();
     this.matchIndex = -1;
     this.resetSelection();
     this.tui.requestRender();
@@ -399,7 +523,7 @@ export class ContextEditorComponent implements Component {
 
   private toggleSearchScope(): void {
     this.searchScope = this.searchScope === "dialogue" ? "all" : "dialogue";
-    this.matches = searchOccurrences(this.records, this.query, new Set(this.prefs.enabledKinds), this.searchScope);
+    this.matches = this.searchOccurrencesForPrefs();
     this.matchIndex = -1;
     this.resetSelection();
     if (this.query.trim() && this.matches.length > 0) this.focusSearchHit(0);
@@ -412,17 +536,33 @@ export class ContextEditorComponent implements Component {
     this.focusSearchHit((start + this.matches.length) % this.matches.length);
   }
 
-  private toggleKind(kind: ContextRecordKind): void {
-    const enabled = new Set(this.prefs.enabledKinds);
-    if (enabled.has(kind)) enabled.delete(kind);
-    else enabled.add(kind);
-    this.prefs = { ...this.prefs, enabledKinds: RECORD_KINDS.filter((candidate) => enabled.has(candidate)) };
+  private setEnabledUnitKinds(enabled: ReadonlySet<ContextEditableUnitKind>): void {
+    this.prefs = { ...this.prefs, enabledUnitKinds: UNIT_KINDS.filter((kind) => enabled.has(kind)) };
     this.savePrefs();
     this.selectedIndex = 0;
     this.scrollOffset = 0;
     this.manualScroll = false;
     this.resetSelection();
     this.refreshSearch();
+  }
+
+  private toggleUnitKind(kind: ContextEditableUnitKind): void {
+    const enabled = new Set(this.prefs.enabledUnitKinds);
+    if (enabled.has(kind)) enabled.delete(kind);
+    else enabled.add(kind);
+    this.setEnabledUnitKinds(enabled);
+  }
+
+  private toggleAiKind(): void {
+    const enabled = new Set(this.prefs.enabledUnitKinds);
+    if (enabled.has("reasoning") && enabled.has("answer")) {
+      enabled.delete("reasoning");
+      enabled.delete("answer");
+    } else {
+      enabled.add("reasoning");
+      enabled.add("answer");
+    }
+    this.setEnabledUnitKinds(enabled);
   }
 
   private toggleAll(): void {
@@ -465,13 +605,28 @@ export class ContextEditorComponent implements Component {
     }
   }
 
-  private async resetAllWithConfirmation(): Promise<void> {
-    const confirmed = await this.confirm(this.text.restoreAllConfirmTitle());
-    if (confirmed) this.applyMutation("reset");
+  private confirmationLines(width: number): string[] {
+    const pending = this.pendingConfirmation;
+    if (!pending) return [];
+    const title = pending.kind === "projection"
+      ? this.text.contextConfirmTitle()
+      : this.text.restoreAllConfirmTitle();
+    const hint = this.text.contextConfirmHint();
+    const body = wrapTextWithAnsi(pending.message, Math.max(8, width - 4));
+    return [
+      this.theme.fg("warning", `⚠ ${title}`),
+      ...body.map((line) => this.theme.fg("dim", `  ${line}`)),
+      this.theme.fg("accent", hint),
+    ];
   }
 
   handleInput(data: string): void {
-    this.syncExternalState();
+    if (this.syncExternalState()) return;
+    if (this.pendingConfirmation) {
+      this.handleConfirmationInput(data);
+      return;
+    }
+    if (this.operationInFlight) return;
     if (this.searchMode) {
       this.handleSearchInput(data);
       return;
@@ -513,9 +668,11 @@ export class ContextEditorComponent implements Component {
     if (matchesKey(data, "pageUp")) { this.scrollByRows(-this.availableRows()); return; }
     if (data === "g") { this.selectedIndex = 0; this.matchIndex = -1; this.manualScroll = false; this.ensureSelectionVisible(); this.tui.requestRender(); return; }
     if (data === "G") { this.selectedIndex = Math.max(0, this.flatUnits().length - 1); this.matchIndex = -1; this.manualScroll = false; this.ensureSelectionVisible(); this.tui.requestRender(); return; }
-    if (data === "1") { this.toggleKind("user"); return; }
-    if (data === "2") { this.toggleKind("ai"); return; }
-    if (data === "3") { this.toggleKind("tool"); return; }
+    if (data === "1") { this.toggleUnitKind("user"); return; }
+    if (data === "2") { this.toggleAiKind(); return; }
+    if (data === "3") { this.toggleUnitKind("tool"); return; }
+    if (data === "4") { this.toggleUnitKind("reasoning"); return; }
+    if (data === "5") { this.toggleUnitKind("answer"); return; }
     if (data === "a" || data === "A") { this.toggleAll(); return; }
     if (data === "v" || data === "V") {
       this.prefs = { ...this.prefs, showHidden: !this.prefs.showHidden };
@@ -547,8 +704,9 @@ export class ContextEditorComponent implements Component {
       return;
     }
     if (data === "h" || data === "H") { this.applyMutation("hide"); return; }
+    if (data === "x" || data === "X") { void this.beginContextProjection(); return; }
     if (data === "r") { this.applyMutation("restore"); return; }
-    if (data === "R") { void this.resetAllWithConfirmation(); return; }
+    if (data === "R") { this.beginResetConfirmation(); return; }
     if (data === "u") {
       if (!this.canUndo) return;
       try {
@@ -565,7 +723,9 @@ export class ContextEditorComponent implements Component {
     const safeWidth = Math.max(24, width);
     const viewport = this.availableRows();
     let visible: string[];
-    if (this.helpMode) {
+    if (this.pendingConfirmation) {
+      visible = this.confirmationLines(safeWidth).slice(0, viewport);
+    } else if (this.helpMode) {
       visible = this.helpLines().slice(0, viewport);
     } else {
       const layoutChanged = this.lastRenderWidth !== safeWidth || this.lastRenderRows !== this.tui.terminal.rows;
@@ -580,18 +740,28 @@ export class ContextEditorComponent implements Component {
     this.lastRenderRows = this.tui.terminal.rows;
     while (visible.length < viewport) visible.push("");
 
-    const enabled = (kind: ContextRecordKind): string => this.prefs.enabledKinds.includes(kind) ? this.theme.fg("accent", this.text.recordKind(kind)) : this.theme.fg("dim", this.text.recordKind(kind));
+    const enabled = (kind: ContextEditableUnitKind): string => this.prefs.enabledUnitKinds.includes(kind)
+      ? this.theme.fg("accent", this.text.unitKind(kind))
+      : this.theme.fg("dim", this.text.unitKind(kind));
+    const reasoningEnabled = this.prefs.enabledUnitKinds.includes("reasoning");
+    const answerEnabled = this.prefs.enabledUnitKinds.includes("answer");
+    const aiState = reasoningEnabled && answerEnabled ? "on" : reasoningEnabled || answerEnabled ? "mixed" : "off";
+    const aiLabel = this.theme.fg(aiState === "on" ? "accent" : aiState === "mixed" ? "warning" : "dim", `${this.text.recordKind("ai")}${aiState === "mixed" ? " ±" : ""}`);
     const title = this.helpMode
       ? this.theme.fg("accent", this.text.tuiHelpTitle())
       : this.theme.fg("accent", "Pi Context Editor") + this.theme.fg("dim", `  ${this.text.unitCount(this.flatUnits().length)}`);
-    const mode = this.helpMode
+    const mode = this.pendingConfirmation
+      ? this.theme.fg("warning", this.text.contextAwaiting())
+      : this.helpMode
       ? this.theme.fg("dim", "")
       : this.searchMode
       ? this.theme.fg("warning", this.text.tuiSearch(this.query, this.matches.length, this.matchIndex, this.searchScope))
       : this.theme.fg("dim", this.text.tuiSearchIdle(this.query, this.matches.length, this.matchIndex, this.searchScope));
-    const filterLine = this.helpMode ? "" : `${enabled("user")} [1]  ${enabled("ai")} [2]  ${enabled("tool")} [3]`;
+    const filterLine = this.helpMode || this.pendingConfirmation ? "" : `${enabled("user")} [1]  ${aiLabel} [2] (${enabled("reasoning")} [4]  ${enabled("answer")} [5])  ${enabled("tool")} [3]`;
     const statusMode = this.helpMode ? "help" : this.searchMode ? "search" : this.matches.length > 0 ? "results" : "normal";
-    const status = this.theme.fg("dim", this.text.tuiStatus(statusMode, this.searchScope));
+    const status = this.pendingConfirmation
+      ? this.theme.fg("dim", this.text.contextConfirmHint())
+      : this.theme.fg("dim", this.text.tuiStatus(statusMode, this.searchScope));
     return [
       visiblePad(title, safeWidth),
       visiblePad(filterLine, safeWidth),

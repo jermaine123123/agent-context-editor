@@ -11,6 +11,8 @@ export const ATOM_KINDS = [
 export type AtomKind = (typeof ATOM_KINDS)[number]
 export type ViewState = 'show' | 'collapse' | 'hide'
 export type ContextState = 'keep' | 'replace' | 'summarize' | 'exclude'
+export type ContextProjectionState = 'include' | 'exclude'
+export type ContextEditableUnitProjectionState = ContextProjectionState | 'mixed' | 'unavailable'
 export type ContextRecordKind = 'user' | 'ai' | 'tool'
 export type ContextEditableUnitKind = 'reasoning' | 'answer' | 'user' | 'tool'
 export type ContextEditableUnitViewState = ViewState | 'mixed'
@@ -89,6 +91,7 @@ export interface ContextRecord {
   toolCallId?: string
   searchableText: string
   viewState: ViewState
+  projectionState: ContextEditableUnitProjectionState
   mutable: boolean
 }
 
@@ -99,15 +102,18 @@ export interface ContextEditableUnit {
   atomIds: string[]
   atoms: ContextAtom[]
   viewState: ContextEditableUnitViewState
+  projectionState: ContextEditableUnitProjectionState
   mutable: boolean
 }
 
 export interface ContextEditorSnapshot {
   revision: string
   sourceLeafId: string | null
-  records: Array<Pick<ContextRecord, 'id' | 'kind' | 'viewState' | 'mutable' | 'entryId' | 'entryIds' | 'anchorEntryId' | 'toolCallId'> & { units: Array<Pick<ContextEditableUnit, 'id' | 'recordId' | 'kind' | 'atomIds' | 'viewState' | 'mutable'>> }>
+  records: Array<Pick<ContextRecord, 'id' | 'kind' | 'viewState' | 'mutable' | 'entryId' | 'entryIds' | 'anchorEntryId' | 'toolCallId'> & { projectionState?: ContextEditableUnitProjectionState; units: Array<Pick<ContextEditableUnit, 'id' | 'recordId' | 'kind' | 'atomIds' | 'viewState' | 'mutable'> & { projectionState?: ContextEditableUnitProjectionState }> }>
   canUndo: boolean
   legacyStateFound: boolean
+  projectionAvailable?: boolean
+  projectionError?: string
 }
 
 export interface ContextSearchOccurrence {
@@ -128,4 +134,21 @@ export interface ContextSearchMatch extends ContextSearchOccurrence {
   index: number
   total: number
   occurrenceCount: number
+}
+
+export interface ContextProjectionChange {
+  atomId: string
+  fingerprint: string
+  sourceRef: SourceRef
+  before: ContextProjectionState
+  after: ContextProjectionState
+}
+
+export interface ContextProjectionEventV1 {
+  version: 1
+  transactionId: string
+  createdAt: string
+  baseRevision: string
+  action: 'exclude' | 'restore'
+  changes: ContextProjectionChange[]
 }

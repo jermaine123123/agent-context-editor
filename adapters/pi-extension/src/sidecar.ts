@@ -2,7 +2,8 @@ import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, re
 import { dirname, resolve } from "node:path";
 import { stableFingerprint } from "./shared-core/index.js";
 import type {
-  ContextEditorPrefsV2,
+  ContextEditorPrefs,
+  ContextEditorPrefsInput,
   ContextEditorViewEventV2,
 } from "./shared-core/index.js";
 import { DEFAULT_CONTEXT_EDITOR_PREFS, normalizeContextEditorPrefs } from "./shared-core/prefs.js";
@@ -17,7 +18,7 @@ export interface PiSidecarEvent {
 export interface PiContextEditorSidecar {
   schemaVersion: typeof SIDECAR_SCHEMA_VERSION;
   sessionId: string;
-  prefs: ContextEditorPrefsV2;
+  prefs: ContextEditorPrefs;
   events: PiSidecarEvent[];
 }
 
@@ -182,7 +183,7 @@ export function appendSidecarEvent(
 export function writeSidecarPrefs(
   sessionFile: string,
   sessionId: string,
-  prefs: ContextEditorPrefsV2,
+  prefs: ContextEditorPrefsInput,
 ): SidecarReadResult {
   const path = sidecarPath(sessionFile);
   return withLock(path, () => {

@@ -64,6 +64,10 @@
 .context-editor__row-meta { display: flex; align-items: center; gap: 0.45rem; color: var(--dsh-muted, #687386); font-size: 0.75rem; margin-bottom: 0.35rem; }
 .context-editor__kind { font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
 .context-editor__hidden-badge { color: var(--dsh-warning, #996b00); }
+.context-editor__context-badge { color: var(--dsh-accent, #4568c4); font-weight: 600; }
+.context-editor__context-badge.is-unavailable { color: var(--dsh-muted, #687386); }
+.context-editor__unit.is-context-excluded { border-color: color-mix(in srgb, var(--dsh-accent, #7190e8) 55%, var(--dsh-border, #d7dbe2)); }
+.context-editor__context-toggle { margin-left: auto; }
 .context-editor__units { display: grid; gap: 0.45rem; }
 .context-editor__unit { border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.45rem 0.55rem; }
 .context-editor__unit.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }

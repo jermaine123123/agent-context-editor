@@ -16,9 +16,9 @@ Agent hosts: keep long sessions focused, quickly return to the information you
 chose to retain, control what participates in future model context, and ask AI
 to condense a selected range or the entire session.
 
-## Developer Preview
+## Stable release v0.2.0
 
-The first phase is available today for Pi and DeepSeek Harness. It provides an
+The stable v0.2.0 release is available today for Pi and DeepSeek Harness. It provides an
 independent Context Editor view with:
 
 - dialogue-scoped text search by default (User messages and AI final answers),
@@ -27,23 +27,32 @@ independent Context Editor view with:
 - single, contiguous, and batch selection;
 - reversible visual hiding, restore, reset, and undo;
 - sidecar persistence without deleting or rewriting the original Session;
-- independent reasoning and final-answer units in DeepSeek Harness.
+- independent reasoning and final-answer units in the shared Core, Pi TUI, and DeepSeek Harness;
+- model-context exclusion and restore in Pi TUI and DeepSeek Harness, with preview/confirmation,
+  provider-safe Tool Call/Result closure, and signed-reasoning safety rules;
+- a separate Pi projection sidecar and a fail-closed `context` hook for Pi, plus the
+  native `context/projection` event path in DeepSeek Harness.
 
 In Pi TUI, `Enter` only expands or collapses the selected unit; `h` and `r`
 persist hiding and restoring. Search activates the first text occurrence,
 centers and highlights it, and `n`/`N` moves through occurrences without
 revealing hidden text unless the user enables it.
+The `x`/`R` confirmation stays inside the full-screen editor: press `Enter` or
+`y` to confirm, and `Esc` or `n` to cancel.
 
-Visual hiding currently changes only the Context Editor view. It does not edit
-the host's main chat timeline, remove messages from future model input, or
-reduce token usage. Pi TUI acceptance testing is still in progress.
+Visual hiding still changes only the Context Editor view. Context exclusion is a
+separate model-context projection operation: it removes confirmed content from
+the next provider payload without rewriting the canonical Session or surface
+events, and restore replays the authoritative history. It does not edit the
+host's main chat timeline. The released Pi TUI and DeepSeek Harness host
+boundaries are recorded in their compatibility documents.
 
 The repository currently ships two adapter packages and one desktop fork:
 
 | Adapter | Package / app | Current scope |
 | --- | --- | --- |
-| Pi extension | `pi-context-editor@0.4.0-alpha.2` | `/ctx` in Pi TUI and Pi Desktop; shared unit editor with visual-only state |
-| DeepSeek Harness | `context-editor-deepseek-harness@0.1.4` | Context Editor tab with sticky controls, hierarchical AI filters, and centered search navigation |
+| Pi extension | `pi-context-editor@0.4.0` | `/ctx` in Pi TUI and Pi Desktop; Pi TUI adds reversible model-context exclusion |
+| DeepSeek Harness | `context-editor-deepseek-harness@0.2.0` | Context Editor tab with independent units, search/filter controls, and native model-context exclusion |
 | Pi Context Desktop | `jermaine123123/pi-app` `context-editor-v0.1.4` | Windows x64 community desktop build |
 
 中文说明：[README.zh-CN.md](README.zh-CN.md)
@@ -57,20 +66,24 @@ by type, select individually or in batches, hide, restore and undo either unit
 without hiding the other. Hide, restore, reset and undo events are stored in a
 `context_editor` sidecar.
 
-The original Harness Session log and model input are not rewritten. Hiding is a
-view operation in this release and does not reduce model token usage. The Pi
-TUI uses the same Record/Unit Core as the other adapters. Pi TUI view events
-and preferences are stored in an atomic
-`<sessionFile>.context-editor.json` sidecar; Desktop/RPC may keep writing
-host-native CustomEntry events. Neither path replaces Tool Output or registers
-a context hook, so the model receives the same messages before and after a
-visual edit.
+The original Harness Session log and surface events are not rewritten. Visual
+hiding is a view operation and does not reduce model token usage. Context
+exclusion changes only the derived model message history sent to the provider.
+The Pi TUI uses the same Record/Unit Core as the other adapters. Pi TUI view
+events and preferences
+are stored in an atomic `<sessionFile>.context-editor.json` sidecar; model
+projection events use the independent
+`<sessionFile>.context-editor.projection.json` sidecar. Desktop/RPC may keep
+writing host-native CustomEntry events. Pi's projection hook drops only
+confirmed, structurally safe targets; Tool Call/Result pairs and signed
+reasoning chains are kept protocol-valid.
 
 Search defaults to User messages and AI final answers. Pi TUI uses `s` to
-toggle the temporary scope between dialogue and full history; DeepSeek Harness
-exposes the same toggle beside its search box, and Pi Desktop/RPC has a scope
-item in its dialog. The scope is not persisted, and the existing User/AI/Tool
-type filters still apply.
+toggle the temporary scope between dialogue and full history. Keys `1/2/3`
+filter User, AI, and Tool, while `4/5` independently filter AI Reasoning and
+Answer; the AI parent toggle controls both children. DeepSeek Harness exposes
+the same scope choice beside its search box. Scope is not persisted, and Pi
+Desktop interaction remains unchanged.
 
 This is an independent community project. It is not affiliated with, endorsed
 by or sponsored by DeepSeek, Pi, or their maintainers.
@@ -82,27 +95,32 @@ available:
 
 1. Adapt the main conversation timeline and add more Agent hosts where their
    extension APIs allow it.
-2. Add reversible context exclusion so a user can manually remove selected
-   messages from future model input without destroying the stored Session.
-3. Add AI-assisted session cleanup: analyze a whole conversation, propose what
+2. Add AI-assisted session cleanup: analyze a whole conversation, propose what
    to keep or exclude, and summarize a selected range or the full session.
-4. Allow an approved summary to replace the original range in the visible
+3. Allow an approved summary to replace the original range in the visible
    conversation, the model-context projection, or both, while keeping the
    source recoverable and every change undoable.
 
-These context-removal, AI-condensation, and summary-replacement capabilities
-are planned work; they are not included in the current release.
+AI-condensation and summary-replacement capabilities remain planned work; the
+stable release includes the tested Pi TUI and DeepSeek Harness context-exclusion paths.
 
 ## Install
 
 ### Pi extension
 
-Download `pi-context-editor-0.4.0-alpha.2.tgz` from the
-[release assets](https://github.com/jermaine123123/agent-context-editor/releases),
-then install it with the Pi package manager:
+Download `pi-context-editor-0.4.0.tgz` from the
+[release assets](https://github.com/jermaine123123/agent-context-editor/releases).
+Pi `0.84.2` accepts a local package directory here, not a `.tgz` file. Extract
+the archive so that `package.json` is at the package directory root, then run:
 
 ```sh
-pi install ./pi-context-editor-0.4.0-alpha.2.tgz
+pi install ./pi-context-editor-0.4.0
+```
+
+When working from this repository, install the package directory directly:
+
+```sh
+pi install ./adapters/pi-extension
 ```
 
 For Pi Desktop registration, run `adapters/pi-extension/scripts/install-desktop.ps1`
@@ -112,15 +130,15 @@ Desktop before entering `/ctx`.
 
 ### DeepSeek Harness
 
-Download `context-editor-deepseek-harness-0.1.4.tgz` and install it into a
+Download `context-editor-deepseek-harness-0.2.0.tgz` and install it into a
 Harness profile using the official CLI:
 
 ```sh
-dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.1.4.tgz
+dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.2.0.tgz
 ```
 
 The adapter targets Harness Developer Preview commit
-`47f943859bef60e4160492346772ded9b24f765a0` and CLI `@deepseek-ai/dsh@0.1.0-rc.6`.
+`141eb6fef83422698aef7a981029e843e8161534` and CLI `@deepseek-ai/dsh@0.1.0-rc.8`.
 See [COMPATIBILITY.md](adapters/deepseek-harness/COMPATIBILITY.md) for the
 tested host boundary.
 
@@ -136,7 +154,7 @@ translated.
 
 ## Support matrix
 
-| Capability | Pi extension 0.4.0-alpha.2 | DeepSeek Harness 0.1.4 | Pi Context Desktop 0.1.4 |
+| Capability | Pi extension 0.4.0 | DeepSeek Harness 0.2.0 | Pi Context Desktop 0.1.4 |
 | --- | ---: | ---: | ---: |
 | Inspect user / AI / tool records | Yes | Yes | Yes |
 | Filter user / AI / tool records | Yes | Yes | Yes |
@@ -145,8 +163,8 @@ translated.
 | Hide / restore / reset | Yes | Yes | Yes |
 | Undo and revision conflict handling | TUI: V2 sidecar; Desktop/RPC: V1 reset | V2 sidecar | V2 sidecar |
 | Session log preserved | Yes | Yes | Yes |
-| Context exclusion from model input | No | No | No |
-| Token reduction | No (visual-only) | No | No |
+| Context exclusion from model input | Pi TUI: Yes; Desktop/RPC: No | Yes (Harness rc.8) | No |
+| Token reduction | Pi TUI: provider payload only | No | No |
 | AI full-session condensation | No | No | No |
 | AI selected-range summary | No | No | No |
 | Summary replacement | No | No | No |
@@ -157,8 +175,8 @@ translated.
 ```text
 agent-context-editor/
 ├─ adapters/
-│  ├─ pi-extension/          Pi /ctx adapter 0.4.0-alpha.2
-│  └─ deepseek-harness/      DeepSeek Harness adapter 0.1.4
+│  ├─ pi-extension/          Pi /ctx adapter 0.4.0
+│  └─ deepseek-harness/      DeepSeek Harness adapter 0.2.0
 ├─ packages/
 │  └─ context-editor-core/   host-neutral TypeScript Core and tests
 ├─ docs/                     architecture, compatibility and security notes
@@ -193,10 +211,12 @@ edited directly.
 
 ## Known limits
 
-The alpha release does not rewrite the active conversation, remove items from
-model context, compress tokens, generate AI summaries, replace original content
-with a summary, replace Tool Output, or support additional Agent hosts. Hiding
-is strictly a Context Editor view operation; it is not a model-context control.
+The stable release does not rewrite the active conversation or main chat
+timeline, generate AI summaries, replace original content with a summary,
+replace Tool Output, or support additional Agent hosts. Pi Desktop/RPC remains
+visual-only. Pi TUI and DeepSeek context exclusion require their respective
+projection paths and fail closed on corrupt state, revision conflicts, source
+fingerprint changes, or ambiguous message alignment.
 
 Please report reproducible host compatibility issues with the relevant host
 version, adapter version and sanitized logs. Do not attach session logs that

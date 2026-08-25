@@ -1,4 +1,5 @@
 /* GENERATED FROM packages/context-editor-core; do not edit directly. */
+import { projectionStateForAtoms, type ProjectionAtomState } from './projection.js'
 import type { AtomKind, ContextAtom, ContextEditableUnitKind, ContextEditableUnitViewState, ContextRecord, ContextRecordKind, ViewState } from './types.js'
 
 function recordIdFor(atom: ContextAtom): string {
@@ -60,6 +61,7 @@ function projectUnits(
   recordId: string,
   atoms: readonly ContextAtom[],
   states?: ReadonlyMap<string, ViewState>,
+  projectionStates?: ReadonlyMap<string, ProjectionAtomState>,
 ) {
   const order: ContextEditableUnitKind[] = []
   const groups = new Map<ContextEditableUnitKind, ContextAtom[]>()
@@ -82,6 +84,7 @@ function projectUnits(
       atomIds: grouped.map((atom) => atom.id),
       atoms: grouped,
       viewState: unitViewState(grouped, states),
+      projectionState: projectionStateForAtoms(grouped, projectionStates ?? new Map()),
       mutable: true,
     }
   })
@@ -90,6 +93,7 @@ function projectUnits(
 export function projectRecords(
   atoms: readonly ContextAtom[],
   states?: ReadonlyMap<string, ViewState>,
+  projectionStates?: ReadonlyMap<string, ProjectionAtomState>,
 ): ContextRecord[] {
   const order: string[] = []
   const groups = new Map<string, ContextAtom[]>()
@@ -113,7 +117,7 @@ export function projectRecords(
     const allHidden = grouped.length > 0 && grouped.every((atom) => states?.get(atom.id) === 'hide')
     const first = grouped[0]
     const mutable = kind !== 'tool' || grouped.every((atom) => !!atom.sourceRef.entryId)
-    const units = projectUnits(id, grouped, states).map((unit) => ({ ...unit, mutable }))
+    const units = projectUnits(id, grouped, states, projectionStates).map((unit) => ({ ...unit, mutable }))
     return {
       id,
       kind,
@@ -126,6 +130,7 @@ export function projectRecords(
       toolCallId: grouped.find((atom) => atom.toolCallId)?.toolCallId,
       searchableText: grouped.map(fieldText).filter(Boolean).join('\n'),
       viewState: allHidden ? 'hide' : 'show',
+      projectionState: projectionStateForAtoms(grouped, projectionStates ?? new Map()),
       mutable,
     }
   })

@@ -8,17 +8,11 @@ providing search, type filters, batch selection, hide, restore, and undo in a
 separate view.
 
 This adapter targets the official DeepSeek Harness Developer Preview commit
-`47f943859bef60e4160492346772ded9b24f765a0` and installs as one bundle. The
+`141eb6fef83422698aef7a981029e843e8161534` and installs as one bundle. The
 package adds a `Context Editor` tab beside the normal `Chat` view for the same
 Session; it never creates a second conversation.
 
-Version `0.1.4` adds centered search navigation below the sticky control area;
-the hierarchical AI filters from `0.1.3` remain supported while
-continuing to support independent `reasoning` and `answer` units: each can
-be searched, selected, hidden, restored and persisted separately. The original
-Harness Session log and model input are not rewritten. View state is kept in
-the `context_editor` storage-domain sidecar, and hiding currently does not
-reduce token usage.
+Version `0.2.0` targets Harness rc.8 and adds native same-Session context projection. The hierarchical AI filters and centered search navigation remain supported; reasoning and answer units can still be searched, selected, hidden, restored and persisted separately. Visual hiding remains in the `context_editor` sidecar, while context exclusion appends one durable `context/projection` event and changes only the model-derived message history. The original Surface events and normal chat display remain unchanged.
 
 The browser view resolves `navigator.languages` when it opens: `zh-*` locales
 use Chinese labels and all other locales use English. Only editor controls and
@@ -38,7 +32,7 @@ Harness profile:
 node ./scripts/build-core.mjs
 node ./scripts/build-client.mjs
 npm pack --ignore-scripts
-dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.1.4.tgz
+dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.2.0.tgz
 ```
 
 On Windows, `dsh` may not be on `PATH` even when Harness is installed.  Use
@@ -46,13 +40,13 @@ the profile's bundled launcher explicitly from PowerShell:
 
 ```powershell
 $env:DSH_HOME = '<harness-root>\.dsh'
-& '<harness-root>\node_modules\.bin\dsh.cmd' plugin --profile web add '<package-path>\context-editor-deepseek-harness-0.1.4.tgz'
+& '<harness-root>\node_modules\.bin\dsh.cmd' plugin --profile web add '<package-path>\context-editor-deepseek-harness-0.2.0.tgz'
 ```
 
 On Windows, if either the repository path or Harness path contains spaces and
 the CLI reports `ENOENT` for a truncated `editor\adapters\...` path, first
 copy the tarball to a path without spaces (for example
-`D:\context-editor-deepseek-harness-0.1.4.tgz`) and pass that path to the same
+`D:\context-editor-deepseek-harness-0.2.0.tgz`) and pass that path to the same
 command. The package itself remains installed in the selected Harness profile.
 
 If the launcher reports that `pnpm` is missing, add the Harness-provided pnpm
@@ -79,7 +73,7 @@ become editable records in this phase.  Reasoning and answer units can be
 selected and hidden independently; old record-level view events remain
 compatible. Hide/restore/reset/undo events are
 stored in the `context_editor` storage-domain sidecar, fenced by Session
-`createdAt`/`cwd`.  Session event logs and model input are never rewritten.
+`createdAt`/`cwd`. Session event logs remain append-only; model requests use the projected history.
 
 ## Current scope
 
@@ -87,9 +81,15 @@ Search (dialogue scope by default, with temporary full-scope toggle), literal
 match counts, navigation, filters, placeholders, selection,
 Shift-selection, persistence and CAS/revision handling are included.  While a
 Session is running the Host remains readable/searchable, while mutations are
-rejected until the settled log can be projected again.  Context exclusion,
-Tool Output replacement, summaries, token budgets and request rewriting are
-deliberately deferred to the next phase.
+rejected until the settled log can be projected again. Native context exclusion
+previews closure expansion and token deltas, rechecks the rc.8 revision in Agent
+maintenance, appends one atomic `context/projection` event, and flushes before
+success. Compressed or inactive roots are unavailable; visual hiding remains
+independent.
+The native path is enabled with `contextExclusion: true`.  The complete rc.8
+Host/Browser/provider acceptance matrix, request-capture regressions, and a
+real DeepSeek smoke request have passed.  Keep this adapter on the pinned rc.8
+commit; older rc.6 readers do not understand `context/projection`.
 
 The generated `core-runtime.js` is bundled from the canonical Core sources in
 `packages/context-editor-core`. Rebuild it after changing Core and run the root

@@ -5,15 +5,21 @@ provides a full-screen, keyboard-first context editor with shared
 record/unit projection, search, independent reasoning/answer visibility,
 batch selection, restore and undo.
 
-Install the published tarball with Pi's package manager, then restart Pi
+Pi `0.84.2` installs a local package directory, not a `.tgz` archive. Extract
+the published tarball so `package.json` is at the package directory root, or
+install `adapters/pi-extension` directly from this repository. Then restart Pi
 before using `/ctx`. The TUI stores V2 hide/restore/undo events and
-preferences in an atomic `<sessionFile>.context-editor.json` sidecar. The
-Desktop/RPC path reads and preserves legacy V1 visual CustomEntry state for
-compatibility. Neither path rewrites the original session messages, replaces
-Tool Output, or changes model input.
+preferences in an atomic `<sessionFile>.context-editor.json` sidecar. Pi TUI
+model-context exclude/restore events use the independent
+`<sessionFile>.context-editor.projection.json` sidecar. The Desktop/RPC path
+reads and preserves legacy V1 visual CustomEntry state for compatibility.
+Projection changes never rewrite the original session messages or replace Tool
+Output; they affect only the next provider payload.
 
-This release does not exclude context, replace Tool Output, or filter Pi's
-main chat timeline.
+This release does not filter Pi's main chat timeline or generate summary
+replacements. In Pi TUI, press `x` to preview and confirm model-context
+exclusion/restoration; the confirmation stays inside `/ctx` (`Enter`/`y` to
+confirm, `Esc`/`n` to cancel); visual `h`/`r` operations remain independent.
 
 Search defaults to User messages and AI final answers. Press `s` outside the
 search input to temporarily include reasoning and Tool Call/Output content;

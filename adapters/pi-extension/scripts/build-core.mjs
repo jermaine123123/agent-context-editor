@@ -10,6 +10,7 @@ const files = [
   'types.ts',
   'fingerprint.ts',
   'records.ts',
+  'projection.ts',
   'search.ts',
   'state.ts',
   'controller.ts',

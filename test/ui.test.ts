@@ -3,7 +3,7 @@ import type { TUI } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import { normalizeSessionEntries } from "../adapters/pi-extension/src/normalize.js";
 import { ContextEditorComponent } from "../adapters/pi-extension/src/ui.js";
-import { projectRecords, type ContextEditorPrefsV2, type ContextEditorSnapshot, type ContextMutationResult } from "../packages/context-editor-core/src/index.js";
+import { projectRecords, type ContextEditorPrefs, type ContextEditorSnapshot, type ContextMutationResult, type ContextProjectionPreview } from "../packages/context-editor-core/src/index.js";
 
 function fakeTui(): TUI {
   return {
@@ -85,7 +85,7 @@ describe("ContextEditorComponent", () => {
       canUndo: false,
       legacyStateFound: false,
     };
-    const prefs: ContextEditorPrefsV2 = { version: 2, enabledKinds: ["user", "ai", "tool"], showHidden: false };
+    const prefs: ContextEditorPrefs = { version: 3, enabledUnitKinds: ["user", "reasoning", "answer", "tool"], showHidden: false };
     let currentSnapshot = snapshot;
     let currentRecords = records;
     let mutationCount = 0;
@@ -164,7 +164,7 @@ describe("ContextEditorComponent", () => {
       canUndo: false,
       legacyStateFound: false,
     };
-    const prefs: ContextEditorPrefsV2 = { version: 2, enabledKinds: ["user", "ai", "tool"], showHidden: false };
+    const prefs: ContextEditorPrefs = { version: 3, enabledUnitKinds: ["user", "reasoning", "answer", "tool"], showHidden: false };
     const component = new ContextEditorComponent(fakeTui(), fakeTheme(), records, snapshot, prefs, {
       loadRecords: () => records,
       loadSnapshot: () => snapshot,
@@ -209,7 +209,7 @@ describe("ContextEditorComponent", () => {
     ]);
     const records = projectRecords(atoms);
     const snapshot = snapshotFor(records, "rev-scope");
-    const prefs: ContextEditorPrefsV2 = { version: 2, enabledKinds: ["user", "ai", "tool"], showHidden: false };
+    const prefs: ContextEditorPrefs = { version: 3, enabledUnitKinds: ["user", "reasoning", "answer", "tool"], showHidden: false };
     let persistedPrefs = 0;
     const component = new ContextEditorComponent(fakeTui(), fakeTheme(), records, snapshot, prefs, {
       loadRecords: () => records,
@@ -261,7 +261,7 @@ describe("ContextEditorComponent", () => {
     ]);
     const records = projectRecords(atoms);
     const snapshot = snapshotFor(records, "rev-search");
-    const prefs: ContextEditorPrefsV2 = { version: 2, enabledKinds: ["user", "ai", "tool"], showHidden: false };
+    const prefs: ContextEditorPrefs = { version: 3, enabledUnitKinds: ["user", "reasoning", "answer", "tool"], showHidden: false };
     const tui = fakeTui();
     const component = new ContextEditorComponent(tui, fakeTheme(), records, snapshot, prefs, {
       loadRecords: () => records,
@@ -312,7 +312,7 @@ describe("ContextEditorComponent", () => {
     if (!hiddenAtom) throw new Error("hidden test atom missing");
     const records = projectRecords(atoms, new Map([[hiddenAtom.id, "hide" as const]]));
     const snapshot = snapshotFor(records, "rev-hidden");
-    const prefs: ContextEditorPrefsV2 = { version: 2, enabledKinds: ["user", "ai", "tool"], showHidden: false };
+    const prefs: ContextEditorPrefs = { version: 3, enabledUnitKinds: ["user", "reasoning", "answer", "tool"], showHidden: false };
     const component = new ContextEditorComponent(fakeTui(), fakeTheme(), records, snapshot, prefs, {
       loadRecords: () => records,
       loadSnapshot: () => snapshot,
@@ -332,4 +332,138 @@ describe("ContextEditorComponent", () => {
     expect(revealed).toContain("payload");
     expect(revealed).toContain("\u001b[33mhidden-secret\u001b[39m");
   });
+  it("filters AI reasoning and answer independently while keeping the AI total toggle linked", () => {
+    const atoms = normalizeSessionEntries([
+      {
+        type: "message",
+        id: "u-filter",
+        parentId: null,
+        timestamp: new Date(10).toISOString(),
+        message: { role: "user", content: "user text", timestamp: 10 } as never,
+      },
+      {
+        type: "message",
+        id: "a-filter",
+        parentId: "u-filter",
+        timestamp: new Date(20).toISOString(),
+        message: { role: "assistant", content: [{ type: "thinking", thinking: "reasoning text" }, { type: "text", text: "answer text" }], timestamp: 20 } as never,
+      },
+    ]);
+    const records = projectRecords(atoms);
+    const snapshot = snapshotFor(records, "rev-filter");
+    const prefs: ContextEditorPrefs = { version: 3, enabledUnitKinds: ["user", "reasoning", "answer", "tool"], showHidden: false };
+    const persisted: ContextEditorPrefs[] = [];
+    const component = new ContextEditorComponent(fakeTui(), fakeTheme(), records, snapshot, prefs, {
+      loadRecords: () => records,
+      loadSnapshot: () => snapshot,
+      mutate: () => ({ ok: true, snapshot }),
+      undo: () => ({ ok: true, snapshot }),
+      persistPrefs: (value) => { persisted.push(value); },
+      notify: () => undefined,
+      confirm: async () => true,
+      locale: "en",
+    }, () => undefined);
+
+    expect(component.render(80).join("\n")).toContain("3 units");
+    component.handleInput("4");
+    expect(component.render(80).join("\n")).toContain("2 units");
+    expect(persisted.at(-1)?.enabledUnitKinds).toEqual(["user", "answer", "tool"]);
+
+    component.handleInput("2");
+    expect(component.render(80).join("\n")).toContain("3 units");
+    expect(persisted.at(-1)?.enabledUnitKinds).toEqual(["user", "reasoning", "answer", "tool"]);
+
+    component.handleInput("2");
+    expect(component.render(80).join("\n")).toContain("1 units");
+    expect(persisted.at(-1)?.enabledUnitKinds).toEqual(["user", "tool"]);
+  });
+
+  it("previews and toggles model projection with x independently of visual state", async () => {
+    const atoms = normalizeSessionEntries([
+      {
+        type: "message",
+        id: "u-x",
+        parentId: null,
+        timestamp: new Date(10).toISOString(),
+        message: { role: "user", content: "projection target", timestamp: 10 } as never,
+      },
+      {
+        type: "message",
+        id: "a-x",
+        parentId: "u-x",
+        timestamp: new Date(20).toISOString(),
+        message: { role: "assistant", content: [{ type: "text", text: "answer remains visible" }], timestamp: 20 } as never,
+      },
+    ]);
+    const projectionStates = new Map<string, "include" | "exclude">();
+    let currentRecords = projectRecords(atoms, undefined, projectionStates);
+    let currentSnapshot: ContextEditorSnapshot = { ...snapshotFor(currentRecords, "rev-x"), projectionAvailable: true };
+    const confirmations: string[] = [];
+    let previewCount = 0;
+    const prefs: ContextEditorPrefs = { version: 3, enabledUnitKinds: ["user", "reasoning", "answer", "tool"], showHidden: false };
+    const component = new ContextEditorComponent(fakeTui(), fakeTheme(), currentRecords, currentSnapshot, prefs, {
+      loadRecords: () => currentRecords,
+      loadSnapshot: () => currentSnapshot,
+      mutate: () => ({ ok: true, snapshot: currentSnapshot }),
+      undo: () => ({ ok: true, snapshot: currentSnapshot }),
+      persistPrefs: () => undefined,
+      notify: () => undefined,
+      confirm: async (message) => {
+        confirmations.push(message);
+        return true;
+      },
+      locale: "en",
+      previewContext: ({ baseRevision, action, unitIds }) => {
+        previewCount += 1;
+        const selected = unitIds ?? [];
+        return {
+          baseRevision,
+          action,
+          requestedUnitIds: selected,
+          effectiveUnitIds: selected,
+          autoExpandedUnitIds: [],
+          requestedAtomIds: selected.flatMap((id) => currentRecords.flatMap((record) => record.units).find((unit) => unit.id === id)?.atomIds ?? []),
+          effectiveAtomIds: selected.flatMap((id) => currentRecords.flatMap((record) => record.units).find((unit) => unit.id === id)?.atomIds ?? []),
+          unavailableUnitIds: [],
+          touchesRecentTurn: false,
+          stateByUnitId: Object.fromEntries(currentRecords.flatMap((record) => record.units).map((unit) => [unit.id, unit.projectionState])),
+        };
+      },
+      commitContext: ({ action, unitIds }) => {
+        const target = action === "exclude" ? "exclude" : "include";
+        for (const unitId of unitIds ?? []) {
+          const unit = currentRecords.flatMap((record) => record.units).find((candidate) => candidate.id === unitId);
+          for (const atomId of unit?.atomIds ?? []) projectionStates.set(atomId, target);
+        }
+        currentRecords = projectRecords(atoms, undefined, projectionStates);
+        currentSnapshot = { ...snapshotFor(currentRecords, "rev-x"), projectionAvailable: true };
+        return { ok: true, snapshot: currentSnapshot, eventId: action };
+      },
+    }, () => undefined);
+    component.handleInput("x");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(previewCount).toBe(1);
+    expect(confirmations).toHaveLength(0);
+    expect(component.render(80).join("\n")).toContain("Confirm excluding");
+    component.handleInput("\r");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(currentRecords[0]?.units[0]?.projectionState).toBe("exclude");
+    expect(currentRecords[0]?.units[0]?.viewState).toBe("show");
+    expect(component.render(80).join("\n")).toContain("Model excluded");
+
+    component.handleInput("x");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(previewCount).toBe(2);
+    expect(component.render(80).join("\n")).toContain("Confirm restoring");
+    component.handleInput("n");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(currentRecords[0]?.units[0]?.projectionState).toBe("exclude");
+
+    component.handleInput("x");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    component.handleInput("y");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(currentRecords[0]?.units[0]?.projectionState).toBe("include");
+  });
+
 });

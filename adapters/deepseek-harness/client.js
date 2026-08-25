@@ -97,6 +97,7 @@ function unitsForRecord(record) {
     atoms,
     viewState: record.viewState,
     mutable: record.mutable,
+    projectionState: record.projectionState ?? 'include',
   }]
 }
 
@@ -288,6 +289,23 @@ export class ContextEditorController {
   async undo(baseRevision) {
     return this.call('undoView', { baseRevision })
   }
+
+  async previewContext(action, expectedRevision, unitIds) {
+    return this.call('previewContext', {
+      action,
+      expectedRevision,
+      ...(unitIds === undefined ? {} : { unitIds }),
+    })
+  }
+
+  async commitContext(operationId, action, expectedRevision, unitIds) {
+    return this.call('commitContext', {
+      operationId,
+      action,
+      expectedRevision,
+      ...(unitIds === undefined ? {} : { unitIds }),
+    })
+  }
 }
 
 function FilterButton({ kind, state, onClick, text, label }) {
@@ -319,16 +337,20 @@ function UnitBody({ unit, match, text }) {
   }))
 }
 
-function UnitSection({ unit, selected, onSelect, focused, showHidden, match, disabled, onRestore, registerNode, text }) {
+function UnitSection({ unit, selected, onSelect, focused, showHidden, match, disabled, onRestore, onContextToggle, registerNode, text }) {
   const hidden = unit.viewState === 'hide' || unit.viewState === 'mixed'
   const mixed = unit.viewState === 'mixed'
+  const projectionState = unit.projectionState ?? 'include'
+  const contextExcluded = projectionState === 'exclude' || projectionState === 'mixed'
+  const contextUnavailable = projectionState === 'unavailable'
   const body = hidden && !showHidden
     ? h('div', { className: 'context-editor__unit-placeholder' }, mixed ? text.mixedPlaceholder : text.hiddenPlaceholder(unit.kind))
     : h(UnitBody, { unit, match, text })
   return h('div', {
-    className: `context-editor__unit ${focused ? 'is-focused' : ''} ${hidden ? 'is-hidden' : ''}`,
+    className: `context-editor__unit ${focused ? 'is-focused' : ''} ${hidden ? 'is-hidden' : ''} ${contextExcluded ? 'is-context-excluded' : ''}`,
     'data-unit-id': unit.id,
     'data-unit-kind': unit.kind,
+    'data-context-state': projectionState,
     ref: node => registerNode?.(unit.id, node),
   },
   h('div', { className: 'context-editor__unit-header' },
@@ -338,13 +360,21 @@ function UnitSection({ unit, selected, onSelect, focused, showHidden, match, dis
     ),
     mixed ? h('span', { className: 'context-editor__hidden-badge' }, text.partiallyHidden) : null,
     hidden && !mixed ? h('span', { className: 'context-editor__hidden-badge' }, text.hidden) : null,
+    contextExcluded ? h('span', { className: 'context-editor__context-badge' }, text.contextState(projectionState)) : null,
+    contextUnavailable ? h('span', { className: 'context-editor__context-badge is-unavailable' }, text.contextState(projectionState)) : null,
     hidden ? h('button', { type: 'button', disabled, onClick: onRestore }, text.restore) : null,
+    h('button', {
+      type: 'button',
+      className: 'context-editor__context-toggle',
+      disabled: disabled || contextUnavailable,
+      onClick: onContextToggle,
+    }, contextExcluded ? text.restoreContext : text.excludeContext),
   ),
   h('div', { className: 'context-editor__unit-body' }, body),
   )
 }
 
-function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, match, disabled, onRestore, registerNode, text }) {
+function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, match, disabled, onRestore, onContextToggle, registerNode, text }) {
   const units = unitsForRecord(record)
   const focused = units.some(unit => unit.id === focusedUnitId)
   return h('article', {
@@ -366,6 +396,7 @@ function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, matc
       match: focusedUnitId === unit.id ? match : null,
       disabled,
       onRestore: () => onRestore(unit.id),
+      onContextToggle: () => onContextToggle(unit),
       registerNode,
       text,
     }))),
@@ -387,6 +418,7 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
   const [match, setMatch] = useState(null)
   const [selected, setSelected] = useState(() => new Set())
   const [matching, setMatching] = useState(false)
+  const [contextMutating, setContextMutating] = useState(false)
   const lastSelectedIndex = useRef(null)
   const loadSequence = useRef(0)
   const searchSequence = useRef(0)
@@ -430,7 +462,8 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
   }, [enabledRecordKinds, loaded.records, prefs.enabledUnitKinds])
   const visibleUnits = useMemo(() => visibleRecords.flatMap(record => unitsForRecord(record)), [visibleRecords])
   const selectedCount = selected.size
-  const readOnly = running || loaded.status === 'loading' || loaded.status === 'refreshing'
+  const readOnly = running || loaded.status === 'loading' || loaded.status === 'refreshing' || contextMutating
+  const contextAvailable = loaded.snapshot?.capabilities?.contextExclusion === true
 
   const refresh = useCallback(async () => {
     const ticket = ++loadSequence.current
@@ -650,6 +683,41 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
     }
   }
 
+  const mutateContext = async (action, unitIds) => {
+    if (readOnly || !contextAvailable || loaded.snapshot === null) return
+    setContextMutating(true)
+    try {
+      const preview = await controller.previewContext(action, loaded.snapshot.revision, unitIds)
+      if (preview?.conflict) {
+        await refresh()
+        return
+      }
+      const estimate = preview?.tokenEstimate ?? {}
+      const closureCount = Math.max(0, (preview?.effectiveTargets?.length ?? 0) - (preview?.normalizedTargets?.length ?? 0))
+      const warning = text.contextPreview(estimate.before, estimate.after, estimate.delta, closureCount)
+      let confirmed = true
+      if (typeof globalThis.confirm === 'function') {
+        try { confirmed = globalThis.confirm(warning) } catch { confirmed = true }
+      }
+      if (!confirmed) return
+      const value = await controller.commitContext(
+        preview.operationId,
+        action,
+        preview.expectedRevision ?? loaded.snapshot.revision,
+        unitIds,
+      )
+      if (value?.conflict) {
+        await refresh()
+        return
+      }
+      await refresh()
+    } catch (error) {
+      setLoaded(current => ({ ...current, status: 'error', error }))
+    } finally {
+      setContextMutating(false)
+    }
+  }
+
   const undo = async () => {
     if (readOnly || loaded.snapshot === null || !loaded.snapshot.canUndo) return
     try {
@@ -760,6 +828,8 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
         h('button', { type: 'button', disabled: readOnly || selectedCount === 0, onClick: () => void mutate('hide', [...selected]) }, text.hideSelected(selectedCount)),
         h('button', { type: 'button', disabled: readOnly || selectedCount === 0, onClick: () => void mutate('restore', [...selected]) }, text.restoreSelected),
         h('button', { type: 'button', disabled: readOnly, onClick: () => void mutate('reset') }, text.restoreAll),
+        h('button', { type: 'button', disabled: readOnly || !contextAvailable || selectedCount === 0, onClick: () => void mutateContext('exclude', [...selected]) }, text.excludeSelected(selectedCount)),
+        h('button', { type: 'button', disabled: readOnly || !contextAvailable || selectedCount === 0, onClick: () => void mutateContext('restore', [...selected]) }, text.restoreContextSelected),
         h('button', { type: 'button', disabled: readOnly || !loaded.snapshot?.canUndo, onClick: () => void undo() }, text.undo),
         running ? h('span', { className: 'context-editor__running' }, text.running) : null,
         loaded.status === 'error' ? h('span', { className: 'context-editor__error' }, errorText(loaded.error)) : null,
@@ -775,6 +845,7 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
       match: matchUnitId === match?.unitId ? match : null,
       disabled: readOnly,
       onRestore: unitId => void mutate('restore', [unitId]),
+      onContextToggle: unit => void mutateContext(unit.projectionState === 'exclude' || unit.projectionState === 'mixed' ? 'restore' : 'exclude', [unit.id]),
       registerNode: registerUnitNode,
       text,
     }))),

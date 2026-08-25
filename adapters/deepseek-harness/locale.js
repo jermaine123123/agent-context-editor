@@ -24,6 +24,27 @@ export function createHarnessText(locale) {
     partiallyHidden: zh ? '部分隐藏' : 'Partially hidden',
     hidden: zh ? '隐藏' : 'Hidden',
     restore: zh ? '恢复' : 'Restore',
+    excludeContext: zh ? '\u6392\u9664\u4e0a\u4e0b\u6587' : 'Exclude context',
+    restoreContext: zh ? '\u6062\u590d\u4e0a\u4e0b\u6587' : 'Restore context',
+    contextState: state => state === 'exclude'
+      ? (zh ? '\u5df2\u6392\u9664\u4e0a\u4e0b\u6587' : 'Excluded from context')
+      : state === 'mixed'
+        ? (zh ? '\u90e8\u5206\u6392\u9664' : 'Partially excluded')
+        : (zh ? '\u4e0d\u53ef\u7528' : 'Unavailable'),
+    excludeSelected: count => zh ? `\u6392\u9664\u9009\u4e2d${count ? `（${count}）` : ''}` : `Exclude selected${count ? ` (${count})` : ''}`,
+    restoreContextSelected: zh ? '\u6062\u590d\u9009\u4e2d\u4e0a\u4e0b\u6587' : 'Restore selected context',
+    contextPreview: (before, after, delta, closureCount) => {
+      const beforeValue = Number.isFinite(Number(before)) ? Number(before) : 0
+      const afterValue = Number.isFinite(Number(after)) ? Number(after) : 0
+      const deltaValue = Number.isFinite(Number(delta)) ? Number(delta) : afterValue - beforeValue
+      const sign = deltaValue > 0 ? '+' : ''
+      const closure = closureCount > 0
+        ? (zh ? ` · \u8fde\u5e26\u5355\u5143 ${closureCount} \u4e2a` : ` · ${closureCount} related units`)
+        : ''
+      return zh
+        ? `\u9884\u8ba1\u4e0a\u4e0b\u6587 token：${beforeValue} → ${afterValue}（${sign}${deltaValue}）${closure}。\u786e\u5b9a\u63d0\u4ea4\uff1f`
+        : `Estimated context tokens: ${beforeValue} → ${afterValue} (${sign}${deltaValue})${closure}. Continue?`
+    },
     showHidden: zh ? '显示隐藏内容' : 'Show hidden content',
     searchPlaceholder: zh ? '\u641c\u7d22：\u7528\u6237\u6d88\u606f\u548c AI \u56de\u7b54…' : 'Search user messages and AI answers…',
     searchPlaceholderForScope: scope => zh

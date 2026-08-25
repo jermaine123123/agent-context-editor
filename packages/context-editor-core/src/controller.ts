@@ -1,4 +1,5 @@
 import type {
+  ContextEditableUnitKind,
   ContextEditorSnapshot,
   ContextRecordKind,
   ContextSearchMatch,
@@ -33,6 +34,7 @@ export interface ContextEditorTransport {
     workspaceId?: string | null
     query: string
     enabledKinds: readonly ContextRecordKind[]
+    enabledUnitKinds?: readonly ContextEditableUnitKind[]
     scope?: ContextSearchScope
   }): Promise<ContextEditorSearchInfo>
   getSearchMatch(input: {

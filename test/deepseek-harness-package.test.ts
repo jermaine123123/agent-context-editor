@@ -14,7 +14,7 @@ describe('DeepSeek Harness installable bundle', () => {
       dsh?: { bundle?: { patch?: string }; client?: { platform?: string } }
     }
     expect(manifest.name).toBe('context-editor-deepseek-harness')
-    expect(manifest.version).toBe('0.1.4')
+    expect(manifest.version).toBe('0.2.0')
     expect(manifest.dsh?.bundle?.patch).toBe('./cordis.patch.yml')
     expect(manifest.dsh?.client?.platform).toBe('web')
     expect(readFileSync(resolve(root, 'cordis.patch.yml'), 'utf8')).toContain('id: context-editor')
@@ -33,10 +33,11 @@ describe('DeepSeek Harness installable bundle', () => {
   it('keeps apply and inject on the module namespace for the Cordis loader', () => {
     const hostEntry = readFileSync(resolve(root, 'index.js'), 'utf8')
     const clientEntry = readFileSync(resolve(root, 'client.js'), 'utf8')
-    expect(hostEntry).toContain("export const inject = ['storageDomain', 'sessionPersistence', 'sessions']")
+    expect(hostEntry).toContain("export const inject = ['storageDomain', 'sessionPersistence', 'sessions', 'agents']")
     expect(hostEntry).toContain("import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'")
     expect(hostEntry).toContain('export class ContextEditorHost extends TypertRemoteService')
     expect(hostEntry).toContain("super(ctx, 'contextEditor')")
+    expect(hostEntry).toContain('contextExclusion: true')
     expect(hostEntry).not.toContain("ctx.provide('contextEditor'")
     expect(hostEntry).not.toContain('ctx.typert.register')
     expect(hostEntry).not.toContain('export default apply')
@@ -45,9 +46,9 @@ describe('DeepSeek Harness installable bundle', () => {
     expect(clientEntry).not.toContain('export default apply')
   })
 
-  it('exports the complete direct Remote surface with context exclusion disabled by contract', () => {
+  it('exports the direct Remote surface with native context exclusion enabled', () => {
     expect(descriptors.map(descriptor => descriptor.method)).toEqual([
-      'getSnapshot', 'listRecords', 'getRecord', 'searchRecords', 'getSearchMatch', 'commitView', 'undoView',
+      'getSnapshot', 'listRecords', 'getRecord', 'searchRecords', 'getSearchMatch', 'previewContext', 'commitContext', 'commitView', 'undoView',
     ])
     expect(descriptors.every(descriptor => descriptor.namespace === 'contextEditor')).toBe(true)
     expect(descriptors.every(descriptor => descriptor.parameters[0]?.codec.mode === 'strict')).toBe(true)
@@ -55,6 +56,6 @@ describe('DeepSeek Harness installable bundle', () => {
     expect(descriptors.every(descriptor => typeof (descriptor.parameters[0]?.codec.schema as { parse?: unknown }).parse === 'function')).toBe(true)
     expect(descriptors.every(descriptor => typeof (descriptor.result.schema as { parse?: unknown }).parse === 'function')).toBe(true)
     expect(TYPERT.face).toBe('host')
-    expect(TYPERT.invocations).toHaveLength(7)
+    expect(TYPERT.invocations).toHaveLength(9)
   })
 })

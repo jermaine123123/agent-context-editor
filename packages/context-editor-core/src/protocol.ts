@@ -7,6 +7,7 @@ import type {
   ContextSearchScope,
   ContextEditorViewEventV2,
 } from './types.js'
+import type { ContextEditableUnitProjectionState } from './types.js'
 
 /** Host-neutral identity for one persisted conversation. */
 export interface ContextSessionLocator {
@@ -33,8 +34,8 @@ export interface ContextHostCapabilities {
   readonly viewMutation: boolean
   readonly undo: boolean
   readonly persistence: boolean
-  /** Reserved for the later model-context exclusion feature. */
-  readonly contextExclusion: false
+  /** Whether this host can change the model-facing context projection. */
+  readonly contextExclusion: boolean
 }
 
 export interface ContextRecordPage {
@@ -53,8 +54,9 @@ export interface ContextRecordDetail {
 export interface ContextSearchRequest {
   readonly locator: ContextSessionLocator
   readonly query: string
+  /** Record-level compatibility filter. New clients derive it from enabledUnitKinds. */
   readonly enabledKinds: readonly ContextRecordKind[]
-  /** Optional unit-level filter. Omitted by older clients for V1 behavior. */
+  /** Canonical user/reasoning/answer/tool filter. Omitted by older clients. */
   readonly enabledUnitKinds?: readonly ContextEditableUnitKind[]
   readonly scope?: ContextSearchScope
 }
@@ -81,6 +83,27 @@ export interface ContextViewMutationRequest {
   readonly unitIds?: readonly string[]
 }
 
+export interface ContextProjectionMutationRequest {
+  readonly locator: ContextSessionLocator
+  readonly baseRevision: string
+  readonly action: 'exclude' | 'restore'
+  readonly recordIds?: readonly string[]
+  readonly unitIds?: readonly string[]
+}
+
+export interface ContextProjectionPreview {
+  readonly baseRevision: string
+  readonly action: 'exclude' | 'restore'
+  readonly requestedUnitIds: readonly string[]
+  readonly effectiveUnitIds: readonly string[]
+  readonly autoExpandedUnitIds: readonly string[]
+  readonly requestedAtomIds: readonly string[]
+  readonly effectiveAtomIds: readonly string[]
+  readonly unavailableUnitIds: readonly string[]
+  readonly touchesRecentTurn: boolean
+  readonly stateByUnitId: Readonly<Record<string, ContextEditableUnitProjectionState>>
+}
+
 export interface ContextMutationResult {
   readonly ok: boolean
   readonly conflict?: boolean
@@ -97,6 +120,8 @@ export interface ContextEditorHostAdapter {
   getSearchMatch(request: ContextSearchMatchRequest): Promise<ContextSearchMatch | null>
   commitView(request: ContextViewMutationRequest): Promise<ContextMutationResult>
   undoView(locator: ContextSessionLocator, baseRevision: string): Promise<ContextMutationResult>
+  previewContext(request: ContextProjectionMutationRequest): Promise<ContextProjectionPreview>
+  commitContext(request: ContextProjectionMutationRequest): Promise<ContextMutationResult>
 }
 
 /** Persisted view event shape shared by Pi and non-Pi hosts. */

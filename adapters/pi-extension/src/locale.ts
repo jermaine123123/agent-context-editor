@@ -46,6 +46,12 @@ export interface PiText {
   emptyContent(): string;
   detail(atom: { kind: AtomKind; entryId: string; blockIndex: number; turnId: string; approxTokens: number; toolCallId?: string; toolName?: string }): string;
   truncatedDetail(maxChars: number): string;
+  contextState(state: "include" | "exclude" | "mixed" | "unavailable"): string;
+  contextConfirmTitle(): string;
+  contextConfirmHint(): string;
+  contextAwaiting(): string;
+  contextConfirm(action: "exclude" | "restore", requested: number, effective: number, autoExpanded: number, recent: boolean): string;
+  contextUnavailableAction(): string;
   readOnlyTitle(kind: AtomKind): string;
   readOnlyChanged(): string;
   viewAction(hidden: boolean): string;
@@ -143,6 +149,26 @@ export function createPiText(locale: PiLocale): PiText {
         : [`Type: ${kindLabel(locale, atom.kind)}`, `Source: ${atom.entryId}:${atom.blockIndex}`, `Turn: ${atom.turnId}`, `Estimated tokens: ${atom.approxTokens}`, atom.toolCallId ? `Tool call ID: ${atom.toolCallId}` : undefined, atom.toolName ? `Tool: ${atom.toolName}` : undefined];
       return labels.filter(Boolean).join("\n");
     },
+    contextState: (state) => {
+      if (zh) return state === "exclude" ? "模型排除" : state === "mixed" ? "模型部分排除" : state === "unavailable" ? "模型不可用" : "模型保留";
+      return state === "exclude" ? "Model excluded" : state === "mixed" ? "Model mixed" : state === "unavailable" ? "Model unavailable" : "Model included";
+    },
+    contextConfirmTitle: () => zh ? "确认模型上下文变更" : "Confirm model context change",
+    contextConfirmHint: () => zh ? "Enter/y 确认 · Esc/n 取消" : "Enter/y confirm · Esc/n cancel",
+    contextAwaiting: () => zh ? "等待确认" : "Awaiting confirmation",
+    contextConfirm: (action, requested, effective, autoExpanded, recent) => {
+      const actionLabel = action === "exclude" ? (zh ? "排除" : "excluding") : (zh ? "恢复" : "restoring");
+      const recentWarning = recent
+        ? (zh ? "; 涉及最近一轮及其后续工具链，请确认任务连续性影响" : "; this touches the latest turn and may affect task continuity")
+        : "";
+      const expansion = autoExpanded > 0
+        ? (zh ? "; 结构闭包自动扩展 " + autoExpanded + " 个单元" : "; structural closure adds " + autoExpanded + " units")
+        : "";
+      return zh
+        ? "确认" + actionLabel + "模型上下文？请求 " + requested + " 个单元，最终影响 " + effective + " 个单元" + expansion + recentWarning + "。原始 Session 不会修改。"
+        : "Confirm " + actionLabel + " model context? Requested " + requested + " unit(s), affecting " + effective + expansion + recentWarning + ". The original Session will not be modified.";
+    },
+    contextUnavailableAction: () => zh ? "模型投影 sidecar 不可用，已禁用 x；视觉隐藏仍可用。" : "The model projection sidecar is unavailable; x is disabled. View actions remain available.",
     truncatedDetail: (maxChars) => zh ? `[详情仅显示前 ${maxChars} 个字符；原始内容未修改]` : `[Only the first ${maxChars} characters are shown; original content is unchanged]`,
     readOnlyTitle: (kind) => zh ? `查看 ${kindLabel(locale, kind)} 记录（只读）` : `View ${kindLabel(locale, kind)} record (read-only)`,
     readOnlyChanged: () => zh ? "预览窗口中的修改不会保存，原始对话记录没有变化。" : "Edits in the preview are not saved; the original conversation record is unchanged.",
@@ -184,29 +210,31 @@ export function createPiText(locale: PiLocale): PiText {
       if (mode === "search") return zh ? "\u8f93\u5165\u5173\u952e\u8bcd · Enter \u8df3\u8f6c · Esc \u7ed3\u675f\u641c\u7d22" : "Type a query · Enter jump · Esc finish search";
       if (mode === "results") return zh ? "n \u4e0b\u4e00\u4e2a\u547d\u4e2d，N \u4e0a\u4e00\u4e2a\u547d\u4e2d · s \u5207\u6362\u8303\u56f4 · / \u4fee\u6539\u641c\u7d22 · ? \u5e2e\u52a9 · q \u5173\u95ed" : "n next / N previous occurrence · s toggle scope · / edit search · ? help · q close";
       if (mode === "help") return zh ? "? Esc \u8fd4\u56de\u7f16\u8f91\u5668" : "? / Esc return to editor";
-      return zh ? "j/k · Enter \u67e5\u770b/\u6536\u8d77 · h \u9690\u85cf · r \u6062\u590d · / \u641c\u7d22 · ? \u5e2e\u52a9 · q \u5173\u95ed" : "j/k move · Enter view/collapse · h hide · r restore · / search · ? help · q close";
+      return zh ? "j/k · Enter \u67e5\u770b/\u6536\u8d77 · h \u9690\u85cf · r \u6062\u590d · x \u6392\u9664/\u6062\u590d\u6a21\u578b\u4e0a\u4e0b\u6587 · / \u641c\u7d22 · ? \u5e2e\u52a9 · q \u5173\u95ed" : "j/k move · Enter view/collapse · h hide · r restore · x exclude/restore model context · / search · ? help · q close";
     },
     tuiHelpTitle: () => zh ? "Context Editor \u5feb\u6377\u952e" : "Context Editor help",
     tuiHelpLines: () => zh
       ? [
         "Enter  \u4e34\u65f6\u5c55\u5f00/\u6536\u8d77\uff0c\u4e0d\u4fdd\u5b58",
+"x      排除/恢复模型上下文；Enter/y 确认，Esc/n 取消，不修改 Session JSONL",
         "h      \u6301\u4e45\u9690\u85cf\uff1br      \u6062\u590d\u9690\u85cf\u5355\u5143",
         "Space  \u9009\u62e9/\u53d6\u6d88\uff1bShift+↑/↓ \u8fde\u7eed\u9009\u62e9",
         "j/k、↑/↓、PgUp/PgDn \u5bfc\u822a\uff1bg/G \u8df3\u5230\u9996\u5c3e",
         "/      \u641c\u7d22\uff1bn \u4e0b\u4e00\u4e2a\uff0cN \u4e0a\u4e00\u4e2a\u547d\u4e2d",
         "s      \u5207\u6362\u5bf9\u8bdd/\u5168\u6587\u641c\u7d22\u8303\u56f4",
-        "1/2/3  \u7b5b\u9009\u7528\u6237\u3001AI、\u5de5\u5177\uff1ba \u5168\u9009\u5f53\u524d\u7ed3\u679c",
+        "1/2/3  筛选用户、AI、工具；4/5 筛选思考、回答；a 全选当前结果",
         "u \u64a4\u9500\uff1bv \u4e34\u65f6\u663e\u793a\u9690\u85cf\u6b63\u6587",
         "R  \u6062\u590d\u5168\u90e8\u9690\u85cf\u5355\u5143\uff08\u517c\u5bb9\u952e\uff09",
       ]
       : [
         "Enter  temporarily expand/collapse; does not persist",
+"x      exclude/restore model context; Enter/y confirm, Esc/n cancel; Session JSONL stays unchanged",
         "h      persistently hide; r      restore hidden",
         "Space  select; Shift+↑/↓ extend the selection",
         "j/k, arrows, PgUp/PgDn navigate; g/G jump to ends",
         "/      search; n next, N previous occurrence",
         "s      dialogue/full search scope",
-        "1/2/3 filter User, AI, Tool; a select all visible matches",
+        "1/2/3 filter User, AI, Tool; 4/5 filter Reasoning, Answer; a select all visible matches",
         "u undo; v reveal hidden content temporarily",
         "R restore all hidden units (compatibility shortcut)",
       ],

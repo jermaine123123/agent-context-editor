@@ -1,5 +1,6 @@
 /* GENERATED FROM packages/context-editor-core; do not edit directly. */
 import { branchRevision, stableFingerprint } from './fingerprint.js'
+import { reduceProjectionStates, selectProjectionTargets, type ProjectionAtomState } from './projection.js'
 import { projectRecords } from './records.js'
 import { searchRecords } from './search.js'
 import {
@@ -20,6 +21,8 @@ import type {
   ContextSearchMatch,
   ContextSearchScope,
   ViewState,
+  ContextProjectionEventV1,
+  ContextProjectionState,
 } from './types.js'
 
 export interface ContextEditorAdapterSnapshot {
@@ -30,6 +33,10 @@ export interface ContextEditorAdapterSnapshot {
   revisionProbe: string
   /** V2 events stored outside the host session (for example a Pi sidecar). */
   viewEvents?: readonly ContextEditorViewEventV2[]
+  projectionEvents?: readonly ContextProjectionEventV1[]
+  projectionAvailable?: boolean
+  projectionError?: string
+  projectionRevision?: string
 }
 
 /** Host-specific session access required by the shared context editor service. */
@@ -37,6 +44,7 @@ export interface ContextEditorSessionAdapter {
   read(): ContextEditorAdapterSnapshot
   /** Persist a V2 event in host-specific storage. */
   appendViewEvent?(data: ContextEditorViewEventV2): string
+  appendProjectionEvent?(data: ContextProjectionEventV1): string
   /** @deprecated Use appendViewEvent. Kept for Pi Desktop and old adapters. */
   appendCustomEntry?(customType: typeof VIEW_EVENT_ENTRY_TYPE, data: ContextEditorViewEventV2): string
   isBusy(): boolean
@@ -56,6 +64,7 @@ function recordSnapshot(record: ContextRecord) {
     id: record.id,
     kind: record.kind,
     viewState: record.viewState,
+    projectionState: record.projectionState,
     mutable: record.mutable,
     units: record.units.map((unit) => ({
       id: unit.id,
@@ -63,6 +72,7 @@ function recordSnapshot(record: ContextRecord) {
       kind: unit.kind,
       atomIds: unit.atomIds,
       viewState: unit.viewState,
+      projectionState: unit.projectionState,
       mutable: unit.mutable,
     })),
     ...(record.entryId ? { entryId: record.entryId } : {}),
@@ -76,6 +86,13 @@ function currentState(adapter: ContextEditorSessionAdapter) {
   const current = adapter.read()
   const legacy = readLatestLegacyState(current.entries)
   const persistedEvents = current.viewEvents ?? []
+  const projectionEvents = current.projectionEvents ?? []
+  const seenProjection = new Set<string>()
+  const projectionEventsUnique = projectionEvents.filter((event) => {
+    if (seenProjection.has(event.transactionId)) return false
+    seenProjection.add(event.transactionId)
+    return true
+  })
   const sessionEvents = readViewEvents(current.entries)
   const seen = new Set<string>()
   const events = [...sessionEvents, ...persistedEvents].filter((event) => {
@@ -84,8 +101,16 @@ function currentState(adapter: ContextEditorSessionAdapter) {
     return true
   })
   const states = reduceViewStates(current.atoms, legacy, events)
-  const records = projectRecords(current.atoms, states)
-  return { ...current, legacy, events, states, records }
+  const projectionStates: Map<string, ProjectionAtomState> = current.projectionAvailable === false
+    ? new Map(current.atoms.map((atom) => [atom.id, 'unavailable' as const]))
+    : reduceProjectionStates(current.atoms, projectionEventsUnique)
+  const records = projectRecords(current.atoms, states, projectionStates)
+  return { ...current, legacy, events, projectionEvents: projectionEventsUnique, states, projectionStates, records }
+}
+
+function appendProjectionEvent(adapter: ContextEditorSessionAdapter, event: ContextProjectionEventV1): string {
+  if (adapter.appendProjectionEvent) return adapter.appendProjectionEvent(event)
+  throw new Error('CONTEXT_EDITOR_PERSISTENCE_UNSUPPORTED')
 }
 
 function appendViewEvent(adapter: ContextEditorSessionAdapter, event: ContextEditorViewEventV2): string {
@@ -101,6 +126,8 @@ function snapshotOf(state: ReturnType<typeof currentState>): ContextEditorSnapsh
     records: state.records.map(recordSnapshot),
     canUndo: !!latestUndoableEvent(state.events),
     legacyStateFound: !!state.legacy,
+    ...(state.projectionAvailable !== undefined ? { projectionAvailable: state.projectionAvailable } : {}),
+    ...(state.projectionError ? { projectionError: state.projectionError } : {}),
   }
 }
 
@@ -241,6 +268,78 @@ export class ContextEditorService {
     }
     const event = makeEvent(state, input.action, changes)
     const eventId = appendViewEvent(adapter, event)
+    this.searchCache.clear()
+    return { ok: true, eventId, snapshot: snapshotOf(currentState(adapter)) }
+  }
+
+  previewContextProjection(
+    adapter: ContextEditorSessionAdapter,
+    input: { baseRevision: string; action: 'exclude' | 'restore'; recordIds?: unknown; unitIds?: unknown },
+  ) {
+    if (adapter.isBusy()) throw new Error('AGENT_RUNTIME_BUSY')
+    const state = currentState(adapter)
+    if (state.projectionAvailable === false) throw new Error(state.projectionError || 'CONTEXT_EDITOR_PROJECTION_UNAVAILABLE')
+    if (input.baseRevision !== state.revision) throw new Error('CONTEXT_EDITOR_CONFLICT')
+    const recordIds = Array.isArray(input.recordIds)
+      ? input.recordIds.filter((id): id is string => typeof id === 'string')
+      : undefined
+    const unitIds = Array.isArray(input.unitIds)
+      ? input.unitIds.filter((id): id is string => typeof id === 'string')
+      : undefined
+    const selection = selectProjectionTargets(state.records, unitIds, recordIds)
+    const stateByUnitId: Record<string, ContextProjectionState | 'mixed' | 'unavailable'> = {}
+    for (const record of state.records) {
+      for (const unit of record.units) stateByUnitId[unit.id] = unit.projectionState
+    }
+    return {
+      baseRevision: state.revision,
+      action: input.action,
+      ...selection,
+      stateByUnitId,
+    }
+  }
+
+  commitContextProjection(
+    adapter: ContextEditorSessionAdapter,
+    input: { baseRevision: string; action: 'exclude' | 'restore'; recordIds?: unknown; unitIds?: unknown },
+  ): { ok: boolean; conflict?: boolean; eventId?: string; snapshot: ContextEditorSnapshot } {
+    if (adapter.isBusy()) throw new Error('AGENT_RUNTIME_BUSY')
+    const state = currentState(adapter)
+    if (state.projectionAvailable === false) throw new Error(state.projectionError || 'CONTEXT_EDITOR_PROJECTION_UNAVAILABLE')
+    if (input.baseRevision !== state.revision) {
+      return { ok: false, conflict: true, snapshot: snapshotOf(currentState(adapter)) }
+    }
+    const preview = this.previewContextProjection(adapter, input)
+    if (preview.unavailableUnitIds.length) throw new Error('CONTEXT_EDITOR_PROJECTION_UNAVAILABLE')
+    const target: ContextProjectionState = input.action === 'exclude' ? 'exclude' : 'include'
+    const atoms = new Map(state.atoms.map((atom) => [atom.id, atom]))
+    const changes: ContextProjectionEventV1['changes'] = []
+    const seen = new Set<string>()
+    for (const atomId of preview.effectiveAtomIds) {
+      if (seen.has(atomId)) continue
+      seen.add(atomId)
+      const atom = atoms.get(atomId)
+      if (!atom) continue
+      const before = state.projectionStates.get(atomId) ?? 'include'
+      if (before === 'unavailable') throw new Error('CONTEXT_EDITOR_PROJECTION_UNAVAILABLE')
+      if (before === target) continue
+      changes.push({ atomId, sourceRef: atom.sourceRef, fingerprint: atom.fingerprint, before, after: target })
+    }
+    if (!changes.length) return { ok: true, snapshot: snapshotOf(currentState(adapter)) }
+    if (adapter.isBusy()) throw new Error('AGENT_RUNTIME_BUSY')
+    const latest = currentState(adapter)
+    if (latest.revision !== state.revision) {
+      return { ok: false, conflict: true, snapshot: snapshotOf(latest) }
+    }
+    const event: ContextProjectionEventV1 = {
+      version: 1,
+      transactionId: 'context-projection-' + Date.now() + '-' + Math.random().toString(36).slice(2, 9),
+      createdAt: new Date().toISOString(),
+      baseRevision: state.revision,
+      action: input.action,
+      changes,
+    }
+    const eventId = appendProjectionEvent(adapter, event)
     this.searchCache.clear()
     return { ok: true, eventId, snapshot: snapshotOf(currentState(adapter)) }
   }

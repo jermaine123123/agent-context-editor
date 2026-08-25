@@ -12,6 +12,7 @@ afterEach(() => {
   for (const path of tempDirs.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
+
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "pi-host-"));
   tempDirs.push(dir);
@@ -60,7 +61,7 @@ describe("Pi context host", () => {
     expect(modelProjection()).toBe(beforeModelProjection);
 
     const viewRevision = host.snapshot().revision;
-    host.setPrefs({ version: 2, enabledKinds: ["ai"], showHidden: true });
+    host.setPrefs({ version: 3, enabledUnitKinds: ["reasoning"], showHidden: true });
     expect(host.snapshot().revision).toBe(viewRevision);
 
     // A sibling branch created from u1 does not contain the mutation anchor a1.
@@ -76,3 +77,31 @@ describe("Pi context host", () => {
     expect(new PiContextEditorHost(ctx).records().find((record) => record.kind === "ai")?.units.find((unit) => unit.kind === "reasoning")?.viewState).toBe("hide");
   });
 });
+  it("persists model projection separately, inherits only through ancestor anchors, and restores", async () => {
+    const { sessionFile, ctx, setBranch, modelProjection } = fixture();
+    const before = sha256(sessionFile);
+    const host = new PiContextEditorHost(ctx);
+    const ai = host.records().find((record) => record.kind === "ai");
+    expect(host.capabilities.contextExclusion).toBe(true);
+    const reasoning = ai?.units.find((unit) => unit.kind === "reasoning");
+    expect(reasoning).toBeDefined();
+    const locator = { host: "pi", sessionId: host.sessionId };
+    const excluded = await host.commitContext({ locator, baseRevision: host.snapshot().revision, action: "exclude", unitIds: [reasoning!.id] });
+    expect(excluded.ok).toBe(true);
+    expect(host.records().find((record) => record.kind === "ai")?.units.find((unit) => unit.kind === "reasoning")?.projectionState).toBe("exclude");
+    expect(sha256(sessionFile)).toBe(before);
+    expect(modelProjection()).toContain("先思考");
+
+    setBranch([{ id: "u1", type: "message", parentId: null, timestamp: new Date(1).toISOString(), message: { role: "user", content: "检查" } }]);
+    expect(new PiContextEditorHost(ctx).records().find((record) => record.kind === "user")?.projectionState).toBe("include");
+    setBranch([
+      { id: "u1", type: "message", parentId: null, timestamp: new Date(1).toISOString(), message: { role: "user", content: "检查" } },
+      { id: "a1", type: "message", parentId: "u1", timestamp: new Date(2).toISOString(), message: { role: "assistant", content: [{ type: "thinking", thinking: "先思考" }, { type: "text", text: "答案" }] } },
+      { id: "b1", type: "message", parentId: "a1", timestamp: new Date(3).toISOString(), message: { role: "user", content: "继续" } },
+    ]);
+    const descendant = new PiContextEditorHost(ctx);
+    expect(descendant.records().find((record) => record.kind === "ai")?.units.find((unit) => unit.kind === "reasoning")?.projectionState).toBe("exclude");
+    const restored = await descendant.commitContext({ locator: { host: "pi", sessionId: descendant.sessionId }, baseRevision: descendant.snapshot().revision, action: "restore", unitIds: [reasoning!.id] });
+    expect(restored.ok).toBe(true);
+    expect(new PiContextEditorHost(ctx).records().find((record) => record.kind === "ai")?.units.find((unit) => unit.kind === "reasoning")?.projectionState).toBe("include");
+  });

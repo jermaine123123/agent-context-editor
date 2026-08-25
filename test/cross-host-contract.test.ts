@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { normalizeSessionEntries } from "../adapters/pi-extension/src/normalize.js";
+import { CLIENT_UNIT_KINDS, migrateEnabledKindsToUnits } from "../adapters/deepseek-harness/client-state.js";
 import { projectRecords as projectDeepSeekRecords, searchRecords as searchDeepSeekRecords, normalizeSessionEvents } from "../adapters/deepseek-harness/core.js";
-import { projectRecords as projectPiRecords, searchRecords as searchPiRecords } from "../packages/context-editor-core/src/index.js";
+import { CONTEXT_EDITOR_UNIT_KINDS, normalizeContextEditorPrefs, projectRecords as projectPiRecords, searchRecords as searchPiRecords } from "../packages/context-editor-core/src/index.js";
 
 describe("cross-host record/unit contract", () => {
+  it("keeps the canonical unit filter taxonomy and legacy AI migration aligned", () => {
+    expect([...CONTEXT_EDITOR_UNIT_KINDS]).toEqual([...CLIENT_UNIT_KINDS]);
+    expect(normalizeContextEditorPrefs({ version: 2, enabledKinds: ["ai"], showHidden: false }).enabledUnitKinds)
+      .toEqual(migrateEnabledKindsToUnits(["ai"]));
+  });
   it("projects the same logical turn shape, search totals, and independent AI units", () => {
     const piEntries = [
       { type: "message", id: "u1", parentId: null, timestamp: new Date(1).toISOString(), message: { role: "user", content: "请检查部署" } },

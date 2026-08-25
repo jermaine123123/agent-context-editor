@@ -3,7 +3,7 @@ import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
-const ignored = new Set(['node_modules', 'pi-app', '.git', '.npm-cache', '.release-backup-20260818', 'release', 'dist', 'out'])
+const ignored = new Set(['node_modules', 'pi-app', 'deepseek-harness-latest', '.git', '.npm-cache', '.release-backup-20260818', 'release', 'dist', 'out'])
 const patterns = [
   /[A-Z]:\\Users\\[^\s"']+/i,
   /(?:api[_-]?key|access[_-]?token|secret)\s*[:=]\s*['"][^'"]{12,}/i,
