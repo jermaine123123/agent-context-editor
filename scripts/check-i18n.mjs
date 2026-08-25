@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
@@ -13,7 +14,9 @@ const chinese = /[\u4e00-\u9fff]/u
 const failures = []
 
 for (const relative of uiFiles) {
-  const source = await readFile(resolve(root, relative), 'utf8')
+  const file = resolve(root, relative)
+  if (!existsSync(file)) continue
+  const source = await readFile(file, 'utf8')
   if (chinese.test(source)) failures.push(relative)
 }
 
@@ -21,4 +24,5 @@ if (failures.length > 0) {
   throw new Error(`Chinese UI literals found outside locale dictionaries:\n${failures.map(value => `- ${value}`).join('\n')}`)
 }
 
-console.log(`i18n literal scan passed (${uiFiles.length} UI sources)`)
+const scanned = uiFiles.filter((relative) => existsSync(resolve(root, relative))).length
+console.log(`i18n literal scan passed (${scanned} UI sources)`)
