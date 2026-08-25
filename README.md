@@ -1,20 +1,22 @@
 # Agent Context Editor
 
-A cross-agent conversation management plugin for Coding Agent sessions—
-searchable, filterable, hideable, reversible, and built to preserve the
-original Session.
+Agent Context Editor is a cross-agent conversation management plugin for Coding
+Agent sessions. In supported hosts, it provides reversible model-context
+exclusion: preview and confirm content to omit from subsequent model input,
+restore it later, and keep the original Session unchanged. It also provides a
+searchable, filterable, hideable, and restorable management view for User, AI,
+and Tool messages.
 
-Long-running Agent sessions accumulate user instructions, model reasoning,
-older answers, and tool output. Agent Context Editor builds an independent,
-structured management view over the existing Session so you can search the
-whole conversation, filter User, AI, and Tool messages, select individual or
-multiple items, and hide, restore, or undo view changes. Hidden state is stored
-separately; the original Session is never deleted or rewritten.
+Agent sessions can accumulate user instructions, model reasoning, older answers,
+and tool output. Agent Context Editor builds an independent, structured
+management view over the existing Session so you can search the whole
+conversation, filter User, AI, and Tool messages, select individual or multiple
+items, and hide, restore, or undo view changes. Hidden state is stored separately.
 
 The long-term goal is to provide the same conversation-editing workflow across
-Agent hosts: keep long sessions focused, quickly return to the information you
-chose to retain, control what participates in future model context, and ask AI
-to condense a selected range or the entire session.
+Agent hosts: keep sessions focused, quickly return to the information you chose
+to retain, control what participates in future model context, and ask AI to
+condense a selected range or the entire session.
 
 ## Stable release v0.2.0
 

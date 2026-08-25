@@ -2,7 +2,7 @@
   "name": "agent-context-editor",
   "version": "0.2.0",
   "private": true,
-  "description": "Cross-agent search, filtering, and reversible view management for Coding Agent sessions",
+  "description": "Cross-agent model-context exclusion with search, filtering, hide/restore, and original Session preservation",
   "type": "module",
   "license": "MIT",
   "workspaces": [
