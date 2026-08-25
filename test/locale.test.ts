@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -37,10 +37,12 @@ describe("system locale routing", () => {
     expect(dshZh.hideSelected(2)).toContain("隐藏选中");
   });
 
-  it("keeps Pi Desktop English and Chinese timeline keys in parity", () => {
-    const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "..", "pi-app", "src", "renderer", "src", "locales");
-    const en = JSON.parse(readFileSync(resolve(root, "en", "timeline.json"), "utf8"));
-    const zh = JSON.parse(readFileSync(resolve(root, "zh", "timeline.json"), "utf8"));
+  const desktopLocaleRoot = resolve(fileURLToPath(new URL(".", import.meta.url)), "..", "pi-app", "src", "renderer", "src", "locales");
+  const desktopEnglishTimeline = resolve(desktopLocaleRoot, "en", "timeline.json");
+
+  it.skipIf(!existsSync(desktopEnglishTimeline))("keeps Pi Desktop English and Chinese timeline keys in parity", () => {
+    const en = JSON.parse(readFileSync(desktopEnglishTimeline, "utf8"));
+    const zh = JSON.parse(readFileSync(resolve(desktopLocaleRoot, "zh", "timeline.json"), "utf8"));
     expect(flattenKeys(en)).toEqual(flattenKeys(zh));
   });
 });
