@@ -210,12 +210,14 @@ export function createPiText(locale: PiLocale): PiText {
       if (mode === "search") return zh ? "\u8f93\u5165\u5173\u952e\u8bcd · Enter \u8df3\u8f6c · Esc \u7ed3\u675f\u641c\u7d22" : "Type a query · Enter jump · Esc finish search";
       if (mode === "results") return zh ? "n \u4e0b\u4e00\u4e2a\u547d\u4e2d，N \u4e0a\u4e00\u4e2a\u547d\u4e2d · s \u5207\u6362\u8303\u56f4 · / \u4fee\u6539\u641c\u7d22 · ? \u5e2e\u52a9 · q \u5173\u95ed" : "n next / N previous occurrence · s toggle scope · / edit search · ? help · q close";
       if (mode === "help") return zh ? "? Esc \u8fd4\u56de\u7f16\u8f91\u5668" : "? / Esc return to editor";
-      return zh ? "j/k · Enter \u67e5\u770b/\u6536\u8d77 · h \u9690\u85cf · r \u6062\u590d · x \u6392\u9664/\u6062\u590d\u6a21\u578b\u4e0a\u4e0b\u6587 · / \u641c\u7d22 · ? \u5e2e\u52a9 · q \u5173\u95ed" : "j/k move · Enter view/collapse · h hide · r restore · x exclude/restore model context · / search · ? help · q close";
+      return zh ? "j/k · Enter 查看/收起 · e 编辑 · E 恢复原文 · z 撤销编辑 · o 对照原文 · h 隐藏 · r 恢复 · x 排除/恢复模型上下文 · / 搜索 · ? 帮助 · q 关闭" : "j/k move · Enter view/collapse · e edit · E restore original · z undo edit · o compare original · h hide · r restore · x exclude/restore model context · / search · ? help · q close";
     },
     tuiHelpTitle: () => zh ? "Context Editor \u5feb\u6377\u952e" : "Context Editor help",
     tuiHelpLines: () => zh
       ? [
         "Enter  \u4e34\u65f6\u5c55\u5f00/\u6536\u8d77\uff0c\u4e0d\u4fdd\u5b58",
+"e      编辑当前用户/回答单元（提交到 sidecar）",
+"E      确认恢复原文；z 撤销最近一次编辑；o 对照原文",
 "x      排除/恢复模型上下文；Enter/y 确认，Esc/n 取消，不修改 Session JSONL",
         "h      \u6301\u4e45\u9690\u85cf\uff1br      \u6062\u590d\u9690\u85cf\u5355\u5143",
         "Space  \u9009\u62e9/\u53d6\u6d88\uff1bShift+↑/↓ \u8fde\u7eed\u9009\u62e9",
@@ -228,6 +230,8 @@ export function createPiText(locale: PiLocale): PiText {
       ]
       : [
         "Enter  temporarily expand/collapse; does not persist",
+"e      edit the current User/Answer unit (sidecar only)",
+"E      restore canonical text; z undo the latest edit; o compare original",
 "x      exclude/restore model context; Enter/y confirm, Esc/n cancel; Session JSONL stays unchanged",
         "h      persistently hide; r      restore hidden",
         "Space  select; Shift+↑/↓ extend the selection",

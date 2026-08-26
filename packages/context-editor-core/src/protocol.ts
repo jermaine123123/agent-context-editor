@@ -36,6 +36,8 @@ export interface ContextHostCapabilities {
   readonly persistence: boolean
   /** Whether this host can change the model-facing context projection. */
   readonly contextExclusion: boolean
+  /** Whether the host can edit User/Answer text in the model-facing projection. */
+  readonly contextReplacement: boolean
 }
 
 export interface ContextRecordPage {
@@ -91,6 +93,21 @@ export interface ContextProjectionMutationRequest {
   readonly unitIds?: readonly string[]
 }
 
+export interface ContextReplacementMutationRequest {
+  readonly locator: ContextSessionLocator
+  readonly baseRevision: string | number
+  readonly operationId: string
+  readonly unitId: string
+  readonly text: string
+}
+
+export interface ContextReplacementUnitRequest {
+  readonly locator: ContextSessionLocator
+  readonly baseRevision: string | number
+  readonly operationId: string
+  readonly unitId: string
+}
+
 export interface ContextProjectionPreview {
   readonly baseRevision: string
   readonly action: 'exclude' | 'restore'
@@ -107,6 +124,7 @@ export interface ContextProjectionPreview {
 export interface ContextMutationResult {
   readonly ok: boolean
   readonly conflict?: boolean
+  readonly operationId?: string
   readonly eventId?: string
   readonly snapshot: ContextEditorSnapshot
 }
@@ -122,6 +140,9 @@ export interface ContextEditorHostAdapter {
   undoView(locator: ContextSessionLocator, baseRevision: string): Promise<ContextMutationResult>
   previewContext(request: ContextProjectionMutationRequest): Promise<ContextProjectionPreview>
   commitContext(request: ContextProjectionMutationRequest): Promise<ContextMutationResult>
+  commitReplacement?(request: ContextReplacementMutationRequest): Promise<ContextMutationResult>
+  restoreReplacement?(request: ContextReplacementUnitRequest): Promise<ContextMutationResult>
+  undoReplacement?(request: ContextReplacementUnitRequest): Promise<ContextMutationResult>
 }
 
 /** Persisted view event shape shared by Pi and non-Pi hosts. */

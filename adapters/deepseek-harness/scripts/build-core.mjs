@@ -9,6 +9,7 @@ const repositoryRoot = resolve(packageRoot, '../..')
 const canonicalSources = [
   'packages/context-editor-core/src/types.ts',
   'packages/context-editor-core/src/fingerprint.ts',
+  'packages/context-editor-core/src/projection.ts',
   'packages/context-editor-core/src/records.ts',
   'packages/context-editor-core/src/search.ts',
   'packages/context-editor-core/src/protocol.ts',

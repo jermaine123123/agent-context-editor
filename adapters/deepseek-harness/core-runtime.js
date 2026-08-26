@@ -1,6 +1,6 @@
 /*
  * GENERATED FILE - do not edit directly.
- * Canonical Core source digest: 5b40cd1f4132deba15505e61db10055c5247c189d9a7562aaefc0ff37bc3658e
+ * Canonical Core source digest: f3f2e5d503d28a435a6ed6c681602b742d856aaae096212ff0b2f0588af2230d
  * Rebuild with: npm run build:deepseek
  */
 //#region packages/context-editor-core/src/projection.ts
@@ -27,6 +27,133 @@ function reduceProjectionStates(atoms, events) {
 		result.set(atom.id, change.after);
 	}
 	return result;
+}
+function unitOriginalText(unit) {
+	return unit.atoms.map((atom) => atom.text).join("\n");
+}
+function replacementEligibility(unit) {
+	if (!unit.mutable) return {
+		supported: false,
+		disabledReason: "invalid-target"
+	};
+	if (unit.kind === "user") {
+		const atom = unit.atoms.length === 1 ? unit.atoms[0] : void 0;
+		if (!atom || atom.kind !== "user") return {
+			supported: false,
+			disabledReason: "invalid-target"
+		};
+		if (atom.structured === true) return {
+			supported: false,
+			disabledReason: "structured-user-content"
+		};
+		return { supported: true };
+	}
+	if (unit.kind === "answer") {
+		if (!unit.atoms.length || unit.atoms.some((atom) => atom.kind !== "assistant_text")) return {
+			supported: false,
+			disabledReason: "invalid-target"
+		};
+		if (unit.atoms.some((atom) => atom.hasSignature === true)) return {
+			supported: false,
+			disabledReason: "signed-content"
+		};
+		return { supported: true };
+	}
+	return {
+		supported: false,
+		disabledReason: "unsupported-unit-kind"
+	};
+}
+function sameAtomRefs(unit, refs) {
+	if (unit.atoms.length !== refs.length || !refs.length) return false;
+	return unit.atoms.every((atom, index) => {
+		const ref = refs[index];
+		return !!ref && ref.atomId === atom.id && ref.fingerprint === atom.fingerprint && ref.sourceRef.entryId === atom.sourceRef.entryId && ref.sourceRef.blockIndex === atom.sourceRef.blockIndex;
+	});
+}
+function isReplacementEvent(event) {
+	return "type" in event && event.type === "replacement" && event.schemaVersion === 1;
+}
+/** Replay replacement history independently for every editable unit. Invalid history fails closed for that unit. */
+function reduceReplacementStates(units, events, projectionAvailable = true) {
+	const states = /* @__PURE__ */ new Map();
+	for (const unit of units) {
+		const eligibility = replacementEligibility(unit);
+		const unavailable = !projectionAvailable;
+		states.set(unit.id, {
+			unitId: unit.id,
+			originalText: unitOriginalText(unit),
+			effectiveText: unitOriginalText(unit),
+			replacementText: null,
+			replacementState: unavailable ? "unavailable" : "original",
+			replacementSupported: eligibility.supported && !unavailable,
+			...unavailable ? { replacementDisabledReason: "projection-unavailable" } : eligibility.disabledReason ? { replacementDisabledReason: eligibility.disabledReason } : {},
+			canRestoreReplacement: false,
+			canUndoReplacement: false,
+			stack: []
+		});
+	}
+	if (!projectionAvailable) return new Map([...states].map(([id, value]) => [id, value]));
+	const seenEventIds = /* @__PURE__ */ new Set();
+	for (const event of events) {
+		if (!isReplacementEvent(event)) continue;
+		if (seenEventIds.has(event.eventId)) continue;
+		seenEventIds.add(event.eventId);
+		const state = states.get(event.unitId);
+		if (!state || state.replacementState === "unavailable") continue;
+		const unit = units.find((candidate) => candidate.id === event.unitId);
+		if (!unit || !state.replacementSupported) {
+			if (state) state.replacementState = "unavailable";
+			continue;
+		}
+		if (event.action === "undo") {
+			const top = state.stack[state.stack.length - 1];
+			if (!top || top.eventId !== event.undoOf) {
+				state.replacementState = "unavailable";
+				state.replacementDisabledReason = "invalid-target";
+				continue;
+			}
+			state.stack.pop();
+			state.replacementText = top.beforeText;
+			state.effectiveText = top.beforeText ?? state.originalText;
+			state.replacementState = top.beforeText === null ? "original" : "replaced";
+			state.activeEventId = state.stack[state.stack.length - 1]?.eventId;
+			continue;
+		}
+		if (event.unitKind !== unit.kind || !sameAtomRefs(unit, event.atomRefs) || event.beforeText !== state.replacementText) {
+			state.replacementState = "unavailable";
+			state.replacementDisabledReason = "invalid-target";
+			continue;
+		}
+		if (event.action === "replace") {
+			if (typeof event.afterText !== "string" || event.afterText.trim().length === 0) {
+				state.replacementState = "unavailable";
+				state.replacementDisabledReason = "invalid-target";
+				continue;
+			}
+		} else if (event.afterText !== null || event.beforeText === null) {
+			state.replacementState = "unavailable";
+			state.replacementDisabledReason = "invalid-target";
+			continue;
+		}
+		state.stack.push({
+			eventId: event.eventId,
+			beforeText: event.beforeText,
+			afterText: event.afterText
+		});
+		state.replacementText = event.afterText;
+		state.effectiveText = event.afterText ?? state.originalText;
+		state.replacementState = event.afterText === null ? "original" : "replaced";
+		state.activeEventId = event.eventId;
+	}
+	const output = /* @__PURE__ */ new Map();
+	for (const [id, state] of states) {
+		state.canRestoreReplacement = state.replacementState === "replaced" && state.replacementText !== null;
+		state.canUndoReplacement = state.replacementState !== "unavailable" && state.stack.length > 0;
+		const { stack: _stack, ...projection } = state;
+		output.set(id, projection);
+	}
+	return output;
 }
 function projectionStateForAtoms(atoms, states) {
 	if (!atoms.length) return "unavailable";
@@ -132,7 +259,7 @@ function unitViewState(atoms, states) {
 	if (values.every((value) => value === "collapse")) return "collapse";
 	return "mixed";
 }
-function projectUnits(recordId, atoms, states, projectionStates) {
+function projectUnits(recordId, atoms, states, projectionStates, replacementStates) {
 	const order = [];
 	const groups = /* @__PURE__ */ new Map();
 	for (const atom of atoms) {
@@ -157,9 +284,22 @@ function projectUnits(recordId, atoms, states, projectionStates) {
 			projectionState: projectionStateForAtoms(grouped, projectionStates ?? /* @__PURE__ */ new Map()),
 			mutable: true
 		};
+	}).map((base) => {
+		const originalText = unitOriginalText(base);
+		const eligibility = replacementEligibility(base);
+		const replacement = replacementStates?.get(base.id);
+		return {
+			...base,
+			effectiveText: replacement?.effectiveText ?? originalText,
+			replacementState: replacement?.replacementState ?? "original",
+			replacementSupported: replacement?.replacementSupported ?? eligibility.supported,
+			...replacement?.replacementDisabledReason ?? eligibility.disabledReason ? { replacementDisabledReason: replacement?.replacementDisabledReason ?? eligibility.disabledReason } : {},
+			canRestoreReplacement: replacement?.canRestoreReplacement ?? false,
+			canUndoReplacement: replacement?.canUndoReplacement ?? false
+		};
 	});
 }
-function projectRecords(atoms, states, projectionStates) {
+function projectRecords(atoms, states, projectionStates, replacementStates) {
 	const order = [];
 	const groups = /* @__PURE__ */ new Map();
 	for (const atom of atoms) {
@@ -180,7 +320,7 @@ function projectRecords(atoms, states, projectionStates) {
 		const allHidden = grouped.length > 0 && grouped.every((atom) => states?.get(atom.id) === "hide");
 		const first = grouped[0];
 		const mutable = kind !== "tool" || grouped.every((atom) => !!atom.sourceRef.entryId);
-		const units = projectUnits(id, grouped, states, projectionStates).map((unit) => ({
+		const units = projectUnits(id, grouped, states, projectionStates, replacementStates).map((unit) => ({
 			...unit,
 			mutable
 		}));
@@ -194,7 +334,7 @@ function projectRecords(atoms, states, projectionStates) {
 			entryIds: Array.from(new Set(grouped.map((atom) => atom.sourceRef.entryId).filter(Boolean))),
 			anchorEntryId: first?.sourceRef.entryId,
 			toolCallId: grouped.find((atom) => atom.toolCallId)?.toolCallId,
-			searchableText: grouped.map(fieldText).filter(Boolean).join("\n"),
+			searchableText: units.map((unit) => unit.kind === "user" || unit.kind === "answer" ? unit.effectiveText : unit.atoms.map(fieldText).filter(Boolean).join(" ")).filter(Boolean).join("\n"),
 			viewState: allHidden ? "hide" : "show",
 			projectionState: projectionStateForAtoms(grouped, projectionStates ?? /* @__PURE__ */ new Map()),
 			mutable
@@ -250,10 +390,20 @@ function searchOccurrences(records, query, enabledKinds, scope = "dialogue", ena
 			atoms: record.atoms,
 			viewState: record.viewState,
 			projectionState: record.projectionState,
-			mutable: record.mutable
+			mutable: record.mutable,
+			effectiveText: record.atoms.map((atom) => atom.text).join("\n"),
+			replacementState: "original",
+			replacementSupported: false,
+			canRestoreReplacement: false,
+			canUndoReplacement: false
 		}];
 		for (const unit of units) {
 			if (enabledUnitKinds !== void 0 && !enabledUnitKinds.has(unit.kind)) continue;
+			if ((unit.kind === "user" || unit.kind === "answer") && (normalizedScope === "all" || unit.atoms.some((atom) => atomMatchesSearchScope(atom.kind, normalizedScope)))) {
+				const anchor = unit.atoms[unit.atoms.length - 1] ?? unit.atoms[0];
+				if (anchor) addMatches(record, unit, anchor.id, anchor.sourceRef.blockIndex, "message", unit.effectiveText, anchor.sourceRef.entryId);
+				continue;
+			}
 			for (const atom of unit.atoms) {
 				if (!atomMatchesSearchScope(atom.kind, normalizedScope)) continue;
 				if (atom.toolName) addMatches(record, unit, atom.id, atom.sourceRef.blockIndex, "tool_name", atom.toolName, atom.sourceRef.entryId);
@@ -285,4 +435,4 @@ function searchRecords(records, query, enabledKinds, scope = "dialogue", enabled
 	});
 }
 //#endregion
-export { atomMatchesSearchScope, projectRecords, reduceProjectionStates, searchRecords, selectProjectionTargets };
+export { atomMatchesSearchScope, projectRecords, reduceProjectionStates, reduceReplacementStates, searchRecords, selectProjectionTargets };

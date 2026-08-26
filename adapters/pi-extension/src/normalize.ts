@@ -51,6 +51,16 @@ function contentToText(content: unknown): string {
     .join("\n");
 }
 
+function isPlainTextUserContent(content: unknown): boolean {
+  if (typeof content === "string") return true;
+  if (!Array.isArray(content) || content.length === 0) return false;
+  return content.every((part) => {
+    if (!part || typeof part !== "object") return false;
+    const value = part as Record<string, unknown>;
+    return value.type === "text" && typeof value.text === "string";
+  });
+}
+
 function approximateTokens(text: string): number {
   return Math.max(1, Math.ceil(text.length / 4));
 }
@@ -62,7 +72,7 @@ function addAtom(
   blockIndex: number,
   kind: AtomKind,
   text: string,
-  options: Partial<Pick<ContextAtom, "recordId" | "toolCallId" | "toolName" | "isError" | "hasSignature" | "redacted">> = {},
+  options: Partial<Pick<ContextAtom, "recordId" | "toolCallId" | "toolName" | "isError" | "hasSignature" | "redacted" | "structured">> = {},
 ): ContextAtom | undefined {
   const entryId = String(entry.id ?? "");
   if (!entryId) return undefined;
@@ -114,9 +124,10 @@ export function normalizeSessionEntries(entries: readonly SessionEntry[] | reado
     const role = String(message.role ?? "");
     if (role === "user") {
       turnId = entryId;
-      const text = contentToText(message.content).trim();
-      // Slash commands are host control entries, not context records.
-      if (!/^\/[A-Za-z][A-Za-z0-9:_-]*(?:\s|$)/.test(text)) addAtom(atoms, entry, turnId, 0, "user", text);
+      const text = contentToText(message.content);
+      // Slash commands are host control entries, not context records. Keep
+      // every other User character intact so replacement recall is exact.
+      if (!/^\/[A-Za-z][A-Za-z0-9:_-]*(?:\s|$)/.test(text.trim())) addAtom(atoms, entry, turnId, 0, "user", text, { structured: !isPlainTextUserContent(message.content) });
       continue;
     }
     if (role === "toolResult") {

@@ -1,9 +1,12 @@
 # Pi Context Editor
 
 `pi-context-editor` adds the `/ctx` command to Pi TUI and Pi Desktop. It
-provides a full-screen, keyboard-first context editor with shared
-record/unit projection, search, independent reasoning/answer visibility,
-batch selection, restore and undo.
+starts with two model-context controls: exclude selected units from subsequent
+provider input, and manually edit eligible plain-text User or complete unsigned
+Answer units with restore, undo and original-text comparison. It also provides
+a full-screen, keyboard-first management view with shared record/unit projection,
+search, independent reasoning/answer visibility, batch selection, restore and
+undo.
 
 Pi `0.84.2` installs a local package directory, not a `.tgz` archive. Extract
 the published tarball so `package.json` is at the package directory root, or
@@ -15,6 +18,8 @@ model-context exclude/restore events use the independent
 reads and preserves legacy V1 visual CustomEntry state for compatibility.
 Projection changes never rewrite the original session messages or replace Tool
 Output; they affect only the next provider payload.
+
+Pi TUI also supports manual replacement of one plain-text User or complete unsigned Answer unit. Press `e` to open Pi's multiline editor, `E` to restore canonical text, `z` to undo the latest replacement/restore for the current unit, and `o` to compare canonical text. Replacement events share the projection sidecar and are applied after exclusion (exclusion wins). Structured User content, signed Answer text, reasoning, tools, and batch edits remain disabled.
 
 This release does not filter Pi's main chat timeline or generate summary
 replacements. In Pi TUI, press `x` to preview and confirm model-context

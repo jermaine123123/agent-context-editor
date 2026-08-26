@@ -22,7 +22,9 @@ import {
   type ContextViewMutationRequest,
   type ContextProjectionMutationRequest,
   type ContextProjectionPreview,
-  type ContextProjectionEventV1,
+  type ContextProjectionEvent,
+  type ContextReplacementMutationRequest,
+  type ContextReplacementUnitRequest,
 } from "./shared-core/index.js";
 import { appendProjectionSidecarEvent, readProjectionSidecar } from "./projection-sidecar.js";
 import { readSidecar, appendSidecarEvent, writeSidecarPrefs } from "./sidecar.js";
@@ -42,6 +44,7 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
     undo: true,
     persistence: true,
     contextExclusion: true as const,
+    contextReplacement: true as const,
   };
 
   constructor(private readonly ctx: ExtensionContext) {}
@@ -95,7 +98,7 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
   appendViewEvent(event: ContextEditorViewEventV2): string {
     if (!this.ctx.isIdle()) throw new Error("AGENT_RUNTIME_BUSY");
     const current = this.read();
-    if (current.revision !== event.baseRevision) throw new Error("CONTEXT_EDITOR_CONFLICT");
+    if (String(current.revision) !== String(event.baseRevision)) throw new Error("CONTEXT_EDITOR_CONFLICT");
     const sidecar = readSidecar(this.sessionFile, this.sessionId);
     // Re-read the active branch immediately before taking the sidecar lock.
     // This closes the normal race where a Session append lands while the TUI
@@ -112,11 +115,11 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
     );
   }
 
-  appendProjectionEvent(event: ContextProjectionEventV1): string {
+  appendProjectionEvent(event: ContextProjectionEvent): string {
     if (!this.ctx.isIdle()) throw new Error("AGENT_RUNTIME_BUSY");
     const current = this.read();
     if (current.projectionAvailable === false) throw new Error("CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
-    if (current.revision !== event.baseRevision) throw new Error("CONTEXT_EDITOR_CONFLICT");
+    if (String(current.revision) !== String(event.baseRevision)) throw new Error("CONTEXT_EDITOR_CONFLICT");
     const sidecar = readProjectionSidecar(this.sessionFile, this.sessionId);
     if (sidecar.integrity === "invalid") throw new Error("CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
     const latest = this.read();
@@ -128,6 +131,39 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
       event,
       sidecar.revision,
     );
+  }
+
+  commitReplacementMutation(input: Pick<ContextReplacementMutationRequest, "baseRevision" | "unitId" | "text">): ContextMutationResult {
+    try {
+      return service.commitReplacement(this, input);
+    } catch (error) {
+      if (error instanceof Error && (error.message === "CONTEXT_EDITOR_CONFLICT" || error.message === "CONTEXT_EDITOR_SIDECAR_BUSY")) {
+        return { ok: false, conflict: true, snapshot: this.snapshot() };
+      }
+      throw error;
+    }
+  }
+
+  restoreReplacementMutation(input: Pick<ContextReplacementUnitRequest, "baseRevision" | "unitId">): ContextMutationResult {
+    try {
+      return service.restoreReplacement(this, input);
+    } catch (error) {
+      if (error instanceof Error && (error.message === "CONTEXT_EDITOR_CONFLICT" || error.message === "CONTEXT_EDITOR_SIDECAR_BUSY")) {
+        return { ok: false, conflict: true, snapshot: this.snapshot() };
+      }
+      throw error;
+    }
+  }
+
+  undoReplacementMutation(input: Pick<ContextReplacementUnitRequest, "baseRevision" | "unitId">): ContextMutationResult {
+    try {
+      return service.undoReplacement(this, input);
+    } catch (error) {
+      if (error instanceof Error && (error.message === "CONTEXT_EDITOR_CONFLICT" || error.message === "CONTEXT_EDITOR_SIDECAR_BUSY")) {
+        return { ok: false, conflict: true, snapshot: this.snapshot() };
+      }
+      throw error;
+    }
   }
 
   isBusy(): boolean {
@@ -213,6 +249,21 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
   async getSearchMatch(request: ContextSearchMatchRequest): Promise<ContextSearchMatch | null> {
     asLocator(request.locator, this.sessionId);
     return this.searchMatch(request);
+  }
+
+  async commitReplacement(request: ContextReplacementMutationRequest): Promise<ContextMutationResult> {
+    asLocator(request.locator, this.sessionId);
+    return this.commitReplacementMutation(request);
+  }
+
+  async restoreReplacement(request: ContextReplacementUnitRequest): Promise<ContextMutationResult> {
+    asLocator(request.locator, this.sessionId);
+    return this.restoreReplacementMutation(request);
+  }
+
+  async undoReplacement(request: ContextReplacementUnitRequest): Promise<ContextMutationResult> {
+    asLocator(request.locator, this.sessionId);
+    return this.undoReplacementMutation(request);
   }
 
   async commitView(request: ContextViewMutationRequest): Promise<ContextMutationResult> {

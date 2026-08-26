@@ -4,6 +4,10 @@ import type {
   ContextEditableUnit,
   ContextEditableUnitProjectionState,
   ContextProjectionEventV1,
+  ContextProjectionEvent,
+  ContextReplacementEventV1,
+  ContextReplacementProjectionState,
+  ContextReplacementDisabledReason,
   ContextProjectionState,
   ContextRecord,
 } from './types.js'
@@ -56,6 +60,143 @@ export function reduceProjectionStates(
     }
   }
   return result
+}
+
+export interface ReplacementUnitProjection {
+  unitId: string
+  originalText: string
+  effectiveText: string
+  replacementText: string | null
+  replacementState: ContextReplacementProjectionState
+  replacementSupported: boolean
+  replacementDisabledReason?: ContextReplacementDisabledReason
+  canRestoreReplacement: boolean
+  canUndoReplacement: boolean
+  activeEventId?: string
+}
+
+type ReplacementStackItem = { eventId: string; beforeText: string | null; afterText: string | null }
+
+type MutableReplacementState = ReplacementUnitProjection & { stack: ReplacementStackItem[] }
+
+export function unitOriginalText(unit: Pick<ContextEditableUnit, 'atoms'>): string {
+  return unit.atoms.map((atom) => atom.text).join('\n')
+}
+
+export function replacementEligibility(unit: Pick<ContextEditableUnit, 'kind' | 'atoms' | 'mutable'>): {
+  supported: boolean
+  disabledReason?: ContextReplacementDisabledReason
+} {
+  if (!unit.mutable) return { supported: false, disabledReason: 'invalid-target' }
+  if (unit.kind === 'user') {
+    const atom = unit.atoms.length === 1 ? unit.atoms[0] : undefined
+    if (!atom || atom.kind !== 'user') return { supported: false, disabledReason: 'invalid-target' }
+    if (atom.structured === true) return { supported: false, disabledReason: 'structured-user-content' }
+    return { supported: true }
+  }
+  if (unit.kind === 'answer') {
+    if (!unit.atoms.length || unit.atoms.some((atom) => atom.kind !== 'assistant_text')) {
+      return { supported: false, disabledReason: 'invalid-target' }
+    }
+    if (unit.atoms.some((atom) => atom.hasSignature === true)) return { supported: false, disabledReason: 'signed-content' }
+    return { supported: true }
+  }
+  return { supported: false, disabledReason: 'unsupported-unit-kind' }
+}
+
+function sameAtomRefs(unit: ContextEditableUnit, refs: readonly { atomId: string; sourceRef: { entryId: string; blockIndex: number }; fingerprint: string }[]): boolean {
+  if (unit.atoms.length !== refs.length || !refs.length) return false
+  return unit.atoms.every((atom, index) => {
+    const ref = refs[index]
+    return !!ref && ref.atomId === atom.id && ref.fingerprint === atom.fingerprint &&
+      ref.sourceRef.entryId === atom.sourceRef.entryId && ref.sourceRef.blockIndex === atom.sourceRef.blockIndex
+  })
+}
+
+function isReplacementEvent(event: ContextProjectionEvent): event is ContextReplacementEventV1 {
+  return 'type' in event && event.type === 'replacement' && event.schemaVersion === 1
+}
+
+/** Replay replacement history independently for every editable unit. Invalid history fails closed for that unit. */
+export function reduceReplacementStates(
+  units: readonly ContextEditableUnit[],
+  events: readonly ContextProjectionEvent[],
+  projectionAvailable = true,
+): Map<string, ReplacementUnitProjection> {
+  const states = new Map<string, MutableReplacementState>()
+  for (const unit of units) {
+    const eligibility = replacementEligibility(unit)
+    const unavailable = !projectionAvailable
+    states.set(unit.id, {
+      unitId: unit.id,
+      originalText: unitOriginalText(unit),
+      effectiveText: unitOriginalText(unit),
+      replacementText: null,
+      replacementState: unavailable ? 'unavailable' : 'original',
+      replacementSupported: eligibility.supported && !unavailable,
+      ...(unavailable ? { replacementDisabledReason: 'projection-unavailable' as const } : eligibility.disabledReason ? { replacementDisabledReason: eligibility.disabledReason } : {}),
+      canRestoreReplacement: false,
+      canUndoReplacement: false,
+      stack: [],
+    })
+  }
+  if (!projectionAvailable) return new Map([...states].map(([id, value]) => [id, value]))
+  const seenEventIds = new Set<string>()
+  for (const event of events) {
+    if (!isReplacementEvent(event)) continue
+    if (seenEventIds.has(event.eventId)) continue
+    seenEventIds.add(event.eventId)
+    const state = states.get(event.unitId)
+    if (!state || state.replacementState === 'unavailable') continue
+    const unit = units.find((candidate) => candidate.id === event.unitId)
+    if (!unit || !state.replacementSupported) {
+      if (state) state.replacementState = 'unavailable'
+      continue
+    }
+    if (event.action === 'undo') {
+      const top = state.stack[state.stack.length - 1]
+      if (!top || top.eventId !== event.undoOf) {
+        state.replacementState = 'unavailable'
+        state.replacementDisabledReason = 'invalid-target'
+        continue
+      }
+      state.stack.pop()
+      state.replacementText = top.beforeText
+      state.effectiveText = top.beforeText ?? state.originalText
+      state.replacementState = top.beforeText === null ? 'original' : 'replaced'
+      state.activeEventId = state.stack[state.stack.length - 1]?.eventId
+      continue
+    }
+    if (event.unitKind !== unit.kind || !sameAtomRefs(unit, event.atomRefs) || event.beforeText !== state.replacementText) {
+      state.replacementState = 'unavailable'
+      state.replacementDisabledReason = 'invalid-target'
+      continue
+    }
+    if (event.action === 'replace') {
+      if (typeof event.afterText !== 'string' || event.afterText.trim().length === 0) {
+        state.replacementState = 'unavailable'
+        state.replacementDisabledReason = 'invalid-target'
+        continue
+      }
+    } else if (event.afterText !== null || event.beforeText === null) {
+      state.replacementState = 'unavailable'
+      state.replacementDisabledReason = 'invalid-target'
+      continue
+    }
+    state.stack.push({ eventId: event.eventId, beforeText: event.beforeText, afterText: event.afterText })
+    state.replacementText = event.afterText
+    state.effectiveText = event.afterText ?? state.originalText
+    state.replacementState = event.afterText === null ? 'original' : 'replaced'
+    state.activeEventId = event.eventId
+  }
+  const output = new Map<string, ReplacementUnitProjection>()
+  for (const [id, state] of states) {
+    state.canRestoreReplacement = state.replacementState === 'replaced' && state.replacementText !== null
+    state.canUndoReplacement = state.replacementState !== 'unavailable' && state.stack.length > 0
+    const { stack: _stack, ...projection } = state
+    output.set(id, projection)
+  }
+  return output
 }
 
 export function projectionStateForAtoms(

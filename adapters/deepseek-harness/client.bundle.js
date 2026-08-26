@@ -1980,7 +1980,10 @@ window.__ModuleLoader__.load({
     	"previewContext",
     	"commitContext",
     	"commitView",
-    	"undoView"
+    	"undoView",
+    	"commitReplacement",
+    	"restoreReplacement",
+    	"undoReplacement"
     ]);
     const descriptors = Object.freeze(methods.map((method) => {
     	const requestType = `${PACKAGE_NAME}#contextEditor/${method}:request`;
@@ -2094,7 +2097,32 @@ window.__ModuleLoader__.load({
     		undo: zh ? "撤销" : "Undo",
     		running: zh ? "Agent 运行中：仅可读取和搜索" : "Agent running: only reading and searching are available",
     		loading: zh ? "正在读取完整会话…" : "Reading the complete session…",
-    		noRecords: zh ? "没有符合当前筛选的可编辑记录。" : "No editable records match the current filters."
+    		noRecords: zh ? "没有符合当前筛选的可编辑记录。" : "No editable records match the current filters.",
+    		edit: zh ? "编辑" : "Edit",
+    		edited: zh ? "已编辑" : "Edited",
+    		restoreOriginal: zh ? "恢复原文" : "Restore original",
+    		undoReplacement: zh ? "撤销本次编辑" : "Undo this edit",
+    		compareOriginal: zh ? "对照原文" : "Compare original",
+    		showEffective: zh ? "显示编辑文本" : "Show edited text",
+    		originalText: zh ? "原文" : "Original text",
+    		editTitle: (kind) => zh ? `编辑${unitKind(kind)}` : `Edit ${unitKind(kind)}`,
+    		cancel: zh ? "取消" : "Cancel",
+    		save: zh ? "保存" : "Save",
+    		replacementEmpty: zh ? "编辑内容不能为空或全为空白。" : "Replacement text cannot be blank.",
+    		replacementConflict: zh ? "会话已发生变化，已丢弃过期编辑并刷新。" : "The session changed; the stale edit was discarded and the view refreshed.",
+    		replacementUnavailable: (reason) => {
+    			const labels = {
+    				"structured-user-content": zh ? "用户消息包含结构化内容" : "the user message contains structured content",
+    				"signed-content": zh ? "回答包含签名内容" : "the answer contains signed content",
+    				"projection-unavailable": zh ? "Provider 投影暂不可用" : "provider projection is unavailable",
+    				"unsupported-unit-kind": zh ? "该单元类型不支持编辑" : "this unit type does not support editing",
+    				"invalid-target": zh ? "原文已变化，无法安全编辑" : "the canonical text changed and cannot be edited safely"
+    			};
+    			return zh ? `不可编辑：${labels[reason] ?? "内容类型不支持"}` : `Not editable: ${labels[reason] ?? "this content is not supported"}`;
+    		},
+    		replacementDisabled: zh ? "手动上下文编辑尚未启用" : "Manual context editing is not enabled",
+    		restoreReplacementConfirm: zh ? "确认恢复该单元的原文吗？" : "Restore this unit to its original text?",
+    		editFailed: (error) => zh ? `编辑失败：${error}` : `Edit failed: ${error}`
     	};
     }
     //#endregion
@@ -2163,7 +2191,7 @@ window.__ModuleLoader__.load({
     //#endregion
     //#region \0context-editor-client-css
     const style = document.createElement("style");
-    style.textContent = ".context-editor {\n  display: flex;\n  flex-direction: column;\n  gap: 0.65rem;\n  height: 100%;\n  min-height: 0;\n  padding: 0.85rem 1rem 1.25rem;\n  color: var(--dsh-fg, var(--foreground, inherit));\n}\n\n.context-editor__controls {\n  position: sticky;\n  top: 0;\n  z-index: 10;\n  display: grid;\n  gap: 0.55rem;\n  padding: 0.15rem 0 0.65rem;\n  background: var(--dsh-panel-bg, var(--background, var(--dsh-card-bg, #fff)));\n  border-bottom: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  box-shadow: 0 0.35rem 0.75rem color-mix(in srgb, var(--dsh-shadow, #172033) 12%, transparent);\n}\n\n.context-editor__toolbar,\n.context-editor__searchbar,\n.context-editor__actions {\n  display: flex;\n  align-items: center;\n  gap: 0.45rem;\n  flex-wrap: wrap;\n}\n\n.context-editor__filters { display: flex; align-items: flex-start; gap: 0.35rem; flex-wrap: wrap; }\n.context-editor__filter-group { display: inline-flex; align-items: flex-start; gap: 0.25rem; }\n.context-editor__subfilters { display: inline-flex; gap: 0.25rem; padding-top: 0.1rem; }\n.context-editor__filter,\n.context-editor__actions button,\n.context-editor__searchbar button,\n.context-editor__row button {\n  border: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  border-radius: 0.45rem;\n  background: var(--dsh-control-bg, var(--background, transparent));\n  color: inherit;\n  padding: 0.28rem 0.55rem;\n  cursor: pointer;\n}\n.context-editor__filter.is-active,\n.context-editor__filter.is-mixed { background: var(--dsh-accent-soft, #e8efff); border-color: var(--dsh-accent, #7190e8); }\n.context-editor__filter.is-mixed { background: linear-gradient(90deg, var(--dsh-accent-soft, #e8efff) 50%, var(--dsh-control-bg, var(--background, transparent)) 50%); }\n.context-editor button:disabled { cursor: not-allowed; opacity: 0.45; }\n.context-editor__toggle { display: inline-flex; align-items: center; gap: 0.3rem; margin-left: auto; }\n.context-editor__searchbar input { flex: 1 1 20rem; min-width: 12rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.38rem 0.55rem; background: var(--dsh-input-bg, transparent); color: inherit; }\n.context-editor__search-summary { color: var(--dsh-muted, #687386); font-size: 0.82rem; }\n.context-editor__actions { padding-bottom: 0.15rem; }\n.context-editor__running { color: var(--dsh-muted, #687386); font-size: 0.82rem; }\n.context-editor__error { color: var(--dsh-danger, #b42318); font-size: 0.82rem; }\n.context-editor__list { overflow: visible; min-height: 0; display: flex; flex-direction: column; gap: 0.5rem; padding-right: 0.2rem; }\n.context-editor__row { display: flex; align-items: flex-start; gap: 0.6rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.55rem; padding: 0.65rem; background: var(--dsh-card-bg, transparent); }\n.context-editor__row.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }\n.context-editor__row.is-hidden { opacity: 0.82; }\n.context-editor__row--placeholder { align-items: center; min-height: 2.4rem; border-style: dashed; }\n.context-editor__row--placeholder input { margin-top: 0.2rem; }\n.context-editor__placeholder-text { flex: 1; color: var(--dsh-muted, #687386); font-size: 0.9rem; }\n.context-editor__row-content { flex: 1; min-width: 0; }\n.context-editor__row-meta { display: flex; align-items: center; gap: 0.45rem; color: var(--dsh-muted, #687386); font-size: 0.75rem; margin-bottom: 0.35rem; }\n.context-editor__kind { font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }\n.context-editor__hidden-badge { color: var(--dsh-warning, #996b00); }\n.context-editor__context-badge { color: var(--dsh-accent, #4568c4); font-weight: 600; }\n.context-editor__context-badge.is-unavailable { color: var(--dsh-muted, #687386); }\n.context-editor__unit.is-context-excluded { border-color: color-mix(in srgb, var(--dsh-accent, #7190e8) 55%, var(--dsh-border, #d7dbe2)); }\n.context-editor__context-toggle { margin-left: auto; }\n.context-editor__units { display: grid; gap: 0.45rem; }\n.context-editor__unit { border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.45rem 0.55rem; }\n.context-editor__unit.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }\n.context-editor__unit.is-hidden { opacity: 0.82; }\n.context-editor__unit-header { display: flex; align-items: center; gap: 0.45rem; min-height: 1.65rem; color: var(--dsh-muted, #687386); font-size: 0.78rem; }\n.context-editor__unit-select { display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer; }\n.context-editor__unit-kind { font-weight: 600; }\n.context-editor__unit-header button { margin-left: auto; }\n.context-editor__unit-body { min-width: 0; }\n.context-editor__unit-placeholder { color: var(--dsh-muted, #687386); padding: 0.35rem 0; font-size: 0.9rem; }\n.context-editor__record-body { display: grid; gap: 0.25rem; }\n.context-editor__atom { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }\n.context-editor__atom--reasoning { color: var(--dsh-muted, #687386); }\n.context-editor__tool-name { font-weight: 600; }\n.context-editor__hit { border-radius: 0.18rem; background: var(--dsh-highlight, #ffe28a); color: inherit; padding: 0 0.08rem; }\n.context-editor__state { color: var(--dsh-muted, #687386); padding: 2rem 0; text-align: center; }\n.context-editor__empty { color: var(--dsh-muted, #687386); }\n\n@media (max-width: 42rem) {\n  .context-editor__searchbar input { flex-basis: 100%; min-width: 0; }\n  .context-editor__toggle { margin-left: 0; }\n  .context-editor__search-summary { flex: 1 1 100%; }\n}\n";
+    style.textContent = ".context-editor {\n  display: flex;\n  flex-direction: column;\n  gap: 0.65rem;\n  height: 100%;\n  min-height: 0;\n  padding: 0.85rem 1rem 1.25rem;\n  color: var(--dsh-fg, var(--foreground, inherit));\n}\n\n.context-editor__controls {\n  position: sticky;\n  top: 0;\n  z-index: 10;\n  display: grid;\n  gap: 0.55rem;\n  padding: 0.15rem 0 0.65rem;\n  background: var(--dsh-panel-bg, var(--background, var(--dsh-card-bg, #fff)));\n  border-bottom: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  box-shadow: 0 0.35rem 0.75rem color-mix(in srgb, var(--dsh-shadow, #172033) 12%, transparent);\n}\n\n.context-editor__toolbar,\n.context-editor__searchbar,\n.context-editor__actions {\n  display: flex;\n  align-items: center;\n  gap: 0.45rem;\n  flex-wrap: wrap;\n}\n\n.context-editor__filters { display: flex; align-items: flex-start; gap: 0.35rem; flex-wrap: wrap; }\n.context-editor__filter-group { display: inline-flex; align-items: flex-start; gap: 0.25rem; }\n.context-editor__subfilters { display: inline-flex; gap: 0.25rem; padding-top: 0.1rem; }\n.context-editor__filter,\n.context-editor__actions button,\n.context-editor__searchbar button,\n.context-editor__row button {\n  border: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  border-radius: 0.45rem;\n  background: var(--dsh-control-bg, var(--background, transparent));\n  color: inherit;\n  padding: 0.28rem 0.55rem;\n  cursor: pointer;\n}\n.context-editor__filter.is-active,\n.context-editor__filter.is-mixed { background: var(--dsh-accent-soft, #e8efff); border-color: var(--dsh-accent, #7190e8); }\n.context-editor__filter.is-mixed { background: linear-gradient(90deg, var(--dsh-accent-soft, #e8efff) 50%, var(--dsh-control-bg, var(--background, transparent)) 50%); }\n.context-editor button:disabled { cursor: not-allowed; opacity: 0.45; }\n.context-editor__toggle { display: inline-flex; align-items: center; gap: 0.3rem; margin-left: auto; }\n.context-editor__searchbar input { flex: 1 1 20rem; min-width: 12rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.38rem 0.55rem; background: var(--dsh-input-bg, transparent); color: inherit; }\n.context-editor__search-summary { color: var(--dsh-muted, #687386); font-size: 0.82rem; }\n.context-editor__actions { padding-bottom: 0.15rem; }\n.context-editor__running { color: var(--dsh-muted, #687386); font-size: 0.82rem; }\n.context-editor__error { color: var(--dsh-danger, #b42318); font-size: 0.82rem; }\n.context-editor__list { overflow: visible; min-height: 0; display: flex; flex-direction: column; gap: 0.5rem; padding-right: 0.2rem; }\n.context-editor__row { display: flex; align-items: flex-start; gap: 0.6rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.55rem; padding: 0.65rem; background: var(--dsh-card-bg, transparent); }\n.context-editor__row.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }\n.context-editor__row.is-hidden { opacity: 0.82; }\n.context-editor__row--placeholder { align-items: center; min-height: 2.4rem; border-style: dashed; }\n.context-editor__row--placeholder input { margin-top: 0.2rem; }\n.context-editor__placeholder-text { flex: 1; color: var(--dsh-muted, #687386); font-size: 0.9rem; }\n.context-editor__row-content { flex: 1; min-width: 0; }\n.context-editor__row-meta { display: flex; align-items: center; gap: 0.45rem; color: var(--dsh-muted, #687386); font-size: 0.75rem; margin-bottom: 0.35rem; }\n.context-editor__kind { font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }\n.context-editor__hidden-badge { color: var(--dsh-warning, #996b00); }\n.context-editor__context-badge { color: var(--dsh-accent, #4568c4); font-weight: 600; }\n.context-editor__context-badge.is-unavailable { color: var(--dsh-muted, #687386); }\n.context-editor__replacement-badge { color: var(--dsh-accent, #4568c4); font-weight: 600; }\n.context-editor__replacement-reason { color: var(--dsh-muted, #687386); font-size: 0.75rem; }\n.context-editor__replacement-actions { display: inline-flex; align-items: center; gap: 0.3rem; flex-wrap: wrap; }\n.context-editor__unit.is-context-excluded { border-color: color-mix(in srgb, var(--dsh-accent, #7190e8) 55%, var(--dsh-border, #d7dbe2)); }\n.context-editor__context-toggle { margin-left: auto; }\n.context-editor__units { display: grid; gap: 0.45rem; }\n.context-editor__unit { border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.45rem 0.55rem; }\n.context-editor__unit.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }\n.context-editor__unit.is-hidden { opacity: 0.82; }\n.context-editor__unit-header { display: flex; align-items: center; gap: 0.45rem; min-height: 1.65rem; color: var(--dsh-muted, #687386); font-size: 0.78rem; }\n.context-editor__unit-select { display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer; }\n.context-editor__unit-kind { font-weight: 600; }\n.context-editor__unit-header button { margin-left: auto; }\n.context-editor__unit-header .context-editor__replacement-actions button { margin-left: 0; }\n.context-editor__unit-body { min-width: 0; }\n.context-editor__unit-placeholder { color: var(--dsh-muted, #687386); padding: 0.35rem 0; font-size: 0.9rem; }\n.context-editor__record-body { display: grid; gap: 0.25rem; }\n.context-editor__atom { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }\n.context-editor__atom--reasoning { color: var(--dsh-muted, #687386); }\n.context-editor__tool-name { font-weight: 600; }\n.context-editor__hit { border-radius: 0.18rem; background: var(--dsh-highlight, #ffe28a); color: inherit; padding: 0 0.08rem; }\n.context-editor__state { color: var(--dsh-muted, #687386); padding: 2rem 0; text-align: center; }\n.context-editor__empty { color: var(--dsh-muted, #687386); }\n.context-editor__notice { color: var(--dsh-warning, #996b00); font-size: 0.82rem; }\n.context-editor__dialog-backdrop {\n  position: fixed;\n  inset: 0;\n  z-index: 100;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  padding: 1rem;\n  background: color-mix(in srgb, #0b1220 48%, transparent);\n}\n.context-editor__dialog {\n  width: min(48rem, 100%);\n  max-height: min(42rem, 100%);\n  display: grid;\n  gap: 0.75rem;\n  padding: 1rem;\n  border: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  border-radius: 0.7rem;\n  background: var(--dsh-panel-bg, var(--background, #fff));\n  color: var(--dsh-fg, var(--foreground, inherit));\n  box-shadow: 0 1rem 3rem color-mix(in srgb, #172033 35%, transparent);\n}\n.context-editor__dialog-header { display: flex; align-items: center; gap: 0.5rem; }\n.context-editor__dialog-header h2 { flex: 1; margin: 0; font-size: 1rem; }\n.context-editor__dialog-close { margin-left: auto; border: 0; background: transparent; color: inherit; font-size: 1.35rem; cursor: pointer; }\n.context-editor__dialog-input {\n  width: 100%;\n  min-height: 14rem;\n  resize: vertical;\n  box-sizing: border-box;\n  border: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  border-radius: 0.45rem;\n  padding: 0.65rem;\n  background: var(--dsh-input-bg, transparent);\n  color: inherit;\n  font: inherit;\n  line-height: 1.45;\n}\n.context-editor__dialog-hint { color: var(--dsh-muted, #687386); font-size: 0.75rem; }\n.context-editor__dialog-error { color: var(--dsh-danger, #b42318); font-size: 0.82rem; }\n.context-editor__dialog-actions { display: flex; justify-content: flex-end; gap: 0.45rem; }\n.context-editor__dialog-actions button { border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; background: var(--dsh-control-bg, var(--background, transparent)); color: inherit; padding: 0.35rem 0.7rem; cursor: pointer; }\r\n\n@media (max-width: 42rem) {\n  .context-editor__searchbar input { flex-basis: 100%; min-width: 0; }\n  .context-editor__toggle { margin-left: 0; }\n  .context-editor__search-summary { flex: 1 1 100%; }\n}\n";
     document.head.appendChild(style);
     //#endregion
     //#region adapters/deepseek-harness/client.js
@@ -2416,6 +2444,31 @@ window.__ModuleLoader__.load({
     			...unitIds === void 0 ? {} : { unitIds }
     		});
     	}
+    	replacementOperationId(action, unitId) {
+    		return `context-replacement-${action}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}-${String(unitId).slice(-12)}`;
+    	}
+    	async commitReplacement(unitId, baseRevision, text) {
+    		return this.call("commitReplacement", {
+    			operationId: this.replacementOperationId("replace", unitId),
+    			unitId,
+    			baseRevision,
+    			text
+    		});
+    	}
+    	async restoreReplacement(unitId, baseRevision) {
+    		return this.call("restoreReplacement", {
+    			operationId: this.replacementOperationId("restore", unitId),
+    			unitId,
+    			baseRevision
+    		});
+    	}
+    	async undoReplacement(unitId, baseRevision) {
+    		return this.call("undoReplacement", {
+    			operationId: this.replacementOperationId("undo", unitId),
+    			unitId,
+    			baseRevision
+    		});
+    	}
     };
     function FilterButton({ kind, state, onClick, text, label }) {
     	const enabled = state === "on";
@@ -2430,9 +2483,14 @@ window.__ModuleLoader__.load({
     		role: "checkbox"
     	}, label ?? text.kind(kind));
     }
-    function UnitBody({ unit, match, text }) {
+    function UnitBody({ unit, match, text, showOriginal = false }) {
     	const atoms = unit.atoms ?? [];
     	if (!atoms.length) return h("span", { className: "context-editor__empty" }, text.empty);
+    	if (unit.kind === "user" || unit.kind === "answer") {
+    		const value = showOriginal ? atoms.map((atom) => atom.text ?? "").join("\n") : unit.effectiveText ?? atoms.map((atom) => atom.text ?? "").join("\n");
+    		const anchor = atoms.at(-1)?.id;
+    		return h("div", { className: "context-editor__record-body" }, h("div", { className: `context-editor__atom context-editor__atom--${unit.kind}` }, h("span", null, !showOriginal && match?.atomId === anchor ? highlight(value, match) : value)));
+    	}
     	return h("div", { className: "context-editor__record-body" }, atoms.map((atom) => {
     		const atomMatch = match?.atomId === atom.id && match?.field !== "tool_name";
     		const toolName = atom.toolName ? h("span", { className: "context-editor__tool-name" }, `${atom.toolName}: `) : null;
@@ -2442,16 +2500,96 @@ window.__ModuleLoader__.load({
     		}, toolName, h("span", null, atomMatch ? highlight(atom.text ?? "", match) : atom.text ?? ""));
     	}));
     }
-    function UnitSection({ unit, selected, onSelect, focused, showHidden, match, disabled, onRestore, onContextToggle, registerNode, text }) {
+    function EditDialog({ unit, initialText, text, onCancel, onSave }) {
+    	const [value, setValue] = (0, react.useState)(initialText);
+    	const [error, setError] = (0, react.useState)("");
+    	const [saving, setSaving] = (0, react.useState)(false);
+    	const textarea = (0, react.useRef)(null);
+    	(0, react.useEffect)(() => {
+    		setValue(initialText);
+    		setError("");
+    		const timer = globalThis.setTimeout?.(() => textarea.current?.focus?.(), 0);
+    		return () => {
+    			if (timer !== void 0) globalThis.clearTimeout?.(timer);
+    		};
+    	}, [initialText, unit.id]);
+    	const submit = async () => {
+    		if (saving) return;
+    		if (value.trim().length === 0) {
+    			setError(text.replacementEmpty);
+    			return;
+    		}
+    		if (value === initialText) {
+    			onCancel();
+    			return;
+    		}
+    		setSaving(true);
+    		setError("");
+    		try {
+    			await onSave(value);
+    		} catch (cause) {
+    			setSaving(false);
+    			setError(errorText(cause));
+    		}
+    	};
+    	const onKeyDown = (event) => {
+    		if (event.key === "Escape") {
+    			event.preventDefault();
+    			if (!saving) onCancel();
+    			return;
+    		}
+    		if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+    			event.preventDefault();
+    			submit();
+    		}
+    	};
+    	return h("div", { className: "context-editor__dialog-backdrop" }, h("div", {
+    		className: "context-editor__dialog",
+    		role: "dialog",
+    		"aria-modal": "true",
+    		"aria-label": text.editTitle(unit.kind),
+    		onKeyDown
+    	}, h("div", { className: "context-editor__dialog-header" }, h("h2", null, text.editTitle(unit.kind)), h("button", {
+    		type: "button",
+    		className: "context-editor__dialog-close",
+    		disabled: saving,
+    		onClick: onCancel,
+    		"aria-label": text.cancel
+    	}, "×")), h("textarea", {
+    		ref: textarea,
+    		className: "context-editor__dialog-input",
+    		value,
+    		onChange: (event) => setValue(event.target.value),
+    		spellCheck: false,
+    		disabled: saving,
+    		"aria-label": text.editTitle(unit.kind)
+    	}), h("div", { className: "context-editor__dialog-hint" }, "Ctrl/Cmd+Enter", " · ", text.cancel, " Esc"), error ? h("div", {
+    		className: "context-editor__dialog-error",
+    		role: "alert"
+    	}, error) : null, h("div", { className: "context-editor__dialog-actions" }, h("button", {
+    		type: "button",
+    		disabled: saving,
+    		onClick: onCancel
+    	}, text.cancel), h("button", {
+    		type: "button",
+    		disabled: saving,
+    		onClick: () => void submit()
+    	}, saving ? text.loading : text.save))));
+    }
+    function UnitSection({ unit, selected, onSelect, focused, showHidden, showOriginal, match, disabled, onRestore, onContextToggle, onEdit, onRestoreReplacement, onUndoReplacement, onCompareOriginal, replacementAvailable, registerNode, text }) {
     	const hidden = unit.viewState === "hide" || unit.viewState === "mixed";
     	const mixed = unit.viewState === "mixed";
     	const projectionState = unit.projectionState ?? "include";
     	const contextExcluded = projectionState === "exclude" || projectionState === "mixed";
     	const contextUnavailable = projectionState === "unavailable";
+    	const isEditableKind = unit.kind === "user" || unit.kind === "answer";
+    	const replacementSupported = unit.replacementSupported === true;
+    	const replacementTitle = !replacementAvailable ? text.replacementDisabled : text.replacementUnavailable(unit.replacementDisabledReason);
     	const body = hidden && !showHidden ? h("div", { className: "context-editor__unit-placeholder" }, mixed ? text.mixedPlaceholder : text.hiddenPlaceholder(unit.kind)) : h(UnitBody, {
     		unit,
     		match,
-    		text
+    		text,
+    		showOriginal
     	});
     	return h("div", {
     		className: `context-editor__unit ${focused ? "is-focused" : ""} ${hidden ? "is-hidden" : ""} ${contextExcluded ? "is-context-excluded" : ""}`,
@@ -2468,14 +2606,36 @@ window.__ModuleLoader__.load({
     		type: "button",
     		disabled,
     		onClick: onRestore
-    	}, text.restore) : null, h("button", {
+    	}, text.restore) : null, isEditableKind && unit.replacementState === "replaced" ? h("span", {
+    		className: "context-editor__replacement-badge",
+    		title: text.edited
+    	}, text.edited) : null, isEditableKind && !replacementSupported ? h("span", {
+    		className: "context-editor__replacement-reason",
+    		title: replacementTitle
+    	}, replacementTitle) : null, isEditableKind && replacementSupported ? h("div", { className: "context-editor__replacement-actions" }, h("button", {
+    		type: "button",
+    		disabled: disabled || !replacementAvailable,
+    		onClick: onEdit,
+    		title: !replacementAvailable ? text.replacementDisabled : text.editTitle(unit.kind)
+    	}, text.edit), unit.canRestoreReplacement ? h("button", {
+    		type: "button",
+    		disabled: disabled || !replacementAvailable,
+    		onClick: onRestoreReplacement
+    	}, text.restoreOriginal) : null, unit.canUndoReplacement ? h("button", {
+    		type: "button",
+    		disabled: disabled || !replacementAvailable,
+    		onClick: onUndoReplacement
+    	}, text.undoReplacement) : null, unit.replacementState === "replaced" ? h("button", {
+    		type: "button",
+    		onClick: onCompareOriginal
+    	}, showOriginal ? text.showEffective : text.compareOriginal) : null) : null, h("button", {
     		type: "button",
     		className: "context-editor__context-toggle",
     		disabled: disabled || contextUnavailable,
     		onClick: onContextToggle
     	}, contextExcluded ? text.restoreContext : text.excludeContext)), h("div", { className: "context-editor__unit-body" }, body));
     }
-    function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, match, disabled, onRestore, onContextToggle, registerNode, text }) {
+    function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, showOriginalUnitId, match, disabled, onRestore, onContextToggle, onEdit, onRestoreReplacement, onUndoReplacement, onCompareOriginal, replacementAvailable, registerNode, text }) {
     	const units = unitsForRecord(record);
     	const focused = units.some((unit) => unit.id === focusedUnitId);
     	return h("article", {
@@ -2488,10 +2648,16 @@ window.__ModuleLoader__.load({
     		onSelect: (event) => onSelect(unit, event),
     		focused: focusedUnitId === unit.id,
     		showHidden,
+    		showOriginal: showOriginalUnitId === unit.id,
     		match: focusedUnitId === unit.id ? match : null,
     		disabled,
     		onRestore: () => onRestore(unit.id),
     		onContextToggle: () => onContextToggle(unit),
+    		onEdit: () => onEdit(unit),
+    		onRestoreReplacement: () => onRestoreReplacement(unit),
+    		onUndoReplacement: () => onUndoReplacement(unit),
+    		onCompareOriginal: () => onCompareOriginal(unit),
+    		replacementAvailable,
     		registerNode,
     		text
     	})))));
@@ -2516,6 +2682,9 @@ window.__ModuleLoader__.load({
     	const [selected, setSelected] = (0, react.useState)(() => /* @__PURE__ */ new Set());
     	const [matching, setMatching] = (0, react.useState)(false);
     	const [contextMutating, setContextMutating] = (0, react.useState)(false);
+    	const [editing, setEditing] = (0, react.useState)(null);
+    	const [comparisonUnitId, setComparisonUnitId] = (0, react.useState)(null);
+    	const [notice, setNotice] = (0, react.useState)("");
     	const lastSelectedIndex = (0, react.useRef)(null);
     	const loadSequence = (0, react.useRef)(0);
     	const searchSequence = (0, react.useRef)(0);
@@ -2526,11 +2695,15 @@ window.__ModuleLoader__.load({
     	const unitNodes = (0, react.useRef)(/* @__PURE__ */ new Map());
     	const searchInput = (0, react.useRef)(null);
     	const controlsNode = (0, react.useRef)(null);
+    	const editFocus = (0, react.useRef)(null);
     	(0, react.useEffect)(() => {
     		setSearchScope("dialogue");
     		setSearch(null);
     		setMatch(null);
     		setSearchIndex(0);
+    		setEditing(null);
+    		setComparisonUnitId(null);
+    		setNotice("");
     	}, [sessionId]);
     	const registerUnitNode = (0, react.useCallback)((unitId, node) => {
     		if (node) unitNodes.current.set(unitId, node);
@@ -2559,7 +2732,8 @@ window.__ModuleLoader__.load({
     	const selectedCount = selected.size;
     	const readOnly = running || loaded.status === "loading" || loaded.status === "refreshing" || contextMutating;
     	const contextAvailable = loaded.snapshot?.capabilities?.contextExclusion === true;
-    	const refresh = (0, react.useCallback)(async () => {
+    	const replacementAvailable = loaded.snapshot?.capabilities?.contextReplacement === true;
+    	const refresh = (0, react.useCallback)(async (preserveSelection = false) => {
     		const ticket = ++loadSequence.current;
     		setLoaded((current) => ({
     			...current,
@@ -2574,8 +2748,10 @@ window.__ModuleLoader__.load({
     				...value,
     				error: null
     			});
-    			setSelected(/* @__PURE__ */ new Set());
-    			lastSelectedIndex.current = null;
+    			if (!preserveSelection) {
+    				setSelected(/* @__PURE__ */ new Set());
+    				lastSelectedIndex.current = null;
+    			}
     		} catch (error) {
     			if (ticket === loadSequence.current) setLoaded((current) => ({
     				...current,
@@ -2813,6 +2989,74 @@ window.__ModuleLoader__.load({
     			setContextMutating(false);
     		}
     	};
+    	const closeReplacementDialog = () => {
+    		const target = editFocus.current;
+    		editFocus.current = null;
+    		setEditing(null);
+    		globalThis.setTimeout?.(() => target?.focus?.(), 0);
+    	};
+    	const openReplacementEdit = (unit) => {
+    		if (readOnly || !replacementAvailable || unit.replacementSupported !== true) return;
+    		editFocus.current = globalThis.document?.activeElement ?? null;
+    		setNotice("");
+    		setComparisonUnitId(null);
+    		setEditing({
+    			unitId: unit.id,
+    			kind: unit.kind,
+    			text: String(unit.effectiveText ?? unit.atoms?.map((atom) => atom.text ?? "").join("\n") ?? "")
+    		});
+    	};
+    	const saveReplacement = async (value) => {
+    		if (!editing || loaded.snapshot === null) return;
+    		if (running) throw new Error("CONTEXT_EDITOR_BUSY");
+    		setContextMutating(true);
+    		try {
+    			if ((await controller.commitReplacement(editing.unitId, loaded.snapshot.revision, value))?.conflict) {
+    				setNotice(text.replacementConflict);
+    				closeReplacementDialog();
+    				await refresh(true);
+    				return;
+    			}
+    			closeReplacementDialog();
+    			setNotice("");
+    			await refresh(true);
+    		} catch (error) {
+    			setNotice(text.editFailed(errorText(error)));
+    			throw error;
+    		} finally {
+    			setContextMutating(false);
+    		}
+    	};
+    	const mutateReplacement = async (action, unit) => {
+    		if (readOnly || !replacementAvailable || unit.replacementSupported !== true || loaded.snapshot === null) return;
+    		if (action === "restore" && typeof globalThis.confirm === "function") {
+    			let confirmed = true;
+    			try {
+    				confirmed = globalThis.confirm(text.restoreReplacementConfirm);
+    			} catch {
+    				confirmed = true;
+    			}
+    			if (!confirmed) return;
+    		}
+    		setContextMutating(true);
+    		try {
+    			if ((await controller[action === "restore" ? "restoreReplacement" : "undoReplacement"](unit.id, loaded.snapshot.revision))?.conflict) {
+    				setNotice(text.replacementConflict);
+    				await refresh(true);
+    				return;
+    			}
+    			setNotice("");
+    			await refresh(true);
+    		} catch (error) {
+    			setNotice(text.editFailed(errorText(error)));
+    		} finally {
+    			setContextMutating(false);
+    		}
+    	};
+    	const compareOriginal = (unit) => {
+    		if (unit.replacementState !== "replaced") return;
+    		setComparisonUnitId((current) => current === unit.id ? null : unit.id);
+    	};
     	const undo = async () => {
     		if (readOnly || loaded.snapshot === null || !loaded.snapshot.canUndo) return;
     		try {
@@ -2934,20 +3178,35 @@ window.__ModuleLoader__.load({
     		type: "button",
     		disabled: readOnly || !loaded.snapshot?.canUndo,
     		onClick: () => void undo()
-    	}, text.undo), running ? h("span", { className: "context-editor__running" }, text.running) : null, loaded.status === "error" ? h("span", { className: "context-editor__error" }, errorText(loaded.error)) : null)), h("div", { className: "context-editor__list" }, visibleRecords.map((record) => h(RecordRow, {
+    	}, text.undo), running ? h("span", { className: "context-editor__running" }, text.running) : null, loaded.status === "error" ? h("span", { className: "context-editor__error" }, errorText(loaded.error)) : null, notice ? h("span", {
+    		className: "context-editor__notice",
+    		role: "status"
+    	}, notice) : null)), h("div", { className: "context-editor__list" }, visibleRecords.map((record) => h(RecordRow, {
     		key: record.id,
     		record,
     		selected,
     		onSelect: selectUnit,
     		focusedUnitId: matchUnitId,
     		showHidden: prefs.showHidden,
+    		showOriginalUnitId: comparisonUnitId,
     		match: matchUnitId === match?.unitId ? match : null,
     		disabled: readOnly,
     		onRestore: (unitId) => void mutate("restore", [unitId]),
     		onContextToggle: (unit) => void mutateContext(unit.projectionState === "exclude" || unit.projectionState === "mixed" ? "restore" : "exclude", [unit.id]),
+    		onEdit: openReplacementEdit,
+    		onRestoreReplacement: (unit) => void mutateReplacement("restore", unit),
+    		onUndoReplacement: (unit) => void mutateReplacement("undo", unit),
+    		onCompareOriginal: compareOriginal,
+    		replacementAvailable,
     		registerNode: registerUnitNode,
     		text
-    	}))), loaded.status === "loading" ? h("div", { className: "context-editor__state" }, text.loading) : null, loaded.status !== "loading" && visibleRecords.length === 0 ? h("div", { className: "context-editor__state" }, text.noRecords) : null);
+    	}))), loaded.status === "loading" ? h("div", { className: "context-editor__state" }, text.loading) : null, loaded.status !== "loading" && visibleRecords.length === 0 ? h("div", { className: "context-editor__state" }, text.noRecords) : null, editing ? h(EditDialog, {
+    		unit: editing,
+    		initialText: editing.text,
+    		text,
+    		onCancel: closeReplacementDialog,
+    		onSave: saveReplacement
+    	}) : null);
     }
     async function apply(ctx) {
     	const disposeRemote = await ctx.remote.$mount(contextEditorRemote);

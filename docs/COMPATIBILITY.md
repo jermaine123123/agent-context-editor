@@ -10,4 +10,8 @@
 
 Host compatibility is not inferred from package installation alone. A release
 must pass unit fixtures, a clean profile install, restart persistence checks,
-and a session-log hash comparison.
+and a provider payload capture. The acceptance invariant is that original
+Surface nodes, historical messages and the main chat timeline stay unchanged;
+the allowed mutation is an appended adapter-owned `context/projection` event.
+DeepSeek replacement is enabled for eligible User/Answer units in the tested
+rc.8 boundary; this local release did not include an external DeepSeek API request.

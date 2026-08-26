@@ -1,5 +1,5 @@
-import { projectionStateForAtoms, type ProjectionAtomState } from './projection.js'
-import type { AtomKind, ContextAtom, ContextEditableUnitKind, ContextEditableUnitViewState, ContextRecord, ContextRecordKind, ViewState } from './types.js'
+import { projectionStateForAtoms, replacementEligibility, unitOriginalText, type ProjectionAtomState, type ReplacementUnitProjection } from './projection.js'
+import type { AtomKind, ContextAtom, ContextEditableUnit, ContextEditableUnitKind, ContextEditableUnitViewState, ContextRecord, ContextRecordKind, ViewState } from './types.js'
 
 function recordIdFor(atom: ContextAtom): string {
   if (atom.recordId) return atom.recordId
@@ -61,6 +61,7 @@ function projectUnits(
   atoms: readonly ContextAtom[],
   states?: ReadonlyMap<string, ViewState>,
   projectionStates?: ReadonlyMap<string, ProjectionAtomState>,
+  replacementStates?: ReadonlyMap<string, ReplacementUnitProjection>,
 ) {
   const order: ContextEditableUnitKind[] = []
   const groups = new Map<ContextEditableUnitKind, ContextAtom[]>()
@@ -85,6 +86,21 @@ function projectUnits(
       viewState: unitViewState(grouped, states),
       projectionState: projectionStateForAtoms(grouped, projectionStates ?? new Map()),
       mutable: true,
+    } satisfies Omit<ContextEditableUnit, 'effectiveText' | 'replacementState' | 'replacementSupported' | 'replacementDisabledReason' | 'canRestoreReplacement' | 'canUndoReplacement'>
+  }).map((base) => {
+    const originalText = unitOriginalText(base)
+    const eligibility = replacementEligibility(base)
+    const replacement = replacementStates?.get(base.id)
+    return {
+      ...base,
+      effectiveText: replacement?.effectiveText ?? originalText,
+      replacementState: replacement?.replacementState ?? 'original',
+      replacementSupported: replacement?.replacementSupported ?? eligibility.supported,
+      ...(replacement?.replacementDisabledReason ?? eligibility.disabledReason
+        ? { replacementDisabledReason: replacement?.replacementDisabledReason ?? eligibility.disabledReason }
+        : {}),
+      canRestoreReplacement: replacement?.canRestoreReplacement ?? false,
+      canUndoReplacement: replacement?.canUndoReplacement ?? false,
     }
   })
 }
@@ -93,6 +109,7 @@ export function projectRecords(
   atoms: readonly ContextAtom[],
   states?: ReadonlyMap<string, ViewState>,
   projectionStates?: ReadonlyMap<string, ProjectionAtomState>,
+  replacementStates?: ReadonlyMap<string, ReplacementUnitProjection>,
 ): ContextRecord[] {
   const order: string[] = []
   const groups = new Map<string, ContextAtom[]>()
@@ -116,7 +133,7 @@ export function projectRecords(
     const allHidden = grouped.length > 0 && grouped.every((atom) => states?.get(atom.id) === 'hide')
     const first = grouped[0]
     const mutable = kind !== 'tool' || grouped.every((atom) => !!atom.sourceRef.entryId)
-    const units = projectUnits(id, grouped, states, projectionStates).map((unit) => ({ ...unit, mutable }))
+    const units = projectUnits(id, grouped, states, projectionStates, replacementStates).map((unit) => ({ ...unit, mutable }))
     return {
       id,
       kind,
@@ -127,7 +144,7 @@ export function projectRecords(
       entryIds: Array.from(new Set(grouped.map((atom) => atom.sourceRef.entryId).filter(Boolean))),
       anchorEntryId: first?.sourceRef.entryId,
       toolCallId: grouped.find((atom) => atom.toolCallId)?.toolCallId,
-      searchableText: grouped.map(fieldText).filter(Boolean).join('\n'),
+      searchableText: units.map((unit) => unit.kind === 'user' || unit.kind === 'answer' ? unit.effectiveText : unit.atoms.map(fieldText).filter(Boolean).join(' ')).filter(Boolean).join('\n'),
       viewState: allHidden ? 'hide' : 'show',
       projectionState: projectionStateForAtoms(grouped, projectionStates ?? new Map()),
       mutable,

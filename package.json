@@ -1,8 +1,8 @@
 {
   "name": "agent-context-editor",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "Cross-agent model-context exclusion with search, filtering, hide/restore, and original Session preservation",
+  "description": "Cross-agent model-context exclusion and manual User/Answer editing with search, filtering, hide/restore, and original Session preservation",
   "type": "module",
   "license": "MIT",
   "workspaces": [

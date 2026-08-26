@@ -1,5 +1,5 @@
 /* GENERATED FILE - rebuild with npm run build:pi. */
-/* Canonical Core source digest: 24f3e81e3644d0df5cf93fedf44d57f6b655f315476061cb36a2e0fbe5d7881f */
+/* Canonical Core source digest: ee78c652687b71d9efb93c4038276408e866257832c501196c843c75bea65b8a */
 import { decodeKittyPrintable, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -66,6 +66,133 @@ function reduceProjectionStates(atoms, events) {
 		result.set(atom.id, change.after);
 	}
 	return result;
+}
+function unitOriginalText(unit) {
+	return unit.atoms.map((atom) => atom.text).join("\n");
+}
+function replacementEligibility(unit) {
+	if (!unit.mutable) return {
+		supported: false,
+		disabledReason: "invalid-target"
+	};
+	if (unit.kind === "user") {
+		const atom = unit.atoms.length === 1 ? unit.atoms[0] : void 0;
+		if (!atom || atom.kind !== "user") return {
+			supported: false,
+			disabledReason: "invalid-target"
+		};
+		if (atom.structured === true) return {
+			supported: false,
+			disabledReason: "structured-user-content"
+		};
+		return { supported: true };
+	}
+	if (unit.kind === "answer") {
+		if (!unit.atoms.length || unit.atoms.some((atom) => atom.kind !== "assistant_text")) return {
+			supported: false,
+			disabledReason: "invalid-target"
+		};
+		if (unit.atoms.some((atom) => atom.hasSignature === true)) return {
+			supported: false,
+			disabledReason: "signed-content"
+		};
+		return { supported: true };
+	}
+	return {
+		supported: false,
+		disabledReason: "unsupported-unit-kind"
+	};
+}
+function sameAtomRefs(unit, refs) {
+	if (unit.atoms.length !== refs.length || !refs.length) return false;
+	return unit.atoms.every((atom, index) => {
+		const ref = refs[index];
+		return !!ref && ref.atomId === atom.id && ref.fingerprint === atom.fingerprint && ref.sourceRef.entryId === atom.sourceRef.entryId && ref.sourceRef.blockIndex === atom.sourceRef.blockIndex;
+	});
+}
+function isReplacementEvent(event) {
+	return "type" in event && event.type === "replacement" && event.schemaVersion === 1;
+}
+/** Replay replacement history independently for every editable unit. Invalid history fails closed for that unit. */
+function reduceReplacementStates(units, events, projectionAvailable = true) {
+	const states = /* @__PURE__ */ new Map();
+	for (const unit of units) {
+		const eligibility = replacementEligibility(unit);
+		const unavailable = !projectionAvailable;
+		states.set(unit.id, {
+			unitId: unit.id,
+			originalText: unitOriginalText(unit),
+			effectiveText: unitOriginalText(unit),
+			replacementText: null,
+			replacementState: unavailable ? "unavailable" : "original",
+			replacementSupported: eligibility.supported && !unavailable,
+			...unavailable ? { replacementDisabledReason: "projection-unavailable" } : eligibility.disabledReason ? { replacementDisabledReason: eligibility.disabledReason } : {},
+			canRestoreReplacement: false,
+			canUndoReplacement: false,
+			stack: []
+		});
+	}
+	if (!projectionAvailable) return new Map([...states].map(([id, value]) => [id, value]));
+	const seenEventIds = /* @__PURE__ */ new Set();
+	for (const event of events) {
+		if (!isReplacementEvent(event)) continue;
+		if (seenEventIds.has(event.eventId)) continue;
+		seenEventIds.add(event.eventId);
+		const state = states.get(event.unitId);
+		if (!state || state.replacementState === "unavailable") continue;
+		const unit = units.find((candidate) => candidate.id === event.unitId);
+		if (!unit || !state.replacementSupported) {
+			if (state) state.replacementState = "unavailable";
+			continue;
+		}
+		if (event.action === "undo") {
+			const top = state.stack[state.stack.length - 1];
+			if (!top || top.eventId !== event.undoOf) {
+				state.replacementState = "unavailable";
+				state.replacementDisabledReason = "invalid-target";
+				continue;
+			}
+			state.stack.pop();
+			state.replacementText = top.beforeText;
+			state.effectiveText = top.beforeText ?? state.originalText;
+			state.replacementState = top.beforeText === null ? "original" : "replaced";
+			state.activeEventId = state.stack[state.stack.length - 1]?.eventId;
+			continue;
+		}
+		if (event.unitKind !== unit.kind || !sameAtomRefs(unit, event.atomRefs) || event.beforeText !== state.replacementText) {
+			state.replacementState = "unavailable";
+			state.replacementDisabledReason = "invalid-target";
+			continue;
+		}
+		if (event.action === "replace") {
+			if (typeof event.afterText !== "string" || event.afterText.trim().length === 0) {
+				state.replacementState = "unavailable";
+				state.replacementDisabledReason = "invalid-target";
+				continue;
+			}
+		} else if (event.afterText !== null || event.beforeText === null) {
+			state.replacementState = "unavailable";
+			state.replacementDisabledReason = "invalid-target";
+			continue;
+		}
+		state.stack.push({
+			eventId: event.eventId,
+			beforeText: event.beforeText,
+			afterText: event.afterText
+		});
+		state.replacementText = event.afterText;
+		state.effectiveText = event.afterText ?? state.originalText;
+		state.replacementState = event.afterText === null ? "original" : "replaced";
+		state.activeEventId = event.eventId;
+	}
+	const output = /* @__PURE__ */ new Map();
+	for (const [id, state] of states) {
+		state.canRestoreReplacement = state.replacementState === "replaced" && state.replacementText !== null;
+		state.canUndoReplacement = state.replacementState !== "unavailable" && state.stack.length > 0;
+		const { stack: _stack, ...projection } = state;
+		output.set(id, projection);
+	}
+	return output;
 }
 function projectionStateForAtoms(atoms, states) {
 	if (!atoms.length) return "unavailable";
@@ -171,7 +298,7 @@ function unitViewState(atoms, states) {
 	if (values.every((value) => value === "collapse")) return "collapse";
 	return "mixed";
 }
-function projectUnits(recordId, atoms, states, projectionStates) {
+function projectUnits(recordId, atoms, states, projectionStates, replacementStates) {
 	const order = [];
 	const groups = /* @__PURE__ */ new Map();
 	for (const atom of atoms) {
@@ -196,9 +323,22 @@ function projectUnits(recordId, atoms, states, projectionStates) {
 			projectionState: projectionStateForAtoms(grouped, projectionStates ?? /* @__PURE__ */ new Map()),
 			mutable: true
 		};
+	}).map((base) => {
+		const originalText = unitOriginalText(base);
+		const eligibility = replacementEligibility(base);
+		const replacement = replacementStates?.get(base.id);
+		return {
+			...base,
+			effectiveText: replacement?.effectiveText ?? originalText,
+			replacementState: replacement?.replacementState ?? "original",
+			replacementSupported: replacement?.replacementSupported ?? eligibility.supported,
+			...replacement?.replacementDisabledReason ?? eligibility.disabledReason ? { replacementDisabledReason: replacement?.replacementDisabledReason ?? eligibility.disabledReason } : {},
+			canRestoreReplacement: replacement?.canRestoreReplacement ?? false,
+			canUndoReplacement: replacement?.canUndoReplacement ?? false
+		};
 	});
 }
-function projectRecords(atoms, states, projectionStates) {
+function projectRecords(atoms, states, projectionStates, replacementStates) {
 	const order = [];
 	const groups = /* @__PURE__ */ new Map();
 	for (const atom of atoms) {
@@ -219,7 +359,7 @@ function projectRecords(atoms, states, projectionStates) {
 		const allHidden = grouped.length > 0 && grouped.every((atom) => states?.get(atom.id) === "hide");
 		const first = grouped[0];
 		const mutable = kind !== "tool" || grouped.every((atom) => !!atom.sourceRef.entryId);
-		const units = projectUnits(id, grouped, states, projectionStates).map((unit) => ({
+		const units = projectUnits(id, grouped, states, projectionStates, replacementStates).map((unit) => ({
 			...unit,
 			mutable
 		}));
@@ -233,7 +373,7 @@ function projectRecords(atoms, states, projectionStates) {
 			entryIds: Array.from(new Set(grouped.map((atom) => atom.sourceRef.entryId).filter(Boolean))),
 			anchorEntryId: first?.sourceRef.entryId,
 			toolCallId: grouped.find((atom) => atom.toolCallId)?.toolCallId,
-			searchableText: grouped.map(fieldText).filter(Boolean).join("\n"),
+			searchableText: units.map((unit) => unit.kind === "user" || unit.kind === "answer" ? unit.effectiveText : unit.atoms.map(fieldText).filter(Boolean).join(" ")).filter(Boolean).join("\n"),
 			viewState: allHidden ? "hide" : "show",
 			projectionState: projectionStateForAtoms(grouped, projectionStates ?? /* @__PURE__ */ new Map()),
 			mutable
@@ -289,10 +429,20 @@ function searchOccurrences(records, query, enabledKinds, scope = "dialogue", ena
 			atoms: record.atoms,
 			viewState: record.viewState,
 			projectionState: record.projectionState,
-			mutable: record.mutable
+			mutable: record.mutable,
+			effectiveText: record.atoms.map((atom) => atom.text).join("\n"),
+			replacementState: "original",
+			replacementSupported: false,
+			canRestoreReplacement: false,
+			canUndoReplacement: false
 		}];
 		for (const unit of units) {
 			if (enabledUnitKinds !== void 0 && !enabledUnitKinds.has(unit.kind)) continue;
+			if ((unit.kind === "user" || unit.kind === "answer") && (normalizedScope === "all" || unit.atoms.some((atom) => atomMatchesSearchScope(atom.kind, normalizedScope)))) {
+				const anchor = unit.atoms[unit.atoms.length - 1] ?? unit.atoms[0];
+				if (anchor) addMatches(record, unit, anchor.id, anchor.sourceRef.blockIndex, "message", unit.effectiveText, anchor.sourceRef.entryId);
+				continue;
+			}
 			for (const atom of unit.atoms) {
 				if (!atomMatchesSearchScope(atom.kind, normalizedScope)) continue;
 				if (atom.toolName) addMatches(record, unit, atom.id, atom.sourceRef.blockIndex, "tool_name", atom.toolName, atom.sourceRef.entryId);
@@ -519,7 +669,13 @@ function recordSnapshot(record) {
 			atomIds: unit.atomIds,
 			viewState: unit.viewState,
 			projectionState: unit.projectionState,
-			mutable: unit.mutable
+			mutable: unit.mutable,
+			effectiveText: unit.effectiveText,
+			replacementState: unit.replacementState,
+			replacementSupported: unit.replacementSupported,
+			...unit.replacementDisabledReason ? { replacementDisabledReason: unit.replacementDisabledReason } : {},
+			canRestoreReplacement: unit.canRestoreReplacement,
+			canUndoReplacement: unit.canUndoReplacement
 		})),
 		...record.entryId ? { entryId: record.entryId } : {},
 		...record.entryIds?.length ? { entryIds: record.entryIds } : {},
@@ -534,8 +690,9 @@ function currentState(adapter) {
 	const projectionEvents = current.projectionEvents ?? [];
 	const seenProjection = /* @__PURE__ */ new Set();
 	const projectionEventsUnique = projectionEvents.filter((event) => {
-		if (seenProjection.has(event.transactionId)) return false;
-		seenProjection.add(event.transactionId);
+		const id = "type" in event && event.type === "replacement" ? event.eventId : event.transactionId;
+		if (seenProjection.has(id)) return false;
+		seenProjection.add(id);
 		return true;
 	});
 	const sessionEvents = readViewEvents(current.entries);
@@ -546,8 +703,9 @@ function currentState(adapter) {
 		return true;
 	});
 	const states = reduceViewStates(current.atoms, legacy, events);
-	const projectionStates = current.projectionAvailable === false ? new Map(current.atoms.map((atom) => [atom.id, "unavailable"])) : reduceProjectionStates(current.atoms, projectionEventsUnique);
-	const records = projectRecords(current.atoms, states, projectionStates);
+	const projectionStates = current.projectionAvailable === false ? new Map(current.atoms.map((atom) => [atom.id, "unavailable"])) : reduceProjectionStates(current.atoms, projectionEventsUnique.filter((event) => !("type" in event)));
+	const replacementStates = reduceReplacementStates(projectRecords(current.atoms, states, projectionStates).flatMap((record) => record.units), projectionEventsUnique, current.projectionAvailable !== false);
+	const records = projectRecords(current.atoms, states, projectionStates, replacementStates);
 	return {
 		...current,
 		legacy,
@@ -555,6 +713,7 @@ function currentState(adapter) {
 		projectionEvents: projectionEventsUnique,
 		states,
 		projectionStates,
+		replacementStates,
 		records
 	};
 }
@@ -598,6 +757,27 @@ function enabledRecordKinds(raw) {
 		"ai",
 		"tool"
 	]).filter((value) => value === "user" || value === "ai" || value === "tool"));
+}
+function replacementEventId() {
+	return `context-replacement-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+function revisionMatches(input, current) {
+	return String(input) === String(current);
+}
+function replacementTarget(state, unitId) {
+	for (const record of state.records) {
+		const unit = record.units.find((candidate) => candidate.id === unitId);
+		if (unit) return {
+			record,
+			unit,
+			replacement: state.replacementStates.get(unit.id)
+		};
+	}
+	return null;
+}
+function assertReplacementTarget(target) {
+	if (!target) throw new Error("CONTEXT_EDITOR_REPLACEMENT_TARGET_NOT_FOUND");
+	if (!target.unit.replacementSupported || target.unit.replacementState === "unavailable") throw new Error(`CONTEXT_EDITOR_REPLACEMENT_UNSUPPORTED:${target.unit.replacementDisabledReason ?? "invalid-target"}`);
 }
 var ContextEditorService = class {
 	/** Search results are scoped by id so simultaneous Sessions cannot replace one another. */
@@ -774,6 +954,160 @@ var ContextEditorService = class {
 			snapshot: snapshotOf(currentState(adapter))
 		};
 	}
+	commitReplacement(adapter, input) {
+		if (adapter.isBusy()) throw new Error("AGENT_RUNTIME_BUSY");
+		const state = currentState(adapter);
+		if (state.projectionAvailable === false) throw new Error(state.projectionError || "CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
+		if (!revisionMatches(input.baseRevision, state.revision)) return {
+			ok: false,
+			conflict: true,
+			snapshot: snapshotOf(currentState(adapter))
+		};
+		if (input.text.trim().length === 0) throw new Error("CONTEXT_EDITOR_REPLACEMENT_EMPTY");
+		const target = replacementTarget(state, input.unitId);
+		assertReplacementTarget(target);
+		if (input.text === target.unit.effectiveText) return {
+			ok: true,
+			snapshot: snapshotOf(currentState(adapter))
+		};
+		const beforeText = target.replacement?.replacementText ?? null;
+		const atomRefs = target.unit.atoms.map((atom) => ({
+			atomId: atom.id,
+			sourceRef: atom.sourceRef,
+			fingerprint: atom.fingerprint
+		}));
+		const latest = currentState(adapter);
+		if (latest.revision !== state.revision) return {
+			ok: false,
+			conflict: true,
+			snapshot: snapshotOf(latest)
+		};
+		const latestTarget = replacementTarget(latest, input.unitId);
+		assertReplacementTarget(latestTarget);
+		if (latestTarget.unit.atomIds.join("|") !== target.unit.atomIds.join("|") || (latestTarget.replacement?.replacementText ?? null) !== beforeText) return {
+			ok: false,
+			conflict: true,
+			snapshot: snapshotOf(latest)
+		};
+		const eventId = appendProjectionEvent(adapter, {
+			schemaVersion: 1,
+			type: "replacement",
+			action: "replace",
+			eventId: replacementEventId(),
+			unitId: target.unit.id,
+			unitKind: target.unit.kind,
+			atomRefs,
+			beforeText,
+			afterText: input.text,
+			baseRevision: state.revision,
+			createdAt: (/* @__PURE__ */ new Date()).toISOString()
+		});
+		this.searchCache.clear();
+		return {
+			ok: true,
+			eventId,
+			snapshot: snapshotOf(currentState(adapter))
+		};
+	}
+	restoreReplacement(adapter, input) {
+		if (adapter.isBusy()) throw new Error("AGENT_RUNTIME_BUSY");
+		const state = currentState(adapter);
+		if (state.projectionAvailable === false) throw new Error(state.projectionError || "CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
+		if (!revisionMatches(input.baseRevision, state.revision)) return {
+			ok: false,
+			conflict: true,
+			snapshot: snapshotOf(currentState(adapter))
+		};
+		const target = replacementTarget(state, input.unitId);
+		assertReplacementTarget(target);
+		const beforeText = target.replacement?.replacementText ?? null;
+		if (beforeText === null) return {
+			ok: true,
+			snapshot: snapshotOf(currentState(adapter))
+		};
+		const latest = currentState(adapter);
+		if (latest.revision !== state.revision) return {
+			ok: false,
+			conflict: true,
+			snapshot: snapshotOf(latest)
+		};
+		const latestTarget = replacementTarget(latest, input.unitId);
+		assertReplacementTarget(latestTarget);
+		if ((latestTarget.replacement?.replacementText ?? null) !== beforeText) return {
+			ok: false,
+			conflict: true,
+			snapshot: snapshotOf(latest)
+		};
+		const eventId = appendProjectionEvent(adapter, {
+			schemaVersion: 1,
+			type: "replacement",
+			action: "restore",
+			eventId: replacementEventId(),
+			unitId: target.unit.id,
+			unitKind: target.unit.kind,
+			atomRefs: target.unit.atoms.map((atom) => ({
+				atomId: atom.id,
+				sourceRef: atom.sourceRef,
+				fingerprint: atom.fingerprint
+			})),
+			beforeText,
+			afterText: null,
+			baseRevision: state.revision,
+			createdAt: (/* @__PURE__ */ new Date()).toISOString()
+		});
+		this.searchCache.clear();
+		return {
+			ok: true,
+			eventId,
+			snapshot: snapshotOf(currentState(adapter))
+		};
+	}
+	undoReplacement(adapter, input) {
+		if (adapter.isBusy()) throw new Error("AGENT_RUNTIME_BUSY");
+		const state = currentState(adapter);
+		if (state.projectionAvailable === false) throw new Error(state.projectionError || "CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
+		if (!revisionMatches(input.baseRevision, state.revision)) return {
+			ok: false,
+			conflict: true,
+			snapshot: snapshotOf(currentState(adapter))
+		};
+		const target = replacementTarget(state, input.unitId);
+		assertReplacementTarget(target);
+		const undoOf = target.replacement?.activeEventId;
+		if (!undoOf || !target.unit.canUndoReplacement) return {
+			ok: true,
+			snapshot: snapshotOf(currentState(adapter))
+		};
+		const latest = currentState(adapter);
+		if (latest.revision !== state.revision) return {
+			ok: false,
+			conflict: true,
+			snapshot: snapshotOf(latest)
+		};
+		const latestTarget = replacementTarget(latest, input.unitId);
+		assertReplacementTarget(latestTarget);
+		if (latestTarget.replacement?.activeEventId !== undoOf) return {
+			ok: false,
+			conflict: true,
+			snapshot: snapshotOf(latest)
+		};
+		const eventId = appendProjectionEvent(adapter, {
+			schemaVersion: 1,
+			type: "replacement",
+			action: "undo",
+			eventId: replacementEventId(),
+			unitId: target.unit.id,
+			undoOf,
+			baseRevision: state.revision,
+			createdAt: (/* @__PURE__ */ new Date()).toISOString()
+		});
+		this.searchCache.clear();
+		return {
+			ok: true,
+			eventId,
+			snapshot: snapshotOf(currentState(adapter))
+		};
+	}
 	undoContextView(adapter, input) {
 		if (adapter.isBusy()) throw new Error("AGENT_RUNTIME_BUSY");
 		const state = currentState(adapter);
@@ -866,6 +1200,15 @@ function contentToText(content) {
 		return "";
 	}).filter(Boolean).join("\n");
 }
+function isPlainTextUserContent(content) {
+	if (typeof content === "string") return true;
+	if (!Array.isArray(content) || content.length === 0) return false;
+	return content.every((part) => {
+		if (!part || typeof part !== "object") return false;
+		const value = part;
+		return value.type === "text" && typeof value.text === "string";
+	});
+}
 function approximateTokens(text) {
 	return Math.max(1, Math.ceil(text.length / 4));
 }
@@ -924,8 +1267,8 @@ function normalizeSessionEntries(entries) {
 		const role = String(message.role ?? "");
 		if (role === "user") {
 			turnId = entryId;
-			const text = contentToText(message.content).trim();
-			if (!/^\/[A-Za-z][A-Za-z0-9:_-]*(?:\s|$)/.test(text)) addAtom(atoms, entry, turnId, 0, "user", text);
+			const text = contentToText(message.content);
+			if (!/^\/[A-Za-z][A-Za-z0-9:_-]*(?:\s|$)/.test(text.trim())) addAtom(atoms, entry, turnId, 0, "user", text, { structured: !isPlainTextUserContent(message.content) });
 			continue;
 		}
 		if (role === "toolResult") {
@@ -1220,11 +1563,13 @@ function createPiText(locale) {
 			if (mode === "search") return zh ? "输入关键词 · Enter 跳转 · Esc 结束搜索" : "Type a query · Enter jump · Esc finish search";
 			if (mode === "results") return zh ? "n 下一个命中，N 上一个命中 · s 切换范围 · / 修改搜索 · ? 帮助 · q 关闭" : "n next / N previous occurrence · s toggle scope · / edit search · ? help · q close";
 			if (mode === "help") return zh ? "? Esc 返回编辑器" : "? / Esc return to editor";
-			return zh ? "j/k · Enter 查看/收起 · h 隐藏 · r 恢复 · x 排除/恢复模型上下文 · / 搜索 · ? 帮助 · q 关闭" : "j/k move · Enter view/collapse · h hide · r restore · x exclude/restore model context · / search · ? help · q close";
+			return zh ? "j/k · Enter 查看/收起 · e 编辑 · E 恢复原文 · z 撤销编辑 · o 对照原文 · h 隐藏 · r 恢复 · x 排除/恢复模型上下文 · / 搜索 · ? 帮助 · q 关闭" : "j/k move · Enter view/collapse · e edit · E restore original · z undo edit · o compare original · h hide · r restore · x exclude/restore model context · / search · ? help · q close";
 		},
 		tuiHelpTitle: () => zh ? "Context Editor 快捷键" : "Context Editor help",
 		tuiHelpLines: () => zh ? [
 			"Enter  临时展开/收起，不保存",
+			"e      编辑当前用户/回答单元（提交到 sidecar）",
+			"E      确认恢复原文；z 撤销最近一次编辑；o 对照原文",
 			"x      排除/恢复模型上下文；Enter/y 确认，Esc/n 取消，不修改 Session JSONL",
 			"h      持久隐藏；r      恢复隐藏单元",
 			"Space  选择/取消；Shift+↑/↓ 连续选择",
@@ -1236,6 +1581,8 @@ function createPiText(locale) {
 			"R  恢复全部隐藏单元（兼容键）"
 		] : [
 			"Enter  temporarily expand/collapse; does not persist",
+			"e      edit the current User/Answer unit (sidecar only)",
+			"E      restore canonical text; z undo the latest edit; o compare original",
 			"x      exclude/restore model context; Enter/y confirm, Esc/n cancel; Session JSONL stays unchanged",
 			"h      persistently hide; r      restore hidden",
 			"Space  select; Shift+↑/↓ extend the selection",
@@ -1508,6 +1855,9 @@ var ContextEditorComponent = class {
 	done;
 	previewContext;
 	commitContext;
+	commitReplacement;
+	restoreReplacement;
+	undoReplacement;
 	projectionAvailable;
 	text;
 	records;
@@ -1524,6 +1874,7 @@ var ContextEditorComponent = class {
 	searchMode = false;
 	helpMode = false;
 	searchScope = "dialogue";
+	showOriginal = false;
 	matches = [];
 	matchIndex = -1;
 	lastRenderWidth = 0;
@@ -1539,11 +1890,17 @@ var ContextEditorComponent = class {
 		this.canUndo = snapshot.canUndo;
 		this.previewContext = deps.previewContext;
 		this.commitContext = deps.commitContext;
+		this.commitReplacement = deps.commitReplacement;
+		this.restoreReplacement = deps.restoreReplacement;
+		this.undoReplacement = deps.undoReplacement;
 		this.projectionAvailable = snapshot.projectionAvailable !== false && !!deps.previewContext && !!deps.commitContext;
 		this.prefs = {
 			...prefs,
 			enabledUnitKinds: [...prefs.enabledUnitKinds]
 		};
+		this.query = deps.initialUiState?.query ?? "";
+		this.searchScope = deps.initialUiState?.searchScope ?? "dialogue";
+		this.showOriginal = deps.initialUiState?.showOriginal ?? false;
 		this.loadRecords = deps.loadRecords;
 		this.loadSnapshot = deps.loadSnapshot;
 		this.mutate = deps.mutate;
@@ -1552,6 +1909,12 @@ var ContextEditorComponent = class {
 		this.notify = deps.notify;
 		this.done = done;
 		this.text = createPiText(deps.locale ?? detectPiLocale());
+		const selectedUnitId = deps.initialUiState?.selectedUnitId;
+		if (selectedUnitId) {
+			const index = this.flatUnits().findIndex(({ unit }) => unit.id === selectedUnitId);
+			if (index >= 0) this.selectedIndex = index;
+		}
+		this.matches = this.query.trim() ? this.searchOccurrencesForPrefs() : [];
 	}
 	flatUnits() {
 		const enabled = new Set(this.prefs.enabledUnitKinds);
@@ -1575,11 +1938,13 @@ var ContextEditorComponent = class {
 		const safeEnd = Math.min(text.length, end);
 		return `${text.slice(0, start)}${this.theme.fg("warning", text.slice(start, safeEnd))}${text.slice(safeEnd)}`;
 	}
+	originalText(unit) {
+		return unit.atoms.map((atom) => atom.text).join("\n");
+	}
 	contentText(unit, activeHit) {
-		return unit.atoms.map((atom) => {
-			if (activeHit && activeHit.field !== "tool_name" && activeHit.atomId === atom.id) return this.highlightText(atom.text, activeHit.start, activeHit.end);
-			return atom.text;
-		}).filter(Boolean).join("\n");
+		const text = this.showOriginal && this.currentUnit()?.unit.id === unit.id ? this.originalText(unit) : unit.effectiveText;
+		if (!activeHit || this.showOriginal || activeHit.field === "tool_name" || activeHit.unitId !== unit.id) return text;
+		return this.highlightText(text, activeHit.start, activeHit.end);
 	}
 	unitIsHidden(unit) {
 		return unit.viewState === "hide" || unit.viewState === "mixed";
@@ -1688,12 +2053,8 @@ var ContextEditorComponent = class {
 	}
 	bodyLineIndexForHit(unit, hit, width) {
 		if (hit.field === "tool_name") return 0;
-		const atomIndex = unit.atoms.findIndex((atom) => atom.id === hit.atomId);
-		if (atomIndex < 0) return 0;
-		const preceding = unit.atoms.slice(0, atomIndex).map((atom) => atom.text).filter(Boolean).join("\n");
-		const target = unit.atoms[atomIndex]?.text ?? "";
-		const prefix = preceding ? `${preceding}\n${target.slice(0, hit.start)}` : target.slice(0, hit.start);
-		return Math.max(0, wrapTextWithAnsi(prefix || " ", Math.max(8, width - 8)).length - 1);
+		const text = unit.effectiveText;
+		return Math.max(0, wrapTextWithAnsi(text.slice(0, hit.start) || " ", Math.max(8, width - 8)).length - 1);
 	}
 	positionSearchHit(width) {
 		const hit = this.matches[this.matchIndex];
@@ -1756,12 +2117,14 @@ var ContextEditorComponent = class {
 		}
 	}
 	refreshData() {
+		const focusId = this.currentUnit()?.unit.id;
 		const snapshot = this.loadSnapshot();
 		this.records = this.loadRecords();
 		this.revision = snapshot.revision;
 		this.canUndo = snapshot.canUndo;
 		this.projectionAvailable = snapshot.projectionAvailable !== false && !!this.previewContext && !!this.commitContext;
-		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.flatUnits().length - 1));
+		const focusedIndex = focusId ? this.flatUnits().findIndex(({ unit }) => unit.id === focusId) : -1;
+		this.selectedIndex = focusedIndex >= 0 ? focusedIndex : Math.min(this.selectedIndex, Math.max(0, this.flatUnits().length - 1));
 		this.manualScroll = false;
 		this.resetSelection();
 		this.matches = this.query.trim() ? this.searchOccurrencesForPrefs() : [];
@@ -1770,13 +2133,15 @@ var ContextEditorComponent = class {
 		this.tui.requestRender();
 	}
 	syncExternalState() {
+		const focusId = this.currentUnit()?.unit.id;
 		const snapshot = this.loadSnapshot();
 		if (snapshot.revision === this.revision) return false;
 		this.records = this.loadRecords();
 		this.revision = snapshot.revision;
 		this.canUndo = snapshot.canUndo;
 		this.projectionAvailable = snapshot.projectionAvailable !== false && !!this.previewContext && !!this.commitContext;
-		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.flatUnits().length - 1));
+		const focusedIndex = focusId ? this.flatUnits().findIndex(({ unit }) => unit.id === focusId) : -1;
+		this.selectedIndex = focusedIndex >= 0 ? focusedIndex : Math.min(this.selectedIndex, Math.max(0, this.flatUnits().length - 1));
 		this.scrollOffset = 0;
 		this.manualScroll = false;
 		this.resetSelection();
@@ -1785,6 +2150,110 @@ var ContextEditorComponent = class {
 		this.pendingConfirmation = null;
 		this.notify(this.text.sessionChanged(), "info");
 		return true;
+	}
+	uiState() {
+		return {
+			query: this.query,
+			searchScope: this.searchScope,
+			selectedUnitId: this.currentUnit()?.unit.id,
+			showOriginal: this.showOriginal
+		};
+	}
+	requestEdit() {
+		if (!this.commitReplacement) {
+			this.notify(this.text.contextUnavailableAction(), "warning");
+			return;
+		}
+		const selected = this.selectedUnitIds();
+		if (selected.length > 1) {
+			this.notify("Select exactly one User or Answer unit to edit.", "warning");
+			return;
+		}
+		const item = selected.length === 1 ? this.flatUnits().find(({ unit }) => unit.id === selected[0]) : this.currentUnit();
+		if (!item) return;
+		if (!item.unit.replacementSupported || item.unit.kind !== "user" && item.unit.kind !== "answer") {
+			this.notify(this.text.operationFailed(item.unit.replacementDisabledReason ?? "unsupported-unit-kind"), "warning");
+			return;
+		}
+		this.done({
+			kind: "edit",
+			unitId: item.unit.id,
+			title: "Edit " + this.text.unitKind(item.unit.kind),
+			text: item.unit.effectiveText,
+			originalText: this.originalText(item.unit),
+			baseRevision: this.revision,
+			uiState: {
+				...this.uiState(),
+				selectedUnitId: item.unit.id
+			}
+		});
+	}
+	beginRestoreReplacement() {
+		if (this.operationInFlight || this.pendingConfirmation || !this.restoreReplacement) return;
+		const selected = this.selectedUnitIds();
+		if (selected.length > 1) {
+			this.notify("Select exactly one User or Answer unit to restore.", "warning");
+			return;
+		}
+		const item = selected.length === 1 ? this.flatUnits().find(({ unit }) => unit.id === selected[0]) : this.currentUnit();
+		if (!item || !item.unit.canRestoreReplacement) return;
+		this.pendingConfirmation = {
+			kind: "replacement-restore",
+			unitId: item.unit.id,
+			message: "Restore this unit to its canonical text? The replacement history remains undoable."
+		};
+		this.tui.requestRender();
+	}
+	async commitPendingReplacementRestore(pending) {
+		if (this.operationInFlight || !this.restoreReplacement) return;
+		this.operationInFlight = true;
+		try {
+			const result = await this.restoreReplacement({
+				baseRevision: this.revision,
+				unitId: pending.unitId
+			});
+			if (!result.ok || result.conflict) {
+				this.notify(this.text.sidecarChanged(), "warning");
+				this.refreshData();
+				return;
+			}
+			this.refreshData();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.notify(message === "AGENT_RUNTIME_BUSY" ? this.text.busy() : this.text.operationFailed(message), "warning");
+		} finally {
+			this.operationInFlight = false;
+			this.tui.requestRender();
+		}
+	}
+	async undoCurrentReplacement() {
+		if (this.operationInFlight || !this.undoReplacement) return;
+		const selected = this.selectedUnitIds();
+		if (selected.length > 1) {
+			this.notify("Select exactly one User or Answer unit to undo.", "warning");
+			return;
+		}
+		const item = selected.length === 1 ? this.flatUnits().find(({ unit }) => unit.id === selected[0]) : this.currentUnit();
+		if (!item || !item.unit.canUndoReplacement) return;
+		this.operationInFlight = true;
+		try {
+			const result = await this.undoReplacement({
+				baseRevision: this.revision,
+				unitId: item.unit.id
+			});
+			if (!result.ok || result.conflict) {
+				this.notify(this.text.sidecarChanged(), "warning");
+				this.refreshData();
+				return;
+			}
+			this.refreshData();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.notify(message === "AGENT_RUNTIME_BUSY" ? this.text.busy() : this.text.operationFailed(message), "warning");
+		} finally {
+			this.operationInFlight = false;
+			this.tui.requestRender();
+		}
 	}
 	async beginContextProjection() {
 		if (this.operationInFlight || this.pendingConfirmation) return;
@@ -1870,6 +2339,10 @@ var ContextEditorComponent = class {
 		if (isCancel || !pending) return;
 		if (pending.kind === "reset") {
 			this.applyMutation("reset");
+			return;
+		}
+		if (pending.kind === "replacement-restore") {
+			this.commitPendingReplacementRestore(pending);
 			return;
 		}
 		this.commitPendingProjection(pending);
@@ -1994,7 +2467,7 @@ var ContextEditorComponent = class {
 	confirmationLines(width) {
 		const pending = this.pendingConfirmation;
 		if (!pending) return [];
-		const title = pending.kind === "projection" ? this.text.contextConfirmTitle() : this.text.restoreAllConfirmTitle();
+		const title = pending.kind === "projection" ? this.text.contextConfirmTitle() : pending.kind === "reset" ? this.text.restoreAllConfirmTitle() : "Restore original text";
 		const hint = this.text.contextConfirmHint();
 		const body = wrapTextWithAnsi(pending.message, Math.max(8, width - 4));
 		return [
@@ -2022,11 +2495,11 @@ var ContextEditorComponent = class {
 			return;
 		}
 		if (matchesKey(data, "ctrl+c") || matchesKey(data, "escape")) {
-			this.done();
+			this.done({ kind: "close" });
 			return;
 		}
 		if (data === "q" || data === "Q") {
-			this.done();
+			this.done({ kind: "close" });
 			return;
 		}
 		if (data === "/") {
@@ -2145,6 +2618,23 @@ var ContextEditorComponent = class {
 			this.tui.requestRender();
 			return;
 		}
+		if (data === "e") {
+			this.requestEdit();
+			return;
+		}
+		if (data === "E") {
+			this.beginRestoreReplacement();
+			return;
+		}
+		if (data === "z") {
+			this.undoCurrentReplacement();
+			return;
+		}
+		if (data === "o") {
+			this.showOriginal = !this.showOriginal;
+			this.tui.requestRender();
+			return;
+		}
 		if (data === "h" || data === "H") {
 			this.applyMutation("hide");
 			return;
@@ -2222,6 +2712,22 @@ function defaultDocument$1(sessionId) {
 function isProjectionEvent(value) {
 	if (!value || typeof value !== "object") return false;
 	const row = value;
+	if (row.type === "replacement") {
+		if (row.schemaVersion !== 1 || typeof row.eventId !== "string" || typeof row.unitId !== "string" || typeof row.createdAt !== "string" || typeof row.baseRevision !== "string" && typeof row.baseRevision !== "number") return false;
+		if (row.action === "undo") return typeof row.undoOf === "string";
+		if (row.action !== "replace" && row.action !== "restore") return false;
+		if (row.unitKind !== "user" && row.unitKind !== "answer") return false;
+		if (!Array.isArray(row.atomRefs) || row.atomRefs.length === 0) return false;
+		if (typeof row.beforeText !== "string" && row.beforeText !== null || typeof row.afterText !== "string" && row.afterText !== null) return false;
+		if (row.action === "replace" && (typeof row.afterText !== "string" || row.afterText.trim().length === 0)) return false;
+		if (row.action === "restore" && (row.afterText !== null || typeof row.beforeText !== "string")) return false;
+		return row.atomRefs.every((candidate) => {
+			if (!candidate || typeof candidate !== "object") return false;
+			const ref = candidate;
+			const sourceRef = ref.sourceRef;
+			return typeof ref.atomId === "string" && typeof ref.fingerprint === "string" && !!sourceRef && typeof sourceRef === "object" && typeof sourceRef.entryId === "string" && Number.isInteger(sourceRef.blockIndex);
+		});
+	}
 	if (row.version !== 1 || typeof row.transactionId !== "string" || typeof row.createdAt !== "string" || typeof row.baseRevision !== "string" || row.action !== "exclude" && row.action !== "restore" || !Array.isArray(row.changes) || row.changes.length === 0) return false;
 	return row.changes.every((candidate) => {
 		if (!candidate || typeof candidate !== "object") return false;
@@ -2400,7 +2906,7 @@ function appendProjectionSidecarEvent(sessionFile, sessionId, anchorEntryId, eve
 			}]
 		};
 		writeDocument$1(path, next);
-		return event.transactionId;
+		return "type" in event && event.type === "replacement" ? event.eventId : event.transactionId;
 	});
 }
 function defaultDocument(sessionId) {
@@ -2556,7 +3062,8 @@ var PiContextEditorHost = class {
 		viewMutation: true,
 		undo: true,
 		persistence: true,
-		contextExclusion: true
+		contextExclusion: true,
+		contextReplacement: true
 	};
 	constructor(ctx) {
 		this.ctx = ctx;
@@ -2609,7 +3116,7 @@ var PiContextEditorHost = class {
 	appendViewEvent(event) {
 		if (!this.ctx.isIdle()) throw new Error("AGENT_RUNTIME_BUSY");
 		const current = this.read();
-		if (current.revision !== event.baseRevision) throw new Error("CONTEXT_EDITOR_CONFLICT");
+		if (String(current.revision) !== String(event.baseRevision)) throw new Error("CONTEXT_EDITOR_CONFLICT");
 		const sidecar = readSidecar(this.sessionFile, this.sessionId);
 		if (this.read().revision !== current.revision) throw new Error("CONTEXT_EDITOR_CONFLICT");
 		return appendSidecarEvent(this.sessionFile, this.sessionId, current.leafId ?? "", event, sidecar.revision);
@@ -2618,11 +3125,47 @@ var PiContextEditorHost = class {
 		if (!this.ctx.isIdle()) throw new Error("AGENT_RUNTIME_BUSY");
 		const current = this.read();
 		if (current.projectionAvailable === false) throw new Error("CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
-		if (current.revision !== event.baseRevision) throw new Error("CONTEXT_EDITOR_CONFLICT");
+		if (String(current.revision) !== String(event.baseRevision)) throw new Error("CONTEXT_EDITOR_CONFLICT");
 		const sidecar = readProjectionSidecar(this.sessionFile, this.sessionId);
 		if (sidecar.integrity === "invalid") throw new Error("CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
 		if (this.read().revision !== current.revision) throw new Error("CONTEXT_EDITOR_CONFLICT");
 		return appendProjectionSidecarEvent(this.sessionFile, this.sessionId, current.leafId ?? "", event, sidecar.revision);
+	}
+	commitReplacementMutation(input) {
+		try {
+			return service.commitReplacement(this, input);
+		} catch (error) {
+			if (error instanceof Error && (error.message === "CONTEXT_EDITOR_CONFLICT" || error.message === "CONTEXT_EDITOR_SIDECAR_BUSY")) return {
+				ok: false,
+				conflict: true,
+				snapshot: this.snapshot()
+			};
+			throw error;
+		}
+	}
+	restoreReplacementMutation(input) {
+		try {
+			return service.restoreReplacement(this, input);
+		} catch (error) {
+			if (error instanceof Error && (error.message === "CONTEXT_EDITOR_CONFLICT" || error.message === "CONTEXT_EDITOR_SIDECAR_BUSY")) return {
+				ok: false,
+				conflict: true,
+				snapshot: this.snapshot()
+			};
+			throw error;
+		}
+	}
+	undoReplacementMutation(input) {
+		try {
+			return service.undoReplacement(this, input);
+		} catch (error) {
+			if (error instanceof Error && (error.message === "CONTEXT_EDITOR_CONFLICT" || error.message === "CONTEXT_EDITOR_SIDECAR_BUSY")) return {
+				ok: false,
+				conflict: true,
+				snapshot: this.snapshot()
+			};
+			throw error;
+		}
 	}
 	isBusy() {
 		return !this.ctx.isIdle();
@@ -2707,6 +3250,18 @@ var PiContextEditorHost = class {
 	async getSearchMatch(request) {
 		asLocator(request.locator, this.sessionId);
 		return this.searchMatch(request);
+	}
+	async commitReplacement(request) {
+		asLocator(request.locator, this.sessionId);
+		return this.commitReplacementMutation(request);
+	}
+	async restoreReplacement(request) {
+		asLocator(request.locator, this.sessionId);
+		return this.restoreReplacementMutation(request);
+	}
+	async undoReplacement(request) {
+		asLocator(request.locator, this.sessionId);
+		return this.undoReplacementMutation(request);
 	}
 	async commitView(request) {
 		asLocator(request.locator, this.sessionId);
@@ -2814,8 +3369,20 @@ function rowsForEntries(entries) {
 	}
 	return rows;
 }
+function uniqueProjectionEvents(events) {
+	const seen = /* @__PURE__ */ new Set();
+	return events.filter((event) => {
+		const id = "type" in event && event.type === "replacement" ? event.eventId : event.transactionId;
+		if (seen.has(id)) return false;
+		seen.add(id);
+		return true;
+	});
+}
+function isExclusionEvent(event) {
+	return !("type" in event);
+}
 function activeAtomsByEntry(atoms, events) {
-	const states = reduceProjectionStates(atoms, events);
+	const states = reduceProjectionStates(atoms, events.filter(isExclusionEvent));
 	const result = /* @__PURE__ */ new Map();
 	for (const atom of atoms) {
 		if ((states.get(atom.id) ?? "include") === "unavailable") throw new ProjectionAlignmentError("an active projection fingerprint no longer matches");
@@ -2832,62 +3399,182 @@ function restoredAtomIds(atoms, events, states) {
 	const ids = /* @__PURE__ */ new Set();
 	const known = new Set(atoms.map((atom) => atom.id));
 	for (const event of events) {
-		if (event.action !== "restore") continue;
+		if (!isExclusionEvent(event) || event.action !== "restore") continue;
 		for (const change of event.changes) if (known.has(change.atomId) && states.get(change.atomId) === "include") ids.add(change.atomId);
 	}
 	return ids;
 }
-function projectOneMessage(message, atoms, states) {
-	const excluded = new Set(atoms.filter((atom) => states.get(atom.id) === "exclude").map((atom) => atom.id));
-	if (excluded.size === 0) return message;
-	const role = roleOf(message);
-	if (role === "user" || role === "toolResult") return void 0;
-	if (role !== "assistant") throw new ProjectionAlignmentError("unsupported active message role");
-	const content = message.content;
-	if (!Array.isArray(content)) throw new ProjectionAlignmentError("assistant message content is not an array");
-	const nextContent = content.filter((_part, blockIndex) => {
-		const atom = atoms.find((candidate) => candidate.sourceRef.blockIndex === blockIndex && candidate.kind !== "tool_output");
-		return !atom || !excluded.has(atom.id);
-	});
-	if (nextContent.length === 0) return void 0;
+function atomForAssistantBlock(atoms, blockIndex, part) {
+	if (!part || typeof part !== "object") return void 0;
+	const type = String(part.type ?? "");
+	const kind = type === "text" ? "assistant_text" : type === "thinking" ? "reasoning" : type === "toolCall" ? "tool_call" : "";
+	return atoms.find((atom) => atom.sourceRef.blockIndex === blockIndex && (kind === "" || atom.kind === kind));
+}
+function replacementUnits(atoms, exclusionStates, events) {
+	const base = projectRecords(atoms, void 0, exclusionStates);
+	const states = reduceReplacementStates(base.flatMap((record) => record.units), events, true);
+	const byAtom = /* @__PURE__ */ new Map();
+	const historyUnitIds = /* @__PURE__ */ new Set();
+	const projectedUnits = projectRecords(atoms, void 0, exclusionStates, states).flatMap((record) => record.units);
+	for (const event of events) if ("type" in event && event.type === "replacement") historyUnitIds.add(event.unitId);
+	for (const record of base) for (const unit of record.units) {
+		const state = states.get(unit.id);
+		if (!state) continue;
+		if (state.replacementState === "unavailable") throw new ProjectionAlignmentError("active replacement is unavailable");
+		const item = {
+			unit: projectedUnits.find((candidate) => candidate.id === unit.id) ?? unit,
+			state
+		};
+		for (const atom of unit.atoms) byAtom.set(atom.id, item);
+	}
 	return {
-		...message,
-		content: nextContent
+		byAtom,
+		historyUnitIds
 	};
 }
+function cloneWithContent(message, content) {
+	return {
+		...message,
+		content
+	};
+}
+function projectOneMessage(message, atoms, states, unitByAtom) {
+	const excluded = new Set(atoms.filter((atom) => states.get(atom.id) === "exclude").map((atom) => atom.id));
+	const projection = atoms.map((atom) => unitByAtom.get(atom.id)).find((item) => !!item && item.state.replacementState === "replaced");
+	const role = roleOf(message);
+	if (role === "user") {
+		if (excluded.size > 0) return void 0;
+		if (projection && projection.unit.kind === "user") {
+			const content = message.content;
+			if (Array.isArray(content)) {
+				const next = [];
+				let replaced = false;
+				for (const part of content) if (part && typeof part === "object" && part.type === "text") {
+					if (replaced) continue;
+					replaced = true;
+					next.push({
+						...part,
+						text: projection.unit.effectiveText
+					});
+				} else next.push(part);
+				return cloneWithContent(message, next);
+			}
+			return cloneWithContent(message, projection.unit.effectiveText);
+		}
+		return message;
+	}
+	if (role === "toolResult") {
+		if (excluded.size > 0) return void 0;
+		return message;
+	}
+	if (role !== "assistant") {
+		if (excluded.size > 0 || projection) throw new ProjectionAlignmentError("unsupported active message role");
+		return message;
+	}
+	const content = message.content;
+	if (!Array.isArray(content)) throw new ProjectionAlignmentError("assistant message content is not an array");
+	const lastReplacementAtomId = projection?.unit.kind === "answer" ? projection.unit.atomIds[projection.unit.atomIds.length - 1] : void 0;
+	const nextContent = content.map((part, blockIndex) => ({
+		part,
+		blockIndex
+	})).filter(({ part, blockIndex }) => {
+		const atom = atomForAssistantBlock(atoms, blockIndex, part);
+		if (!atom) return true;
+		if (excluded.has(atom.id)) return false;
+		if (projection?.unit.kind === "answer" && projection.unit.atomIds.includes(atom.id) && atom.kind === "assistant_text") return atom.id === lastReplacementAtomId;
+		return true;
+	}).map(({ part, blockIndex }) => {
+		if (!projection || projection.unit.kind !== "answer") return part;
+		const atom = atomForAssistantBlock(atoms, blockIndex, part);
+		if (atom && atom.id === lastReplacementAtomId && atom.kind === "assistant_text") return {
+			...part,
+			text: projection.unit.effectiveText
+		};
+		return part;
+	});
+	if (nextContent.length === 0) return void 0;
+	return cloneWithContent(message, nextContent);
+}
+function rowProjection(rowAtoms, unitByAtom) {
+	return rowAtoms.map((atom) => unitByAtom.get(atom.id)).find((item) => !!item && item.state.replacementState === "replaced");
+}
+function rowHasHistory(rowAtoms, unitByAtom, historyUnitIds) {
+	return rowAtoms.some((atom) => {
+		const item = unitByAtom.get(atom.id);
+		return !!item && historyUnitIds.has(item.unit.id);
+	});
+}
+function messagePayloadEqual(left, right) {
+	return roleOf(left) === roleOf(right) && JSON.stringify(left.content) === JSON.stringify(right.content);
+}
+function replacementCompatible(baseline, current, rowAtoms, unitByAtom, historyUnitIds) {
+	if (rowProjection(rowAtoms, unitByAtom)) {
+		const expected = projectOneMessage(baseline, rowAtoms, /* @__PURE__ */ new Map(), unitByAtom);
+		if (messagePayloadEqual(baseline, current) || expected && messagePayloadEqual(expected, current)) return true;
+		if (roleOf(baseline) === "user") return false;
+		return structurallyCompatible(baseline, current) || isKindSubsequence(baseline, current) || !!expected && (structurallyCompatible(expected, current) || isKindSubsequence(expected, current));
+	}
+	if (rowHasHistory(rowAtoms, unitByAtom, historyUnitIds)) return restoreCompatible(baseline, current) || structurallyCompatible(baseline, current);
+	return structurallyCompatible(baseline, current) || isKindSubsequence(baseline, current);
+}
 function projectModelContext(input) {
+	const projectionEvents = uniqueProjectionEvents(input.projectionEvents);
+	if (projectionEvents.length === 0) return [...input.messages];
 	const rows = rowsForEntries(input.entries);
-	const { states, byEntry } = activeAtomsByEntry(input.atoms, input.projectionEvents);
-	const restoredIds = restoredAtomIds(input.atoms, input.projectionEvents, states);
+	const { states, byEntry } = activeAtomsByEntry(input.atoms, projectionEvents);
+	const { byAtom: unitByAtom, historyUnitIds } = replacementUnits(input.atoms, states, projectionEvents);
+	const restoredIds = restoredAtomIds(input.atoms, projectionEvents, states);
 	const output = [];
 	let cursor = 0;
 	for (const row of rows) {
-		let match = -1;
-		let reconstructed = false;
 		const rowAtoms = byEntry.get(row.entryId) ?? [];
+		const projection = rowProjection(rowAtoms, unitByAtom);
 		const hasExcluded = rowAtoms.some((atom) => states.get(atom.id) === "exclude");
 		const hasRestored = rowAtoms.some((atom) => restoredIds.has(atom.id));
+		const hasHistory = rowHasHistory(rowAtoms, unitByAtom, historyUnitIds);
+		let match = -1;
+		let reconstructed = false;
+		const compatible = [];
 		for (let index = cursor; index < input.messages.length; index += 1) {
 			const candidate = input.messages[index];
-			if (candidate && (hasRestored ? restoreCompatible(row.baseline, candidate) : structurallyCompatible(row.baseline, candidate))) {
-				match = index;
-				reconstructed = hasRestored && !structurallyCompatible(row.baseline, candidate);
-				break;
+			if (candidate && replacementCompatible(row.baseline, candidate, rowAtoms, unitByAtom, historyUnitIds)) compatible.push({
+				candidate,
+				index
+			});
+		}
+		if (projection) {
+			const expected = projectOneMessage(row.baseline, rowAtoms, /* @__PURE__ */ new Map(), unitByAtom);
+			const exact = compatible.filter(({ candidate }) => messagePayloadEqual(row.baseline, candidate) || !!expected && messagePayloadEqual(expected, candidate));
+			if (exact.length > 1) throw new ProjectionAlignmentError("projected message could not be aligned unambiguously");
+			if (exact.length === 1) {
+				match = exact[0].index;
+				reconstructed = !messagePayloadEqual(row.baseline, exact[0].candidate);
+			} else if (compatible.length > 1) throw new ProjectionAlignmentError("projected message could not be aligned unambiguously");
+			else if (compatible.length === 1) {
+				match = compatible[0].index;
+				reconstructed = true;
 			}
+		} else if (compatible.length > 0) {
+			match = compatible[0].index;
+			reconstructed = hasHistory || hasRestored && !structurallyCompatible(row.baseline, compatible[0].candidate);
 		}
 		if (match < 0) {
-			if (hasExcluded) throw new ProjectionAlignmentError("excluded message could not be aligned with the active context");
-			if (hasRestored) {
+			if (projection) {
+				if (projectOneMessage(row.baseline, rowAtoms, states, unitByAtom)) throw new ProjectionAlignmentError("projected message could not be aligned");
+				continue;
+			}
+			if (hasExcluded && !projection) throw new ProjectionAlignmentError("excluded message could not be aligned with the active context");
+			if (hasRestored || projection || hasHistory) {
 				const candidates = input.messages.map((candidate, index) => ({
 					candidate,
 					index
-				})).filter(({ candidate, index }) => index >= cursor && restoreCompatible(row.baseline, candidate));
-				if (candidates.length > 1) throw new ProjectionAlignmentError("restored message could not be aligned unambiguously");
+				})).filter(({ candidate, index }) => index >= cursor && replacementCompatible(row.baseline, candidate, rowAtoms, unitByAtom, historyUnitIds));
+				if (candidates.length > 1 && projection) throw new ProjectionAlignmentError("projected message could not be aligned unambiguously");
 				if (candidates.length === 1) {
 					match = candidates[0].index;
 					reconstructed = true;
 				} else {
-					const restored = projectOneMessage(row.baseline, rowAtoms, states);
+					const restored = projectOneMessage(row.baseline, rowAtoms, states, unitByAtom);
 					if (restored) output.push(restored);
 					continue;
 				}
@@ -2900,7 +3587,7 @@ function projectModelContext(input) {
 		}
 		const current = input.messages[match];
 		if (current) {
-			const projected = projectOneMessage(reconstructed ? row.baseline : current, rowAtoms, states);
+			const projected = projectOneMessage(reconstructed ? row.baseline : current, rowAtoms, states, unitByAtom);
 			if (projected) output.push(projected);
 		}
 		cursor = match + 1;
@@ -2912,9 +3599,12 @@ function projectModelContext(input) {
 	return output;
 }
 function projectionOverlapsEntryIds(entryIds, atoms, projectionEvents) {
-	const states = reduceProjectionStates(atoms, projectionEvents);
+	const uniqueEvents = uniqueProjectionEvents(projectionEvents);
+	const states = reduceProjectionStates(atoms, uniqueEvents.filter(isExclusionEvent));
 	if ([...states.values()].some((state) => state === "unavailable")) throw new ProjectionAlignmentError("active projection is unavailable");
-	return atoms.some((atom) => entryIds.has(atom.sourceRef.entryId) && states.get(atom.id) === "exclude");
+	if (atoms.some((atom) => entryIds.has(atom.sourceRef.entryId) && states.get(atom.id) === "exclude")) return true;
+	const { byAtom } = replacementUnits(atoms, states, uniqueEvents);
+	return atoms.some((atom) => entryIds.has(atom.sourceRef.entryId) && byAtom.get(atom.id)?.state.replacementState === "replaced");
 }
 //#endregion
 //#region adapters/pi-extension/src/index.ts
@@ -2970,7 +3660,7 @@ function registerProjectionHooks(pi) {
 			if (current.projectionAvailable === false) throw new Error(current.projectionError || "CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
 			const ids = projectionEntryIdsBeforeFirstKept(event);
 			if (ids.size > 0 && projectionSummaryOverlap(ctx, event.branchEntries, ids)) {
-				if (ctx.hasUI) ctx.ui.notify("Compaction cancelled because it would summarize excluded context.", "warning");
+				if (ctx.hasUI) ctx.ui.notify("Compaction cancelled because it would summarize edited or excluded context.", "warning");
 				return { cancel: true };
 			}
 		} catch (error) {
@@ -2985,7 +3675,7 @@ function registerProjectionHooks(pi) {
 			if (current.projectionAvailable === false) throw new Error(current.projectionError || "CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
 			const ids = new Set(event.preparation.entriesToSummarize.map((entry) => entry.id));
 			if (ids.size > 0 && projectionSummaryOverlap(ctx, event.preparation.entriesToSummarize, ids)) {
-				if (ctx.hasUI) ctx.ui.notify("Branch summary cancelled because it would summarize excluded context.", "warning");
+				if (ctx.hasUI) ctx.ui.notify("Branch summary cancelled because it would summarize edited or excluded context.", "warning");
 				return { cancel: true };
 			}
 		} catch (error) {
@@ -3028,35 +3718,68 @@ function contextEditorExtension(pi) {
 				ctx.ui.notify("/ctx requires interactive Pi TUI or Pi Desktop mode.", "warning");
 				return;
 			}
-			const host = new PiContextEditorHost(ctx);
-			const records = host.records();
-			if (records.length === 0) {
-				ctx.ui.notify("There are no editable context records in the active branch.", "info");
-				return;
+			let uiState;
+			while (true) {
+				const host = new PiContextEditorHost(ctx);
+				const records = host.records();
+				if (records.length === 0) {
+					ctx.ui.notify("There are no editable context records in the active branch.", "info");
+					break;
+				}
+				const snapshot = host.snapshot();
+				const locator = {
+					host: "pi",
+					sessionId: host.sessionId
+				};
+				const prefs = host.getPrefs();
+				let exit;
+				await ctx.ui.custom((tui, theme, _keybindings, done) => new ContextEditorComponent(tui, theme, records, snapshot, prefs, {
+					loadRecords: () => host.records(),
+					loadSnapshot: () => host.snapshot(),
+					mutate: (input) => host.commit(input),
+					previewContext: (input) => host.previewContext({
+						locator,
+						...input
+					}),
+					commitContext: (input) => host.commitContext({
+						locator,
+						...input
+					}),
+					commitReplacement: (input) => host.commitReplacementMutation(input),
+					restoreReplacement: (input) => host.restoreReplacementMutation(input),
+					undoReplacement: (input) => host.undoReplacementMutation(input),
+					undo: (baseRevision) => host.undo(baseRevision),
+					persistPrefs: (nextPrefs) => host.setPrefs(nextPrefs),
+					notify: (message, type = "info") => ctx.ui.notify(message, type),
+					initialUiState: uiState,
+					locale
+				}, (result) => {
+					exit = result;
+					done(void 0);
+				}));
+				if (!exit || exit.kind === "close") break;
+				uiState = exit.uiState;
+				if (exit.kind !== "edit") continue;
+				let value;
+				try {
+					value = await ctx.ui.editor(exit.title, exit.text);
+				} catch (error) {
+					ctx.ui.notify("Editor failed: " + (error instanceof Error ? error.message : String(error)), "warning");
+					continue;
+				}
+				if (value === void 0) continue;
+				try {
+					const result = host.commitReplacementMutation({
+						baseRevision: exit.baseRevision,
+						unitId: exit.unitId,
+						text: value
+					});
+					if (!result.ok || result.conflict) ctx.ui.notify("The session or sidecar changed; edit discarded. Please edit again.", "warning");
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					ctx.ui.notify(message === "CONTEXT_EDITOR_REPLACEMENT_EMPTY" ? "Replacement text cannot be blank." : "Edit failed: " + message, "warning");
+				}
 			}
-			const snapshot = host.snapshot();
-			const locator = {
-				host: "pi",
-				sessionId: host.sessionId
-			};
-			const prefs = host.getPrefs();
-			await ctx.ui.custom((tui, theme, _keybindings, done) => new ContextEditorComponent(tui, theme, records, snapshot, prefs, {
-				loadRecords: () => host.records(),
-				loadSnapshot: () => host.snapshot(),
-				mutate: (input) => host.commit(input),
-				previewContext: (input) => host.previewContext({
-					locator,
-					...input
-				}),
-				commitContext: (input) => host.commitContext({
-					locator,
-					...input
-				}),
-				undo: (baseRevision) => host.undo(baseRevision),
-				persistPrefs: (nextPrefs) => host.setPrefs(nextPrefs),
-				notify: (message, type = "info") => ctx.ui.notify(message, type),
-				locale
-			}, () => done(void 0)));
 		}
 	});
 }

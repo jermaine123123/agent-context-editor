@@ -17,6 +17,17 @@ export type ContextRecordKind = 'user' | 'ai' | 'tool'
 export type ContextEditableUnitKind = 'reasoning' | 'answer' | 'user' | 'tool'
 export type ContextEditableUnitViewState = ViewState | 'mixed'
 export type ContextSearchScope = 'dialogue' | 'all'
+export type ReplacementText = string | null
+export type ContextReplacementProjectionState = 'original' | 'replaced' | 'unavailable'
+export type ContextReplacementDisabledReason =
+  | 'unsupported-unit-kind'
+  | 'structured-user-content'
+  | 'signed-content'
+  | 'projection-unavailable'
+  | 'invalid-target'
+
+/** The revision type is string in Pi, while small in-memory hosts often use a number. */
+export type ContextRevision = string | number
 
 export interface SourceRef {
   entryId: string
@@ -39,6 +50,8 @@ export interface ContextAtom {
   isError?: boolean
   hasSignature?: boolean
   redacted?: boolean
+  /** User content that is not a plain text message cannot be edited in v1. */
+  structured?: boolean
 }
 
 export interface AtomViewState {
@@ -104,12 +117,20 @@ export interface ContextEditableUnit {
   viewState: ContextEditableUnitViewState
   projectionState: ContextEditableUnitProjectionState
   mutable: boolean
+
+  /** Text currently visible to the editor and search index. Canonical atoms remain unchanged. */
+  effectiveText: string
+  replacementState: ContextReplacementProjectionState
+  replacementSupported: boolean
+  replacementDisabledReason?: ContextReplacementDisabledReason
+  canRestoreReplacement: boolean
+  canUndoReplacement: boolean
 }
 
 export interface ContextEditorSnapshot {
   revision: string
   sourceLeafId: string | null
-  records: Array<Pick<ContextRecord, 'id' | 'kind' | 'viewState' | 'mutable' | 'entryId' | 'entryIds' | 'anchorEntryId' | 'toolCallId'> & { projectionState?: ContextEditableUnitProjectionState; units: Array<Pick<ContextEditableUnit, 'id' | 'recordId' | 'kind' | 'atomIds' | 'viewState' | 'mutable'> & { projectionState?: ContextEditableUnitProjectionState }> }>
+  records: Array<Pick<ContextRecord, 'id' | 'kind' | 'viewState' | 'mutable' | 'entryId' | 'entryIds' | 'anchorEntryId' | 'toolCallId'> & { projectionState?: ContextEditableUnitProjectionState; units: Array<Pick<ContextEditableUnit, 'id' | 'recordId' | 'kind' | 'atomIds' | 'viewState' | 'mutable'> & { projectionState?: ContextEditableUnitProjectionState; effectiveText?: string; replacementState?: ContextReplacementProjectionState; replacementSupported?: boolean; replacementDisabledReason?: ContextReplacementDisabledReason; canRestoreReplacement?: boolean; canUndoReplacement?: boolean }> }>
   canUndo: boolean
   legacyStateFound: boolean
   projectionAvailable?: boolean
@@ -151,4 +172,41 @@ export interface ContextProjectionEventV1 {
   baseRevision: string
   action: 'exclude' | 'restore'
   changes: ContextProjectionChange[]
+}
+
+export interface ContextReplacementAtomRef {
+  atomId: string
+  sourceRef: SourceRef
+  fingerprint: string
+}
+
+export type ContextReplacementEventV1 =
+  | {
+      schemaVersion: 1
+      type: 'replacement'
+      action: 'replace' | 'restore'
+      eventId: string
+      unitId: string
+      unitKind: 'user' | 'answer'
+      atomRefs: ContextReplacementAtomRef[]
+      beforeText: ReplacementText
+      afterText: ReplacementText
+      baseRevision: ContextRevision
+      createdAt: string
+    }
+  | {
+      schemaVersion: 1
+      type: 'replacement'
+      action: 'undo'
+      eventId: string
+      unitId: string
+      undoOf: string
+      baseRevision: ContextRevision
+      createdAt: string
+    }
+
+export type ContextProjectionEvent = ContextProjectionEventV1 | ContextReplacementEventV1
+
+export function contextProjectionEventId(event: ContextProjectionEvent): string {
+  return 'type' in event && event.type === 'replacement' ? event.eventId : (event as ContextProjectionEventV1).transactionId
 }

@@ -1,9 +1,11 @@
 # Agent Context Editor
 
-一个跨 Agent 的对话管理插件。对于已适配的宿主，它优先提供可预览、可确认、可恢复
-的模型上下文排除：从后续模型输入中排除指定内容，同时完整保留原始 Session。除此
-之外，它还提供可搜索、可筛选、可隐藏、可恢复的对话管理视图，支持按 User、AI、Tool
-类型筛选，以及单条、连续范围和批量操作。
+一个跨 Agent 的对话管理插件。对于已适配的宿主，它优先提供两类模型上下文控制：
+手动排除指定单元，并手动编辑可编辑的 User/Answer 内容，支持恢复和撤销。这些
+操作只改变后续模型输入，同时完整保留原始 Session。
+当前支持纯文本 User 和完整、无签名 Answer；结构化、签名、reasoning 和 Tool 内容
+保持保护。除此之外，它还提供可搜索、可筛选、可隐藏、可恢复的对话管理视图，支持
+按 User、AI、Tool 类型筛选，以及单条、连续范围和批量操作。
 
 Agent 会话会积累用户指令、模型推理、旧回答和工具输出。Agent Context Editor 在原有
 Session 之上建立独立的结构化管理视图，支持搜索整篇对话、定位结果、隐藏、恢复和撤销
@@ -13,20 +15,22 @@ Session 之上建立独立的结构化管理视图，支持搜索整篇对话、
 会话时快速找到用户选择保留的信息，控制哪些内容参与后续模型上下文，并让 AI 精简选中
 的片段或整篇会话。
 
-## 稳定版 v0.2.0 当前能力
+## v0.3.0 稳定版当前能力
 
-稳定版 v0.2.0 已在 Pi TUI 和 DeepSeek Harness 上提供可用版本，包括：
+稳定版 v0.3.0 已在 Pi TUI 和 DeepSeek Harness 上提供手动上下文控制，包括：
 
+- 手动排除指定单元并恢复模型上下文；先预览确认，自动保持 Tool Call/Result
+  配对和带签名 reasoning 链的协议闭包；
+- 手动编辑纯文本 User 或完整、无签名 Answer，支持恢复原文、按单元 LIFO
+  撤销、原文对照和基于生效文本的搜索；结构化、签名、reasoning 和 Tool 内容保持保护；
 - 默认只搜索用户消息和 AI 最终回答，也可临时切换到全文搜索；支持命中次数统计和上一个/下一个结果定位；
 - User、AI、Tool 消息类型筛选及组合筛选；
 - 单条、连续范围和批量选择；
 - 可恢复的视觉隐藏、恢复全部、重置和撤销；
-- 使用 sidecar 持久化隐藏状态，不删除或改写原始 Session；
+- 使用 sidecar 持久化隐藏和编辑状态，不删除或改写原始 Session；
 - 通用 Core、Pi TUI 与 DeepSeek Harness 都把同一轮 AI 的思考和最终回答作为独立单元；
-- Pi TUI 通过 `x` 排除或恢复模型上下文，先预览确认，并自动保持
-  Tool Call/Result 配对和带签名 reasoning 链的协议闭包；
-- 独立的 Pi 模型投影 sidecar 和失败关闭的 `context` hook；
-  DeepSeek Harness 使用原生 `context/projection` 事件完成同一 Session 的上下文排除。
+- Pi TUI 使用独立模型投影 sidecar 和失败关闭的 `context` hook；
+  DeepSeek Harness 使用原生 `context/projection` 事件完成同一 Session 的上下文控制。
 
 Pi TUI 中，`Enter` 只临时展开或收起当前单元，`h` 和 `r` 分别持久隐藏
 与恢复。搜索会定位到第一个文字命中并自动居中、高亮，`n`/`N` 可逐个循环
@@ -43,8 +47,8 @@ English 首页：[README.md](README.md)
 
 ## 当前发布内容
 
-- Pi 扩展 `pi-context-editor@0.4.0`：在 Pi TUI / Pi Desktop 中使用 `/ctx`；Pi TUI 通过 `x` 排除/恢复模型上下文，Desktop/RPC 仍只管理视觉状态。
-- DeepSeek Harness 适配器 `context-editor-deepseek-harness@0.2.0`：在同一 Session 的 Context Editor 视图中，支持独立 reasoning/answer 单元、搜索筛选和原生上下文排除。
+- Pi 扩展 `pi-context-editor@0.5.0`：在 Pi TUI / Pi Desktop 中使用 `/ctx`；Pi TUI 通过 `x` 排除/恢复模型上下文，并通过 `e/E/z/o` 编辑或恢复 User/Answer，Desktop/RPC 仍只管理视觉状态。
+- DeepSeek Harness 适配器 `context-editor-deepseek-harness@0.3.0`：在同一 Session 的 Context Editor 视图中，支持独立 reasoning/answer 单元、搜索筛选、原生上下文排除和 User/Answer 手动编辑。
 - Pi Context Desktop `0.1.4`：位于独立 fork [jermaine123123/pi-app](https://github.com/jermaine123123/pi-app) 的 Windows x64 社区构建。
 
 DeepSeek 适配器把视觉隐藏状态写入 `context_editor` sidecar，不改写原始 Harness
@@ -62,7 +66,7 @@ DeepSeek、Pi 官方及其维护团队没有隶属或赞助关系。
 3. 经用户确认后，用摘要替换对话窗口中的原内容、模型上下文中的原内容，或同时替换
    两者；原文保持可恢复，所有修改均可撤销。
 
-AI 精简和摘要替换仍属于后续计划；稳定版已包含 Pi TUI 和 DeepSeek Harness 的上下文排除能力。
+AI 精简和摘要替换仍属于后续计划；稳定版已包含 Pi TUI 和 DeepSeek Harness 的手动上下文编辑与上下文排除能力。
 
 ## 界面语言
 
@@ -84,8 +88,8 @@ Pi TUI 把 V2 视觉事件写入 `<sessionFile>.context-editor.json`，模型投
 `.tgz` 文件；请先解压 Pi 包，使 `package.json` 位于目录根部，再运行：
 
 ```sh
-pi install ./pi-context-editor-0.4.0
-dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.2.0.tgz
+pi install ./pi-context-editor-0.5.0
+dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.3.0.tgz
 ```
 
 如果直接使用本仓库，可以安装包目录：

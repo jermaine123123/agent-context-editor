@@ -1,28 +1,37 @@
 # Agent Context Editor
 
 Agent Context Editor is a cross-agent conversation management plugin for Coding
-Agent sessions. In supported hosts, it provides reversible model-context
-exclusion: preview and confirm content to omit from subsequent model input,
-restore it later, and keep the original Session unchanged. It also provides a
-searchable, filterable, hideable, and restorable management view for User, AI,
-and Tool messages.
+Agent sessions. In supported hosts, it provides two direct model-context
+controls: manually exclude selected units from subsequent model input, and
+manually edit eligible User/Answer text with restore and undo. Both operations
+keep the original Session unchanged.
+
+The current adapters support plain-text User and complete unsigned Answer units;
+structured, signed, reasoning, and Tool content remains protected. Agent Context
+Editor also provides a searchable, filterable, hideable, and restorable
+management view for User, AI, and Tool messages.
 
 Agent sessions can accumulate user instructions, model reasoning, older answers,
 and tool output. Agent Context Editor builds an independent, structured
 management view over the existing Session so you can search the whole
-conversation, filter User, AI, and Tool messages, select individual or multiple
-items, and hide, restore, or undo view changes. Hidden state is stored separately.
+conversation, select individual or multiple items, and hide, restore, or undo
+view changes. Hidden state is stored separately.
 
 The long-term goal is to provide the same conversation-editing workflow across
 Agent hosts: keep sessions focused, quickly return to the information you chose
-to retain, control what participates in future model context, and ask AI to
-condense a selected range or the entire session.
 
-## Stable release v0.2.0
+## Stable release v0.3.0
 
-The stable v0.2.0 release is available today for Pi and DeepSeek Harness. It provides an
-independent Context Editor view with:
+The stable v0.3.0 release adds reversible model-context controls to Pi TUI and
+DeepSeek Harness. It provides an independent Context Editor view with:
 
+- manual model-context exclusion and restore in Pi TUI and DeepSeek Harness,
+  with preview/confirmation, provider-safe Tool Call/Result closure, and
+  signed-reasoning safety rules;
+- manual User/Answer editing in Pi TUI and DeepSeek Harness, with effective-text
+  search, restore, per-unit LIFO undo, original-text comparison, and append-only
+  projection events; only plain-text User and complete unsigned Answer units are
+  editable;
 - dialogue-scoped text search by default (User messages and AI final answers),
   optional full-session search, occurrence counts, and previous/next navigation;
 - User, AI, and Tool type filters, including combined filters;
@@ -30,10 +39,8 @@ independent Context Editor view with:
 - reversible visual hiding, restore, reset, and undo;
 - sidecar persistence without deleting or rewriting the original Session;
 - independent reasoning and final-answer units in the shared Core, Pi TUI, and DeepSeek Harness;
-- model-context exclusion and restore in Pi TUI and DeepSeek Harness, with preview/confirmation,
-  provider-safe Tool Call/Result closure, and signed-reasoning safety rules;
 - a separate Pi projection sidecar and a fail-closed `context` hook for Pi, plus the
-  native `context/projection` event path in DeepSeek Harness.
+  native `context/projection` event path in DeepSeek Harness;
 
 In Pi TUI, `Enter` only expands or collapses the selected unit; `h` and `r`
 persist hiding and restoring. Search activates the first text occurrence,
@@ -53,8 +60,8 @@ The repository currently ships two adapter packages and one desktop fork:
 
 | Adapter | Package / app | Current scope |
 | --- | --- | --- |
-| Pi extension | `pi-context-editor@0.4.0` | `/ctx` in Pi TUI and Pi Desktop; Pi TUI adds reversible model-context exclusion |
-| DeepSeek Harness | `context-editor-deepseek-harness@0.2.0` | Context Editor tab with independent units, search/filter controls, and native model-context exclusion |
+| Pi extension | `pi-context-editor@0.5.0` | `/ctx` in Pi TUI and Pi Desktop; Pi TUI adds model-context exclusion and User/Answer editing |
+| DeepSeek Harness | `context-editor-deepseek-harness@0.3.0` | Context Editor tab with independent units, native model-context exclusion, and User/Answer editing |
 | Pi Context Desktop | `jermaine123123/pi-app` `context-editor-v0.1.4` | Windows x64 community desktop build |
 
 中文说明：[README.zh-CN.md](README.zh-CN.md)
@@ -104,19 +111,19 @@ available:
    source recoverable and every change undoable.
 
 AI-condensation and summary-replacement capabilities remain planned work; the
-stable release includes the tested Pi TUI and DeepSeek Harness context-exclusion paths.
+stable release includes tested Pi TUI and DeepSeek Harness context exclusion and User/Answer editing paths.
 
 ## Install
 
 ### Pi extension
 
-Download `pi-context-editor-0.4.0.tgz` from the
+Download `pi-context-editor-0.5.0.tgz` from the
 [release assets](https://github.com/jermaine123123/agent-context-editor/releases).
 Pi `0.84.2` accepts a local package directory here, not a `.tgz` file. Extract
 the archive so that `package.json` is at the package directory root, then run:
 
 ```sh
-pi install ./pi-context-editor-0.4.0
+pi install ./pi-context-editor-0.5.0
 ```
 
 When working from this repository, install the package directory directly:
@@ -132,11 +139,11 @@ Desktop before entering `/ctx`.
 
 ### DeepSeek Harness
 
-Download `context-editor-deepseek-harness-0.2.0.tgz` and install it into a
+Download `context-editor-deepseek-harness-0.3.0.tgz` and install it into a
 Harness profile using the official CLI:
 
 ```sh
-dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.2.0.tgz
+dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.3.0.tgz
 ```
 
 The adapter targets Harness Developer Preview commit
@@ -156,7 +163,7 @@ translated.
 
 ## Support matrix
 
-| Capability | Pi extension 0.4.0 | DeepSeek Harness 0.2.0 | Pi Context Desktop 0.1.4 |
+| Capability | Pi extension 0.5.0 | DeepSeek Harness 0.3.0 | Pi Context Desktop 0.1.4 |
 | --- | ---: | ---: | ---: |
 | Inspect user / AI / tool records | Yes | Yes | Yes |
 | Filter user / AI / tool records | Yes | Yes | Yes |
@@ -166,6 +173,7 @@ translated.
 | Undo and revision conflict handling | TUI: V2 sidecar; Desktop/RPC: V1 reset | V2 sidecar | V2 sidecar |
 | Session log preserved | Yes | Yes | Yes |
 | Context exclusion from model input | Pi TUI: Yes; Desktop/RPC: No | Yes (Harness rc.8) | No |
+| Manual User/Answer replacement | Pi TUI: Yes; Desktop/RPC: No | Yes (Harness rc.8; plain-text User and unsigned Answer only) | No |
 | Token reduction | Pi TUI: provider payload only | No | No |
 | AI full-session condensation | No | No | No |
 | AI selected-range summary | No | No | No |
@@ -177,8 +185,8 @@ translated.
 ```text
 agent-context-editor/
 ├─ adapters/
-│  ├─ pi-extension/          Pi /ctx adapter 0.4.0
-│  └─ deepseek-harness/      DeepSeek Harness adapter 0.2.0
+│  ├─ pi-extension/          Pi /ctx adapter 0.5.0
+│  └─ deepseek-harness/      DeepSeek Harness adapter 0.3.0
 ├─ packages/
 │  └─ context-editor-core/   host-neutral TypeScript Core and tests
 ├─ docs/                     architecture, compatibility and security notes
@@ -219,6 +227,8 @@ replace Tool Output, or support additional Agent hosts. Pi Desktop/RPC remains
 visual-only. Pi TUI and DeepSeek context exclusion require their respective
 projection paths and fail closed on corrupt state, revision conflicts, source
 fingerprint changes, or ambiguous message alignment.
+DeepSeek User/Answer replacement is enabled in 0.3.0 for the tested rc.8
+boundary and is limited to plain-text User and complete unsigned Answer units.
 
 Please report reproducible host compatibility issues with the relevant host
 version, adapter version and sanitized logs. Do not attach session logs that

@@ -306,6 +306,22 @@ export class ContextEditorController {
       ...(unitIds === undefined ? {} : { unitIds }),
     })
   }
+
+  replacementOperationId(action, unitId) {
+    return `context-replacement-${action}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}-${String(unitId).slice(-12)}`
+  }
+
+  async commitReplacement(unitId, baseRevision, text) {
+    return this.call('commitReplacement', { operationId: this.replacementOperationId('replace', unitId), unitId, baseRevision, text })
+  }
+
+  async restoreReplacement(unitId, baseRevision) {
+    return this.call('restoreReplacement', { operationId: this.replacementOperationId('restore', unitId), unitId, baseRevision })
+  }
+
+  async undoReplacement(unitId, baseRevision) {
+    return this.call('undoReplacement', { operationId: this.replacementOperationId('undo', unitId), unitId, baseRevision })
+  }
 }
 
 function FilterButton({ kind, state, onClick, text, label }) {
@@ -322,9 +338,20 @@ function FilterButton({ kind, state, onClick, text, label }) {
   }, label ?? text.kind(kind))
 }
 
-function UnitBody({ unit, match, text }) {
+function UnitBody({ unit, match, text, showOriginal = false }) {
   const atoms = unit.atoms ?? []
   if (!atoms.length) return h('span', { className: 'context-editor__empty' }, text.empty)
+  if (unit.kind === 'user' || unit.kind === 'answer') {
+    const value = showOriginal
+      ? atoms.map(atom => atom.text ?? '').join('\n')
+      : (unit.effectiveText ?? atoms.map(atom => atom.text ?? '').join('\n'))
+    const anchor = atoms.at(-1)?.id
+    return h('div', { className: 'context-editor__record-body' },
+      h('div', { className: `context-editor__atom context-editor__atom--${unit.kind}` },
+        h('span', null, !showOriginal && match?.atomId === anchor ? highlight(value, match) : value),
+      ),
+    )
+  }
   return h('div', { className: 'context-editor__record-body' }, atoms.map(atom => {
     const atomMatch = match?.atomId === atom.id && match?.field !== 'tool_name'
     const toolName = atom.toolName
@@ -337,15 +364,98 @@ function UnitBody({ unit, match, text }) {
   }))
 }
 
-function UnitSection({ unit, selected, onSelect, focused, showHidden, match, disabled, onRestore, onContextToggle, registerNode, text }) {
+function EditDialog({ unit, initialText, text, onCancel, onSave }) {
+  const [value, setValue] = useState(initialText)
+  const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
+  const textarea = useRef(null)
+
+  useEffect(() => {
+    setValue(initialText)
+    setError('')
+    const timer = globalThis.setTimeout?.(() => textarea.current?.focus?.(), 0)
+    return () => {
+      if (timer !== undefined) globalThis.clearTimeout?.(timer)
+    }
+  }, [initialText, unit.id])
+
+  const submit = async () => {
+    if (saving) return
+    if (value.trim().length === 0) {
+      setError(text.replacementEmpty)
+      return
+    }
+    if (value === initialText) {
+      onCancel()
+      return
+    }
+    setSaving(true)
+    setError('')
+    try {
+      await onSave(value)
+    } catch (cause) {
+      setSaving(false)
+      setError(errorText(cause))
+    }
+  }
+
+  const onKeyDown = event => {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      if (!saving) onCancel()
+      return
+    }
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault()
+      void submit()
+    }
+  }
+
+  return h('div', { className: 'context-editor__dialog-backdrop' },
+    h('div', {
+      className: 'context-editor__dialog',
+      role: 'dialog',
+      'aria-modal': 'true',
+      'aria-label': text.editTitle(unit.kind),
+      onKeyDown,
+    },
+    h('div', { className: 'context-editor__dialog-header' },
+      h('h2', null, text.editTitle(unit.kind)),
+      h('button', { type: 'button', className: 'context-editor__dialog-close', disabled: saving, onClick: onCancel, 'aria-label': text.cancel }, '×'),
+    ),
+    h('textarea', {
+      ref: textarea,
+      className: 'context-editor__dialog-input',
+      value,
+      onChange: event => setValue(event.target.value),
+      spellCheck: false,
+      disabled: saving,
+      'aria-label': text.editTitle(unit.kind),
+    }),
+    h('div', { className: 'context-editor__dialog-hint' }, 'Ctrl/Cmd+Enter', ' · ', text.cancel, ' Esc'),
+    error ? h('div', { className: 'context-editor__dialog-error', role: 'alert' }, error) : null,
+    h('div', { className: 'context-editor__dialog-actions' },
+      h('button', { type: 'button', disabled: saving, onClick: onCancel }, text.cancel),
+      h('button', { type: 'button', disabled: saving, onClick: () => void submit() }, saving ? text.loading : text.save),
+    ),
+    ),
+  )
+}
+
+function UnitSection({ unit, selected, onSelect, focused, showHidden, showOriginal, match, disabled, onRestore, onContextToggle, onEdit, onRestoreReplacement, onUndoReplacement, onCompareOriginal, replacementAvailable, registerNode, text }) {
   const hidden = unit.viewState === 'hide' || unit.viewState === 'mixed'
   const mixed = unit.viewState === 'mixed'
   const projectionState = unit.projectionState ?? 'include'
   const contextExcluded = projectionState === 'exclude' || projectionState === 'mixed'
   const contextUnavailable = projectionState === 'unavailable'
+  const isEditableKind = unit.kind === 'user' || unit.kind === 'answer'
+  const replacementSupported = unit.replacementSupported === true
+  const replacementTitle = !replacementAvailable
+    ? text.replacementDisabled
+    : text.replacementUnavailable(unit.replacementDisabledReason)
   const body = hidden && !showHidden
     ? h('div', { className: 'context-editor__unit-placeholder' }, mixed ? text.mixedPlaceholder : text.hiddenPlaceholder(unit.kind))
-    : h(UnitBody, { unit, match, text })
+    : h(UnitBody, { unit, match, text, showOriginal })
   return h('div', {
     className: `context-editor__unit ${focused ? 'is-focused' : ''} ${hidden ? 'is-hidden' : ''} ${contextExcluded ? 'is-context-excluded' : ''}`,
     'data-unit-id': unit.id,
@@ -363,6 +473,31 @@ function UnitSection({ unit, selected, onSelect, focused, showHidden, match, dis
     contextExcluded ? h('span', { className: 'context-editor__context-badge' }, text.contextState(projectionState)) : null,
     contextUnavailable ? h('span', { className: 'context-editor__context-badge is-unavailable' }, text.contextState(projectionState)) : null,
     hidden ? h('button', { type: 'button', disabled, onClick: onRestore }, text.restore) : null,
+    isEditableKind && unit.replacementState === 'replaced'
+      ? h('span', { className: 'context-editor__replacement-badge', title: text.edited }, text.edited)
+      : null,
+    isEditableKind && !replacementSupported
+      ? h('span', { className: 'context-editor__replacement-reason', title: replacementTitle }, replacementTitle)
+      : null,
+    isEditableKind && replacementSupported
+      ? h('div', { className: 'context-editor__replacement-actions' },
+        h('button', {
+          type: 'button',
+          disabled: disabled || !replacementAvailable,
+          onClick: onEdit,
+          title: !replacementAvailable ? text.replacementDisabled : text.editTitle(unit.kind),
+        }, text.edit),
+        unit.canRestoreReplacement
+          ? h('button', { type: 'button', disabled: disabled || !replacementAvailable, onClick: onRestoreReplacement }, text.restoreOriginal)
+          : null,
+        unit.canUndoReplacement
+          ? h('button', { type: 'button', disabled: disabled || !replacementAvailable, onClick: onUndoReplacement }, text.undoReplacement)
+          : null,
+        unit.replacementState === 'replaced'
+          ? h('button', { type: 'button', onClick: onCompareOriginal }, showOriginal ? text.showEffective : text.compareOriginal)
+          : null,
+      )
+      : null,
     h('button', {
       type: 'button',
       className: 'context-editor__context-toggle',
@@ -374,7 +509,7 @@ function UnitSection({ unit, selected, onSelect, focused, showHidden, match, dis
   )
 }
 
-function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, match, disabled, onRestore, onContextToggle, registerNode, text }) {
+function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, showOriginalUnitId, match, disabled, onRestore, onContextToggle, onEdit, onRestoreReplacement, onUndoReplacement, onCompareOriginal, replacementAvailable, registerNode, text }) {
   const units = unitsForRecord(record)
   const focused = units.some(unit => unit.id === focusedUnitId)
   return h('article', {
@@ -393,10 +528,16 @@ function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, matc
       onSelect: event => onSelect(unit, event),
       focused: focusedUnitId === unit.id,
       showHidden,
+      showOriginal: showOriginalUnitId === unit.id,
       match: focusedUnitId === unit.id ? match : null,
       disabled,
       onRestore: () => onRestore(unit.id),
       onContextToggle: () => onContextToggle(unit),
+      onEdit: () => onEdit(unit),
+      onRestoreReplacement: () => onRestoreReplacement(unit),
+      onUndoReplacement: () => onUndoReplacement(unit),
+      onCompareOriginal: () => onCompareOriginal(unit),
+      replacementAvailable,
       registerNode,
       text,
     }))),
@@ -419,6 +560,9 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
   const [selected, setSelected] = useState(() => new Set())
   const [matching, setMatching] = useState(false)
   const [contextMutating, setContextMutating] = useState(false)
+  const [editing, setEditing] = useState(null)
+  const [comparisonUnitId, setComparisonUnitId] = useState(null)
+  const [notice, setNotice] = useState('')
   const lastSelectedIndex = useRef(null)
   const loadSequence = useRef(0)
   const searchSequence = useRef(0)
@@ -429,6 +573,7 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
   const unitNodes = useRef(new Map())
   const searchInput = useRef(null)
   const controlsNode = useRef(null)
+  const editFocus = useRef(null)
 
   useEffect(() => {
     // Search scope is deliberately window-local. A reused tab that switches
@@ -437,6 +582,9 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
     setSearch(null)
     setMatch(null)
     setSearchIndex(0)
+    setEditing(null)
+    setComparisonUnitId(null)
+    setNotice('')
   }, [sessionId])
 
   const registerUnitNode = useCallback((unitId, node) => {
@@ -464,16 +612,19 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
   const selectedCount = selected.size
   const readOnly = running || loaded.status === 'loading' || loaded.status === 'refreshing' || contextMutating
   const contextAvailable = loaded.snapshot?.capabilities?.contextExclusion === true
+  const replacementAvailable = loaded.snapshot?.capabilities?.contextReplacement === true
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (preserveSelection = false) => {
     const ticket = ++loadSequence.current
     setLoaded(current => ({ ...current, status: current.snapshot ? 'refreshing' : 'loading', error: null }))
     try {
       const value = await controller.load()
       if (value === null || ticket !== loadSequence.current) return
       setLoaded({ status: 'ready', ...value, error: null })
-      setSelected(new Set())
-      lastSelectedIndex.current = null
+      if (!preserveSelection) {
+        setSelected(new Set())
+        lastSelectedIndex.current = null
+      }
     } catch (error) {
       if (ticket === loadSequence.current) setLoaded(current => ({ ...current, status: 'error', error }))
     }
@@ -718,6 +869,78 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
     }
   }
 
+  const closeReplacementDialog = () => {
+    const target = editFocus.current
+    editFocus.current = null
+    setEditing(null)
+    globalThis.setTimeout?.(() => target?.focus?.(), 0)
+  }
+
+  const openReplacementEdit = unit => {
+    if (readOnly || !replacementAvailable || unit.replacementSupported !== true) return
+    editFocus.current = globalThis.document?.activeElement ?? null
+    setNotice('')
+    setComparisonUnitId(null)
+    setEditing({
+      unitId: unit.id,
+      kind: unit.kind,
+      text: String(unit.effectiveText ?? unit.atoms?.map(atom => atom.text ?? '').join('\n') ?? ''),
+    })
+  }
+
+  const saveReplacement = async value => {
+    if (!editing || loaded.snapshot === null) return
+    if (running) throw new Error('CONTEXT_EDITOR_BUSY')
+    setContextMutating(true)
+    try {
+      const result = await controller.commitReplacement(editing.unitId, loaded.snapshot.revision, value)
+      if (result?.conflict) {
+        setNotice(text.replacementConflict)
+        closeReplacementDialog()
+        await refresh(true)
+        return
+      }
+      closeReplacementDialog()
+      setNotice('')
+      await refresh(true)
+    } catch (error) {
+      setNotice(text.editFailed(errorText(error)))
+      throw error
+    } finally {
+      setContextMutating(false)
+    }
+  }
+
+  const mutateReplacement = async (action, unit) => {
+    if (readOnly || !replacementAvailable || unit.replacementSupported !== true || loaded.snapshot === null) return
+    if (action === 'restore' && typeof globalThis.confirm === 'function') {
+      let confirmed = true
+      try { confirmed = globalThis.confirm(text.restoreReplacementConfirm) } catch { confirmed = true }
+      if (!confirmed) return
+    }
+    setContextMutating(true)
+    try {
+      const method = action === 'restore' ? 'restoreReplacement' : 'undoReplacement'
+      const result = await controller[method](unit.id, loaded.snapshot.revision)
+      if (result?.conflict) {
+        setNotice(text.replacementConflict)
+        await refresh(true)
+        return
+      }
+      setNotice('')
+      await refresh(true)
+    } catch (error) {
+      setNotice(text.editFailed(errorText(error)))
+    } finally {
+      setContextMutating(false)
+    }
+  }
+
+  const compareOriginal = unit => {
+    if (unit.replacementState !== 'replaced') return
+    setComparisonUnitId(current => current === unit.id ? null : unit.id)
+  }
+
   const undo = async () => {
     if (readOnly || loaded.snapshot === null || !loaded.snapshot.canUndo) return
     try {
@@ -833,6 +1056,7 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
         h('button', { type: 'button', disabled: readOnly || !loaded.snapshot?.canUndo, onClick: () => void undo() }, text.undo),
         running ? h('span', { className: 'context-editor__running' }, text.running) : null,
         loaded.status === 'error' ? h('span', { className: 'context-editor__error' }, errorText(loaded.error)) : null,
+        notice ? h('span', { className: 'context-editor__notice', role: 'status' }, notice) : null,
       ),
     ),
     h('div', { className: 'context-editor__list' }, visibleRecords.map(record => h(RecordRow, {
@@ -842,15 +1066,30 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
       onSelect: selectUnit,
       focusedUnitId: matchUnitId,
       showHidden: prefs.showHidden,
+      showOriginalUnitId: comparisonUnitId,
       match: matchUnitId === match?.unitId ? match : null,
       disabled: readOnly,
       onRestore: unitId => void mutate('restore', [unitId]),
       onContextToggle: unit => void mutateContext(unit.projectionState === 'exclude' || unit.projectionState === 'mixed' ? 'restore' : 'exclude', [unit.id]),
+      onEdit: openReplacementEdit,
+      onRestoreReplacement: unit => void mutateReplacement('restore', unit),
+      onUndoReplacement: unit => void mutateReplacement('undo', unit),
+      onCompareOriginal: compareOriginal,
+      replacementAvailable,
       registerNode: registerUnitNode,
       text,
     }))),
     loaded.status === 'loading' ? h('div', { className: 'context-editor__state' }, text.loading) : null,
     loaded.status !== 'loading' && visibleRecords.length === 0 ? h('div', { className: 'context-editor__state' }, text.noRecords) : null,
+    editing
+      ? h(EditDialog, {
+        unit: editing,
+        initialText: editing.text,
+        text,
+        onCancel: closeReplacementDialog,
+        onSave: saveReplacement,
+      })
+      : null,
   )
 }
 

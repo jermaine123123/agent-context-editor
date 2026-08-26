@@ -26,6 +26,22 @@ export interface HarnessText {
   running: string
   loading: string
   noRecords: string
+  edit: string
+  edited: string
+  restoreOriginal: string
+  undoReplacement: string
+  compareOriginal: string
+  showEffective: string
+  originalText: string
+  editTitle(kind: string): string
+  cancel: string
+  save: string
+  replacementEmpty: string
+  replacementConflict: string
+  replacementUnavailable(reason?: string): string
+  replacementDisabled: string
+  restoreReplacementConfirm: string
+  editFailed(error: string): string
 }
 
 export declare function detectHarnessLocale(source?: unknown): HarnessLocale

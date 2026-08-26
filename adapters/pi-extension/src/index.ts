@@ -2,7 +2,7 @@ import type { ContextEvent, ExtensionAPI, ExtensionContext, SessionBeforeCompact
 import { normalizeSessionEntries } from "./normalize.js";
 import { readLatestState, STATE_ENTRY_TYPE } from "./state.js";
 import { runDesktopContextEditor } from "./desktop-ui.js";
-import { ContextEditorComponent } from "./ui.js";
+import { ContextEditorComponent, type ContextEditorExit, type ContextEditorUiState } from "./ui.js";
 import { PiContextEditorHost } from "./host.js";
 import type { ContextEditorStateV1 } from "./types.js";
 import { detectPiLocale } from "./locale.js";
@@ -75,7 +75,7 @@ function registerProjectionHooks(pi: ExtensionAPI): void {
       if (current.projectionAvailable === false) throw new Error(current.projectionError || "CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
       const ids = projectionEntryIdsBeforeFirstKept(event);
       if (ids.size > 0 && projectionSummaryOverlap(ctx, event.branchEntries, ids)) {
-        if (ctx.hasUI) ctx.ui.notify("Compaction cancelled because it would summarize excluded context.", "warning");
+        if (ctx.hasUI) ctx.ui.notify("Compaction cancelled because it would summarize edited or excluded context.", "warning");
         return { cancel: true };
       }
     } catch (error) {
@@ -91,7 +91,7 @@ function registerProjectionHooks(pi: ExtensionAPI): void {
       if (current.projectionAvailable === false) throw new Error(current.projectionError || "CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
       const ids = new Set(event.preparation.entriesToSummarize.map((entry) => entry.id));
       if (ids.size > 0 && projectionSummaryOverlap(ctx, event.preparation.entriesToSummarize, ids)) {
-        if (ctx.hasUI) ctx.ui.notify("Branch summary cancelled because it would summarize excluded context.", "warning");
+        if (ctx.hasUI) ctx.ui.notify("Branch summary cancelled because it would summarize edited or excluded context.", "warning");
         return { cancel: true };
       }
     } catch (error) {
@@ -140,36 +140,64 @@ export default function contextEditorExtension(pi: ExtensionAPI): void {
         return;
       }
 
-      const host = new PiContextEditorHost(ctx);
-      const records = host.records();
-      if (records.length === 0) {
-        ctx.ui.notify("There are no editable context records in the active branch.", "info");
-        return;
+      let uiState: ContextEditorUiState | undefined;
+      while (true) {
+        const host = new PiContextEditorHost(ctx);
+        const records = host.records();
+        if (records.length === 0) {
+          ctx.ui.notify("There are no editable context records in the active branch.", "info");
+          break;
+        }
+        const snapshot = host.snapshot();
+        const locator = { host: "pi", sessionId: host.sessionId };
+        const prefs = host.getPrefs();
+        let exit: ContextEditorExit | undefined;
+        await ctx.ui.custom((tui, theme, _keybindings, done) =>
+          new ContextEditorComponent(
+            tui,
+            theme,
+            records,
+            snapshot,
+            prefs,
+            {
+              loadRecords: () => host.records(),
+              loadSnapshot: () => host.snapshot(),
+              mutate: (input) => host.commit(input),
+              previewContext: (input) => host.previewContext({ locator, ...input }),
+              commitContext: (input) => host.commitContext({ locator, ...input }),
+              commitReplacement: (input) => host.commitReplacementMutation(input),
+              restoreReplacement: (input) => host.restoreReplacementMutation(input),
+              undoReplacement: (input) => host.undoReplacementMutation(input),
+              undo: (baseRevision) => host.undo(baseRevision),
+              persistPrefs: (nextPrefs) => host.setPrefs(nextPrefs),
+              notify: (message, type = "info") => ctx.ui.notify(message, type),
+              initialUiState: uiState,
+              locale,
+            },
+            (result) => { exit = result; done(undefined); },
+          ),
+        );
+        if (!exit || exit.kind === "close") break;
+        uiState = exit.uiState;
+        if (exit.kind !== "edit") continue;
+        let value: string | undefined;
+        try {
+          value = await ctx.ui.editor(exit.title, exit.text);
+        } catch (error) {
+          ctx.ui.notify("Editor failed: " + (error instanceof Error ? error.message : String(error)), "warning");
+          continue;
+        }
+        if (value === undefined) continue;
+        try {
+          const result = host.commitReplacementMutation({ baseRevision: exit.baseRevision, unitId: exit.unitId, text: value });
+          if (!result.ok || result.conflict) {
+            ctx.ui.notify("The session or sidecar changed; edit discarded. Please edit again.", "warning");
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          ctx.ui.notify(message === "CONTEXT_EDITOR_REPLACEMENT_EMPTY" ? "Replacement text cannot be blank." : "Edit failed: " + message, "warning");
+        }
       }
-      const snapshot = host.snapshot();
-      const locator = { host: "pi", sessionId: host.sessionId };
-      const prefs = host.getPrefs();
-      await ctx.ui.custom((tui, theme, _keybindings, done) =>
-        new ContextEditorComponent(
-          tui,
-          theme,
-          records,
-          snapshot,
-          prefs,
-          {
-            loadRecords: () => host.records(),
-            loadSnapshot: () => host.snapshot(),
-            mutate: (input) => host.commit(input),
-            previewContext: (input) => host.previewContext({ locator, ...input }),
-            commitContext: (input) => host.commitContext({ locator, ...input }),
-            undo: (baseRevision) => host.undo(baseRevision),
-            persistPrefs: (nextPrefs) => host.setPrefs(nextPrefs),
-            notify: (message, type = "info") => ctx.ui.notify(message, type),
-            locale,
-          },
-          () => done(undefined),
-        ),
-      );
     },
   });
 }

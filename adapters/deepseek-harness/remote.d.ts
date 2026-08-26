@@ -8,6 +8,9 @@ export interface ContextEditorRemote {
   commitContext(request: unknown): Promise<unknown>
   commitView(request: unknown): Promise<unknown>
   undoView(request: unknown): Promise<unknown>
+  commitReplacement(request: unknown): Promise<unknown>
+  restoreReplacement(request: unknown): Promise<unknown>
+  undoReplacement(request: unknown): Promise<unknown>
 }
 
 export declare const contextEditorRemote: {

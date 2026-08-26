@@ -7,9 +7,10 @@ import { fileURLToPath } from 'node:url'
 
 const run = promisify(execFile)
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
-const npmCli = resolve(process.execPath, '..', 'node_modules/npm/bin/npm-cli.js')
+const npmCli = process.env.npm_execpath ?? resolve(process.execPath, '..', 'node_modules/npm/bin/npm-cli.js')
+const rootManifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
 const releaseRoot = resolve(root, 'release')
-const mainRelease = join(releaseRoot, 'v0.2.0')
+const mainRelease = join(releaseRoot, `v${rootManifest.version}`)
 const desktopRelease = join(releaseRoot, 'context-editor-v0.1.4')
 const includeDesktop = process.argv.includes('--desktop')
 

@@ -67,9 +67,19 @@ export function searchOccurrences(
           viewState: record.viewState,
           projectionState: record.projectionState,
           mutable: record.mutable,
+          effectiveText: record.atoms.map((atom) => atom.text).join('\n'),
+          replacementState: 'original',
+          replacementSupported: false,
+          canRestoreReplacement: false,
+          canUndoReplacement: false,
     } satisfies ContextEditableUnit]
     for (const unit of units) {
       if (enabledUnitKinds !== undefined && !enabledUnitKinds.has(unit.kind)) continue
+      if ((unit.kind === 'user' || unit.kind === 'answer') && (normalizedScope === 'all' || unit.atoms.some((atom) => atomMatchesSearchScope(atom.kind, normalizedScope)))) {
+        const anchor = unit.atoms[unit.atoms.length - 1] ?? unit.atoms[0]
+        if (anchor) addMatches(record, unit, anchor.id, anchor.sourceRef.blockIndex, 'message', unit.effectiveText, anchor.sourceRef.entryId)
+        continue
+      }
       for (const atom of unit.atoms) {
         if (!atomMatchesSearchScope(atom.kind, normalizedScope)) continue
         if (atom.toolName) addMatches(record, unit, atom.id, atom.sourceRef.blockIndex, 'tool_name', atom.toolName, atom.sourceRef.entryId)

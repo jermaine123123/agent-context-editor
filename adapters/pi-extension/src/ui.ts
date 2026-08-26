@@ -23,13 +23,27 @@ type LoadRecords = () => ContextRecord[];
 type LoadSnapshot = () => ContextEditorSnapshot;
 type Mutate = (input: { baseRevision: string; action: "hide" | "restore" | "reset"; unitIds?: readonly string[] }) => ContextMutationResult;
 type Undo = (baseRevision: string) => ContextMutationResult;
+type ReplacementMutation = (input: { baseRevision: string; unitId: string; text: string }) => ContextMutationResult | Promise<ContextMutationResult>;
+type ReplacementUnitMutation = (input: { baseRevision: string; unitId: string }) => ContextMutationResult | Promise<ContextMutationResult>;
+
+export interface ContextEditorUiState {
+  query: string;
+  searchScope: ContextSearchScope;
+  selectedUnitId?: string;
+  showOriginal: boolean;
+}
+
+export type ContextEditorExit =
+  | { kind: "close" }
+  | { kind: "edit"; unitId: string; title: string; text: string; originalText: string; baseRevision: string; uiState: ContextEditorUiState };
 type PreviewContext = (input: { baseRevision: string; action: "exclude" | "restore"; unitIds?: readonly string[] }) => ContextProjectionPreview | Promise<ContextProjectionPreview>;
 type CommitContext = (input: { baseRevision: string; action: "exclude" | "restore"; unitIds?: readonly string[] }) => ContextMutationResult | Promise<ContextMutationResult>;
 type Notify = (message: string, type?: "info" | "warning" | "error") => void;
 type Confirm = (message: string) => Promise<boolean>;
 type PendingConfirmation =
   | { kind: "projection"; action: "exclude" | "restore"; unitIds: string[]; preview: ContextProjectionPreview; message: string }
-  | { kind: "reset"; message: string };
+  | { kind: "reset"; message: string }
+  | { kind: "replacement-restore"; unitId: string; message: string };
 
 const UNIT_KINDS = CONTEXT_EDITOR_UNIT_KINDS;
 
@@ -50,9 +64,12 @@ export class ContextEditorComponent implements Component {
   private readonly undoMutation: Undo;
   private readonly persistPrefs: PersistPrefs;
   private readonly notify: Notify;
-  private readonly done: () => void;
+  private readonly done: (exit?: ContextEditorExit) => void;
   private readonly previewContext?: PreviewContext;
   private readonly commitContext?: CommitContext;
+  private readonly commitReplacement?: ReplacementMutation;
+  private readonly restoreReplacement?: ReplacementUnitMutation;
+  private readonly undoReplacement?: ReplacementUnitMutation;
   private projectionAvailable: boolean;
   private readonly text: PiText;
 
@@ -70,6 +87,7 @@ export class ContextEditorComponent implements Component {
   private searchMode = false;
   private helpMode = false;
   private searchScope: ContextSearchScope = "dialogue";
+  private showOriginal = false;
   private matches: ContextSearchOccurrence[] = [];
   private matchIndex = -1;
   private lastRenderWidth = 0;
@@ -94,9 +112,13 @@ export class ContextEditorComponent implements Component {
       confirm?: Confirm;
       previewContext?: PreviewContext;
       commitContext?: CommitContext;
+      commitReplacement?: ReplacementMutation;
+      restoreReplacement?: ReplacementUnitMutation;
+      undoReplacement?: ReplacementUnitMutation;
+      initialUiState?: Partial<ContextEditorUiState>;
       locale?: PiLocale;
     },
-    done: () => void,
+    done: (exit?: ContextEditorExit) => void,
   ) {
     this.tui = tui;
     this.theme = theme;
@@ -105,8 +127,14 @@ export class ContextEditorComponent implements Component {
     this.canUndo = snapshot.canUndo;
     this.previewContext = deps.previewContext;
     this.commitContext = deps.commitContext;
+    this.commitReplacement = deps.commitReplacement;
+    this.restoreReplacement = deps.restoreReplacement;
+    this.undoReplacement = deps.undoReplacement;
     this.projectionAvailable = snapshot.projectionAvailable !== false && !!deps.previewContext && !!deps.commitContext;
     this.prefs = { ...prefs, enabledUnitKinds: [...prefs.enabledUnitKinds] };
+    this.query = deps.initialUiState?.query ?? "";
+    this.searchScope = deps.initialUiState?.searchScope ?? "dialogue";
+    this.showOriginal = deps.initialUiState?.showOriginal ?? false;
     this.loadRecords = deps.loadRecords;
     this.loadSnapshot = deps.loadSnapshot;
     this.mutate = deps.mutate;
@@ -115,6 +143,12 @@ export class ContextEditorComponent implements Component {
     this.notify = deps.notify;
     this.done = done;
     this.text = createPiText(deps.locale ?? detectPiLocale());
+    const selectedUnitId = deps.initialUiState?.selectedUnitId;
+    if (selectedUnitId) {
+      const index = this.flatUnits().findIndex(({ unit }) => unit.id === selectedUnitId);
+      if (index >= 0) this.selectedIndex = index;
+    }
+    this.matches = this.query.trim() ? this.searchOccurrencesForPrefs() : [];
   }
 
   private flatUnits(): FlatUnit[] {
@@ -149,13 +183,14 @@ export class ContextEditorComponent implements Component {
     return `${text.slice(0, start)}${this.theme.fg("warning", text.slice(start, safeEnd))}${text.slice(safeEnd)}`;
   }
 
+  private originalText(unit: ContextEditableUnit): string {
+    return unit.atoms.map((atom) => atom.text).join("\n");
+  }
+
   private contentText(unit: ContextEditableUnit, activeHit?: ContextSearchOccurrence): string {
-    return unit.atoms.map((atom) => {
-      if (activeHit && activeHit.field !== "tool_name" && activeHit.atomId === atom.id) {
-        return this.highlightText(atom.text, activeHit.start, activeHit.end);
-      }
-      return atom.text;
-    }).filter(Boolean).join("\n");
+    const text = this.showOriginal && this.currentUnit()?.unit.id === unit.id ? this.originalText(unit) : unit.effectiveText;
+    if (!activeHit || this.showOriginal || activeHit.field === "tool_name" || activeHit.unitId !== unit.id) return text;
+    return this.highlightText(text, activeHit.start, activeHit.end);
   }
 
   private unitIsHidden(unit: ContextEditableUnit): boolean {
@@ -279,12 +314,8 @@ export class ContextEditorComponent implements Component {
 
   private bodyLineIndexForHit(unit: ContextEditableUnit, hit: ContextSearchOccurrence, width: number): number {
     if (hit.field === "tool_name") return 0;
-    const atomIndex = unit.atoms.findIndex((atom) => atom.id === hit.atomId);
-    if (atomIndex < 0) return 0;
-    const preceding = unit.atoms.slice(0, atomIndex).map((atom) => atom.text).filter(Boolean).join("\n");
-    const target = unit.atoms[atomIndex]?.text ?? "";
-    const prefix = preceding ? `${preceding}\n${target.slice(0, hit.start)}` : target.slice(0, hit.start);
-    return Math.max(0, wrapTextWithAnsi(prefix || " ", Math.max(8, width - 8)).length - 1);
+    const text = unit.effectiveText;
+    return Math.max(0, wrapTextWithAnsi(text.slice(0, hit.start) || " ", Math.max(8, width - 8)).length - 1);
   }
 
   private positionSearchHit(width: number): void {
@@ -356,12 +387,14 @@ export class ContextEditorComponent implements Component {
   }
 
   private refreshData(): void {
+    const focusId = this.currentUnit()?.unit.id;
     const snapshot = this.loadSnapshot();
     this.records = this.loadRecords();
     this.revision = snapshot.revision;
     this.canUndo = snapshot.canUndo;
     this.projectionAvailable = snapshot.projectionAvailable !== false && !!this.previewContext && !!this.commitContext;
-    this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.flatUnits().length - 1));
+    const focusedIndex = focusId ? this.flatUnits().findIndex(({ unit }) => unit.id === focusId) : -1;
+    this.selectedIndex = focusedIndex >= 0 ? focusedIndex : Math.min(this.selectedIndex, Math.max(0, this.flatUnits().length - 1));
     this.manualScroll = false;
     this.resetSelection();
     this.matches = this.query.trim() ? this.searchOccurrencesForPrefs() : [];
@@ -371,13 +404,15 @@ export class ContextEditorComponent implements Component {
   }
 
   private syncExternalState(): boolean {
+    const focusId = this.currentUnit()?.unit.id;
     const snapshot = this.loadSnapshot();
     if (snapshot.revision === this.revision) return false;
     this.records = this.loadRecords();
     this.revision = snapshot.revision;
     this.canUndo = snapshot.canUndo;
     this.projectionAvailable = snapshot.projectionAvailable !== false && !!this.previewContext && !!this.commitContext;
-    this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.flatUnits().length - 1));
+    const focusedIndex = focusId ? this.flatUnits().findIndex(({ unit }) => unit.id === focusId) : -1;
+    this.selectedIndex = focusedIndex >= 0 ? focusedIndex : Math.min(this.selectedIndex, Math.max(0, this.flatUnits().length - 1));
     this.scrollOffset = 0;
     this.manualScroll = false;
     this.resetSelection();
@@ -388,6 +423,62 @@ export class ContextEditorComponent implements Component {
     return true;
   }
 
+  private uiState(): ContextEditorUiState {
+    return { query: this.query, searchScope: this.searchScope, selectedUnitId: this.currentUnit()?.unit.id, showOriginal: this.showOriginal };
+  }
+
+  private requestEdit(): void {
+    if (!this.commitReplacement) { this.notify(this.text.contextUnavailableAction(), "warning"); return; }
+    const selected = this.selectedUnitIds();
+    if (selected.length > 1) { this.notify("Select exactly one User or Answer unit to edit.", "warning"); return; }
+    const item = selected.length === 1 ? this.flatUnits().find(({ unit }) => unit.id === selected[0]) : this.currentUnit();
+    if (!item) return;
+    if (!item.unit.replacementSupported || (item.unit.kind !== "user" && item.unit.kind !== "answer")) {
+      this.notify(this.text.operationFailed(item.unit.replacementDisabledReason ?? "unsupported-unit-kind"), "warning");
+      return;
+    }
+    this.done({ kind: "edit", unitId: item.unit.id, title: "Edit " + this.text.unitKind(item.unit.kind), text: item.unit.effectiveText, originalText: this.originalText(item.unit), baseRevision: this.revision, uiState: { ...this.uiState(), selectedUnitId: item.unit.id } });
+  }
+
+  private beginRestoreReplacement(): void {
+    if (this.operationInFlight || this.pendingConfirmation || !this.restoreReplacement) return;
+    const selected = this.selectedUnitIds();
+    if (selected.length > 1) { this.notify("Select exactly one User or Answer unit to restore.", "warning"); return; }
+    const item = selected.length === 1 ? this.flatUnits().find(({ unit }) => unit.id === selected[0]) : this.currentUnit();
+    if (!item || !item.unit.canRestoreReplacement) return;
+    this.pendingConfirmation = { kind: "replacement-restore", unitId: item.unit.id, message: "Restore this unit to its canonical text? The replacement history remains undoable." };
+    this.tui.requestRender();
+  }
+
+  private async commitPendingReplacementRestore(pending: Extract<PendingConfirmation, { kind: "replacement-restore" }>): Promise<void> {
+    if (this.operationInFlight || !this.restoreReplacement) return;
+    this.operationInFlight = true;
+    try {
+      const result = await this.restoreReplacement({ baseRevision: this.revision, unitId: pending.unitId });
+      if (!result.ok || result.conflict) { this.notify(this.text.sidecarChanged(), "warning"); this.refreshData(); return; }
+      this.refreshData();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.notify(message === "AGENT_RUNTIME_BUSY" ? this.text.busy() : this.text.operationFailed(message), "warning");
+    } finally { this.operationInFlight = false; this.tui.requestRender(); }
+  }
+
+  private async undoCurrentReplacement(): Promise<void> {
+    if (this.operationInFlight || !this.undoReplacement) return;
+    const selected = this.selectedUnitIds();
+    if (selected.length > 1) { this.notify("Select exactly one User or Answer unit to undo.", "warning"); return; }
+    const item = selected.length === 1 ? this.flatUnits().find(({ unit }) => unit.id === selected[0]) : this.currentUnit();
+    if (!item || !item.unit.canUndoReplacement) return;
+    this.operationInFlight = true;
+    try {
+      const result = await this.undoReplacement({ baseRevision: this.revision, unitId: item.unit.id });
+      if (!result.ok || result.conflict) { this.notify(this.text.sidecarChanged(), "warning"); this.refreshData(); return; }
+      this.refreshData();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.notify(message === "AGENT_RUNTIME_BUSY" ? this.text.busy() : this.text.operationFailed(message), "warning");
+    } finally { this.operationInFlight = false; this.tui.requestRender(); }
+  }
   private async beginContextProjection(): Promise<void> {
     if (this.operationInFlight || this.pendingConfirmation) return;
     if (!this.projectionAvailable || !this.previewContext || !this.commitContext) {
@@ -476,6 +567,10 @@ export class ContextEditorComponent implements Component {
     if (isCancel || !pending) return;
     if (pending.kind === "reset") {
       this.applyMutation("reset");
+      return;
+    }
+    if (pending.kind === "replacement-restore") {
+      void this.commitPendingReplacementRestore(pending);
       return;
     }
     void this.commitPendingProjection(pending);
@@ -610,7 +705,9 @@ export class ContextEditorComponent implements Component {
     if (!pending) return [];
     const title = pending.kind === "projection"
       ? this.text.contextConfirmTitle()
-      : this.text.restoreAllConfirmTitle();
+      : pending.kind === "reset"
+        ? this.text.restoreAllConfirmTitle()
+        : "Restore original text";
     const hint = this.text.contextConfirmHint();
     const body = wrapTextWithAnsi(pending.message, Math.max(8, width - 4));
     return [
@@ -639,11 +736,11 @@ export class ContextEditorComponent implements Component {
       return;
     }
     if (matchesKey(data, "ctrl+c") || matchesKey(data, "escape")) {
-      this.done();
+      this.done({ kind: "close" });
       return;
     }
     if (data === "q" || data === "Q") {
-      this.done();
+      this.done({ kind: "close" });
       return;
     }
     if (data === "/") {
@@ -703,6 +800,10 @@ export class ContextEditorComponent implements Component {
       this.tui.requestRender();
       return;
     }
+    if (data === "e") { this.requestEdit(); return; }
+    if (data === "E") { this.beginRestoreReplacement(); return; }
+    if (data === "z") { void this.undoCurrentReplacement(); return; }
+    if (data === "o") { this.showOriginal = !this.showOriginal; this.tui.requestRender(); return; }
     if (data === "h" || data === "H") { this.applyMutation("hide"); return; }
     if (data === "x" || data === "X") { void this.beginContextProjection(); return; }
     if (data === "r") { this.applyMutation("restore"); return; }

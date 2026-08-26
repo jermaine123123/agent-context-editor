@@ -70,5 +70,30 @@ export function createHarnessText(locale) {
     running: zh ? 'Agent 运行中：仅可读取和搜索' : 'Agent running: only reading and searching are available',
     loading: zh ? '正在读取完整会话…' : 'Reading the complete session…',
     noRecords: zh ? '没有符合当前筛选的可编辑记录。' : 'No editable records match the current filters.',
+    edit: zh ? '编辑' : 'Edit',
+    edited: zh ? '已编辑' : 'Edited',
+    restoreOriginal: zh ? '恢复原文' : 'Restore original',
+    undoReplacement: zh ? '撤销本次编辑' : 'Undo this edit',
+    compareOriginal: zh ? '对照原文' : 'Compare original',
+    showEffective: zh ? '显示编辑文本' : 'Show edited text',
+    originalText: zh ? '原文' : 'Original text',
+    editTitle: kind => zh ? `编辑${unitKind(kind)}` : `Edit ${unitKind(kind)}`,
+    cancel: zh ? '取消' : 'Cancel',
+    save: zh ? '保存' : 'Save',
+    replacementEmpty: zh ? '编辑内容不能为空或全为空白。' : 'Replacement text cannot be blank.',
+    replacementConflict: zh ? '会话已发生变化，已丢弃过期编辑并刷新。' : 'The session changed; the stale edit was discarded and the view refreshed.',
+    replacementUnavailable: reason => {
+      const labels = {
+        'structured-user-content': zh ? '用户消息包含结构化内容' : 'the user message contains structured content',
+        'signed-content': zh ? '回答包含签名内容' : 'the answer contains signed content',
+        'projection-unavailable': zh ? 'Provider 投影暂不可用' : 'provider projection is unavailable',
+        'unsupported-unit-kind': zh ? '该单元类型不支持编辑' : 'this unit type does not support editing',
+        'invalid-target': zh ? '原文已变化，无法安全编辑' : 'the canonical text changed and cannot be edited safely',
+      }
+      return zh ? `不可编辑：${labels[reason] ?? '内容类型不支持'}` : `Not editable: ${labels[reason] ?? 'this content is not supported'}`
+    },
+    replacementDisabled: zh ? '手动上下文编辑尚未启用' : 'Manual context editing is not enabled',
+    restoreReplacementConfirm: zh ? '确认恢复该单元的原文吗？' : 'Restore this unit to its original text?',
+    editFailed: error => zh ? `编辑失败：${error}` : `Edit failed: ${error}`,
   }
 }

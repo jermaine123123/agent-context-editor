@@ -11,23 +11,31 @@ import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { z } from 'zod'
 import { foldSurface } from '@deepseek-ai/dsh-session'
-import { selectProjectionTargets } from './core-runtime.js'
+import { reduceReplacementStates, selectProjectionTargets } from './core-runtime.js'
 import {
   buildProjection,
   buildViewEvent,
+  composeNativeRoot,
   inverseChanges,
   latestUndoableEvent,
+  normalizeReplacementEvents,
   normalizeViewEvents,
+  projectRecords,
   recordSnapshot,
   sameSessionLifecycle,
   searchRecords,
   sessionIdentity,
+  CONTEXT_PROJECTION_OWNER,
 } from './core.js'
 import { PACKAGE_NAME } from './typert.js'
 
 export const inject = ['storageDomain', 'sessionPersistence', 'sessions', 'agents']
 
 const viewStateSchema = z.enum(['show', 'collapse', 'hide'])
+function asObject(value) {
+  return value !== null && typeof value === 'object' ? value : {}
+}
+
 const nonNegativeSafeInteger = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
 const viewChangeSchema = z.object({
   atomId: z.string().min(1),
@@ -44,6 +52,24 @@ const viewEventSchema = z.object({
   changes: z.array(viewChangeSchema).min(1),
   undoOf: z.string().optional(),
 })
+const replacementEventSchema = z.object({
+  schemaVersion: z.literal(1),
+  type: z.literal('replacement'),
+  action: z.enum(['replace', 'restore', 'undo']),
+  eventId: z.string().min(1),
+  unitId: z.string().min(1),
+  unitKind: z.enum(['user', 'answer']),
+  atomRefs: z.array(z.object({
+    atomId: z.string().min(1),
+    sourceRef: z.object({ entryId: z.string(), blockIndex: nonNegativeSafeInteger }),
+    fingerprint: z.string().min(1),
+  })).optional(),
+  beforeText: z.string().nullable().optional(),
+  afterText: z.string().nullable().optional(),
+  undoOf: z.string().min(1).optional(),
+  baseRevision: z.union([z.string(), z.number()]),
+  createdAt: z.string(),
+}).passthrough()
 const sidecarRowSchema = z.object({
   session: z.object({
     createdAt: nonNegativeSafeInteger,
@@ -52,6 +78,7 @@ const sidecarRowSchema = z.object({
   schemaVersion: z.literal(1),
   storageVersion: z.literal(1),
   events: z.array(viewEventSchema),
+  replacementEvents: z.array(replacementEventSchema).optional(),
 })
 
 export const contextEditorDomainSpec = defineDomain({
@@ -123,6 +150,20 @@ function cloneReplacementMessage(original, excludedBlockIndices, replacementId) 
   copy.id = replacementId ?? globalThis.crypto?.randomUUID?.() ?? randomId('context-message')
   if (copy.role === 'assistant' && copy.source?.kind === 'model') {
     const source = copy.source
+    const { replayState: _replayState, ...safeSource } = source
+    copy.source = safeSource
+  }
+  return copy
+}
+
+function cloneComposedMessage(composed, excludedAtomIds, replacementId) {
+  const copy = structuredClone(composed.message)
+  copy.content = composed.pairs
+    .filter(pair => !pair.atomId || !excludedAtomIds.has(pair.atomId))
+    .map(pair => pair.block)
+  copy.id = replacementId ?? globalThis.crypto?.randomUUID?.() ?? randomId('context-message')
+  if (copy.role === 'assistant' && copy.source?.kind === 'model') {
+    const source = asObject(copy.source)
     const { replayState: _replayState, ...safeSource } = source
     copy.source = safeSource
   }
@@ -201,8 +242,17 @@ function buildNativeContextChanges(projection, action, request) {
     if (sameIdSet(currentExcluded, nextExcluded)) continue
 
     const overlay = projection.contextOverlays?.get(root)
+    const composed = composeNativeRoot(projection, root)
+    if (!composed.message) throw new Error('CONTEXT_EDITOR_CONTEXT_UNAVAILABLE:root-' + root)
+    const replacementId = request?.operationId === undefined
+      ? undefined
+      : `context-${String(request.operationId)}-${root}`
     if (nextExcluded.size === 0) {
-      if (overlay !== undefined) changes.push({ rootEventSeq: root, mode: 'clear' })
+      const original = messageForRoot(sourceEvents.find(event => Number(event?.seq) === root) ?? sourceEvents[root])
+      if (overlay !== undefined) {
+        if (sameJson(composed.message, original)) changes.push({ rootEventSeq: root, mode: 'clear' })
+        else changes.push({ rootEventSeq: root, mode: 'replace', message: cloneComposedMessage(composed, nextExcluded, replacementId) })
+      }
       continue
     }
     if (nextExcluded.size >= atoms.length) {
@@ -211,19 +261,7 @@ function buildNativeContextChanges(projection, action, request) {
       continue
     }
 
-    const original = messageForRoot(sourceEvents.find(event => Number(event?.seq) === root) ?? sourceEvents[root])
-    if (original === undefined || !Array.isArray(original.content)) {
-      throw new Error('CONTEXT_EDITOR_CONTEXT_UNAVAILABLE:root-' + root)
-    }
-    const excludedBlockIndices = new Set(
-      atoms
-        .filter(atom => nextExcluded.has(atom.id))
-        .map(atom => atom.sourceRef.blockIndex),
-    )
-    const replacementId = request?.operationId === undefined
-      ? undefined
-      : `context-${String(request.operationId)}-${root}`
-    const message = cloneReplacementMessage(original, excludedBlockIndices, replacementId)
+    const message = cloneComposedMessage(composed, nextExcluded, replacementId)
     if (message.content.length === 0) {
       changes.push({ rootEventSeq: root, mode: 'remove' })
     } else {
@@ -253,6 +291,41 @@ function buildNativeContextChanges(projection, action, request) {
     },
     beforeExcludedByRoot,
   }
+}
+
+function targetUnit(projection, unitId) {
+  for (const record of projection.records ?? []) {
+    const unit = (record.units ?? []).find(candidate => candidate.id === unitId)
+    if (unit) return { record, unit }
+  }
+  return undefined
+}
+
+function buildNativeReplacementChanges(projection, event, request = {}) {
+  const target = targetUnit(projection, event.unitId)
+  if (!target) throw new Error('CONTEXT_EDITOR_REPLACEMENT_TARGET_NOT_FOUND')
+  const baseRecords = projectRecords(projection.atoms, projection.states, new Map())
+  const activeEvents = [...(projection.activeReplacementEvents ?? []).filter(value => value.eventId !== event.eventId), event]
+  const virtualStates = reduceReplacementStates(baseRecords.flatMap(record => record.units ?? []), activeEvents, true)
+  const virtualRecords = projectRecords(projection.atoms, projection.states, projection.projectionStates, virtualStates)
+  const virtualProjection = { ...projection, records: virtualRecords, replacementStates: virtualStates }
+  const roots = new Set(target.unit.atoms.map(atom => Number(atom.sourceRef?.entryId)).filter(Number.isSafeInteger))
+  const changes = []
+  for (const root of roots) {
+    const rootAtoms = projection.atoms.filter(atom => Number(atom.sourceRef?.entryId) === root)
+    const excluded = new Set(rootAtoms.filter(atom => projection.projectionStates?.get(atom.id) === 'exclude').map(atom => atom.id))
+    const composed = composeNativeRoot(virtualProjection, root, virtualStates, virtualRecords)
+    if (!composed.message) throw new Error('CONTEXT_EDITOR_CONTEXT_UNAVAILABLE:root-' + root)
+    if (excluded.size >= rootAtoms.length) {
+      changes.push({ rootEventSeq: root, mode: 'remove' })
+      continue
+    }
+    const replacementId = request.operationId === undefined ? undefined : `context-${String(request.operationId)}-${root}`
+    const message = cloneComposedMessage(composed, excluded, replacementId)
+    if (message.content.length === 0) changes.push({ rootEventSeq: root, mode: 'remove' })
+    else changes.push({ rootEventSeq: root, mode: 'replace', message })
+  }
+  return { changes, virtualStates, virtualRecords }
 }
 
 async function withSourceAgent(ctx, sessionId, operation) {
@@ -312,6 +385,7 @@ export class ContextEditorHost extends TypertRemoteService {
         schemaVersion: 1,
         storageVersion: 1,
         events: normalizeViewEvents(stored.events),
+        replacementEvents: normalizeReplacementEvents(stored.replacementEvents),
       }
     }
     // A reused Session id must never inherit another lifecycle's hidden state.
@@ -323,6 +397,7 @@ export class ContextEditorHost extends TypertRemoteService {
       schemaVersion: 1,
       storageVersion: 1,
       events: [],
+      replacementEvents: [],
     }
   }
 
@@ -365,6 +440,12 @@ export class ContextEditorHost extends TypertRemoteService {
           viewState: unit.viewState,
           projectionState: unit.projectionState,
           mutable: unit.mutable,
+          effectiveText: unit.effectiveText,
+          replacementState: unit.replacementState,
+          replacementSupported: unit.replacementSupported,
+          ...(unit.replacementDisabledReason ? { replacementDisabledReason: unit.replacementDisabledReason } : {}),
+          canRestoreReplacement: unit.canRestoreReplacement,
+          canUndoReplacement: unit.canUndoReplacement,
         })),
         ...(record.entryId === undefined ? {} : { entryId: record.entryId }),
         ...(record.entryIds?.length ? { entryIds: record.entryIds } : {}),
@@ -380,9 +461,11 @@ export class ContextEditorHost extends TypertRemoteService {
         viewMutation: !running,
         undo: !running,
         persistence: true,
-        // rc.8 Host/Browser composition, regression coverage, and a real
-        // DeepSeek API smoke request have passed; advertise native projection.
+        // Native exclusion is enabled for rc.8. Replacement remains a gated
+        // candidate until the independent install and real-provider smoke
+        // checks are recorded for this exact build.
         contextExclusion: true,
+        contextReplacement: true,
       },
     }
   }
@@ -625,6 +708,79 @@ export class ContextEditorHost extends TypertRemoteService {
     })
   }
 
+  async commitReplacementMutation(request, action) {
+    const sessionId = requestSessionId(request)
+    return this.enqueue(sessionId, async () => {
+      if (isBusySession(this.ctx, sessionId)) throw new Error('CONTEXT_EDITOR_BUSY')
+      const operationId = String(request?.operationId ?? '')
+      if (!operationId) throw new Error('CONTEXT_EDITOR_OPERATION_ID_REQUIRED')
+      const expectedRevision = String(request?.baseRevision ?? '')
+      if (!expectedRevision) throw new Error('CONTEXT_EDITOR_REVISION_REQUIRED')
+      const initial = await this.readProjection(sessionId)
+      if (expectedRevision !== initial.revision) return { ok: false, conflict: true, operationId, snapshot: this.snapshotOf(initial, false) }
+      const target = targetUnit(initial, String(request?.unitId ?? ''))
+      if (!target) throw new Error('CONTEXT_EDITOR_REPLACEMENT_TARGET_NOT_FOUND')
+      if (!target.unit.replacementSupported || target.unit.replacementState === 'unavailable') {
+        throw new Error(`CONTEXT_EDITOR_REPLACEMENT_UNSUPPORTED:${target.unit.replacementDisabledReason ?? 'invalid-target'}`)
+      }
+      const currentState = initial.replacementStates.get(target.unit.id)
+      const row = this.rowFor(initial.identity)
+      const existing = row.replacementEvents.find(event => event.eventId === operationId)
+      let event = existing
+      if (event !== undefined && (event.unitId !== target.unit.id || event.action !== action)) throw new Error('CONTEXT_EDITOR_OPERATION_REUSED')
+      if (event === undefined && action === 'replace') {
+        const text = String(request?.text ?? '')
+        if (text.trim().length === 0) throw new Error('CONTEXT_EDITOR_REPLACEMENT_EMPTY')
+        if (text === target.unit.effectiveText) return success(this.snapshotOf(initial, false), { operationId })
+        event = { schemaVersion: 1, type: 'replacement', action: 'replace', eventId: operationId, unitId: target.unit.id, unitKind: target.unit.kind,
+          atomRefs: target.unit.atoms.map(atom => ({ atomId: atom.id, sourceRef: atom.sourceRef, fingerprint: atom.fingerprint })),
+          beforeText: currentState?.replacementText ?? null, afterText: text, baseRevision: initial.revision, createdAt: new Date().toISOString() }
+      }
+      if (event === undefined && action === 'restore') {
+        const beforeText = currentState?.replacementText ?? null
+        if (beforeText === null) return success(this.snapshotOf(initial, false), { operationId })
+        event = { schemaVersion: 1, type: 'replacement', action: 'restore', eventId: operationId, unitId: target.unit.id, unitKind: target.unit.kind,
+          atomRefs: target.unit.atoms.map(atom => ({ atomId: atom.id, sourceRef: atom.sourceRef, fingerprint: atom.fingerprint })),
+          beforeText, afterText: null, baseRevision: initial.revision, createdAt: new Date().toISOString() }
+      }
+      if (event === undefined && action === 'undo') {
+        const undoOf = currentState?.activeEventId
+        if (!undoOf || !target.unit.canUndoReplacement) return success(this.snapshotOf(initial, false), { operationId })
+        event = { schemaVersion: 1, type: 'replacement', action: 'undo', eventId: operationId, unitId: target.unit.id, unitKind: target.unit.kind,
+          undoOf, baseRevision: initial.revision, createdAt: new Date().toISOString() }
+      }
+      if (event === undefined) throw new Error('CONTEXT_EDITOR_REPLACEMENT_ACTION_INVALID')
+      const replacementEvents = row.replacementEvents.some(value => value.eventId === event.eventId) ? row.replacementEvents : [...row.replacementEvents, event]
+      await this.table.put(sessionId, { session: row.session, schemaVersion: 1, storageVersion: 1, events: row.events, replacementEvents })
+      return withSourceAgent(this.ctx, sessionId, async agent => {
+        const session = agent.session
+        const sourceProjection = this.projectionFromSession(session)
+        const priorEvent = (session.events ?? []).find(value => value?.type === 'context/projection' && value?.data?.owner === CONTEXT_PROJECTION_OWNER && value?.data?.operationId === operationId)
+        if (priorEvent !== undefined) {
+          await this.ctx.sessions.flush(session)
+          this.searchCache.clear()
+          const next = this.projectionFromSession(session)
+          return success(this.snapshotOf(next, false), { operationId, eventId: String(priorEvent.seq) })
+        }
+        if (sourceProjection.revision !== initial.revision) return { ok: false, conflict: true, operationId, snapshot: this.snapshotOf(sourceProjection, false) }
+        const calculated = buildNativeReplacementChanges(sourceProjection, event, { operationId })
+        if (calculated.changes.length === 0) throw new Error('CONTEXT_EDITOR_REPLACEMENT_ALIGNMENT_FAILED')
+        const baseSeq = session.events.at(-1)?.seq ?? -1
+        if (baseSeq < 0) throw new Error('CONTEXT_EDITOR_SESSION_EMPTY')
+        const data = { schemaVersion: 1, owner: CONTEXT_PROJECTION_OWNER, operationId, baseSeq, changes: calculated.changes }
+        const nativeEvent = typeof session.appendContextProjection === 'function' ? session.appendContextProjection(data) : session.append('context/projection', data)
+        await this.ctx.sessions.flush(session)
+        this.searchCache.clear()
+        const next = this.projectionFromSession(session)
+        return success(this.snapshotOf(next, false), { operationId, eventId: String(nativeEvent.seq) })
+      })
+    })
+  }
+
+  async commitReplacement(request) { return this.commitReplacementMutation(request, 'replace') }
+  async restoreReplacement(request) { return this.commitReplacementMutation(request, 'restore') }
+  async undoReplacement(request) { return this.commitReplacementMutation(request, 'undo') }
+
   async commitView(request) {
     const sessionId = requestSessionId(request)
     return this.enqueue(sessionId, async () => {
@@ -646,6 +802,7 @@ export class ContextEditorHost extends TypertRemoteService {
       const event = buildViewEvent({
         identity: latest.identity,
         sourceRevision: latest.sourceRevision,
+        baseRevision: latest.revision,
         events: latest.events,
         records: latest.records,
         states: latest.states,
@@ -663,6 +820,7 @@ export class ContextEditorHost extends TypertRemoteService {
         schemaVersion: 1,
         storageVersion: 1,
         events: [...latest.events, event],
+        replacementEvents: latest.replacementEvents ?? [],
       }
       await this.table.put(sessionId, nextRow)
       this.searchCache.clear()
@@ -702,6 +860,7 @@ export class ContextEditorHost extends TypertRemoteService {
         schemaVersion: 1,
         storageVersion: 1,
         events: [...latest.events, event],
+        replacementEvents: latest.replacementEvents ?? [],
       })
       this.searchCache.clear()
       const next = await this.readProjection(sessionId)

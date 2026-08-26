@@ -13,6 +13,9 @@ export const methods = Object.freeze([
   'commitContext',
   'commitView',
   'undoView',
+  'commitReplacement',
+  'restoreReplacement',
+  'undoReplacement',
 ])
 
 export const descriptors = Object.freeze(methods.map(method => {

@@ -1,12 +1,12 @@
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { stableFingerprint, type ContextProjectionEventV1 } from "./shared-core/index.js";
+import { stableFingerprint, type ContextProjectionEvent, type ContextProjectionEventV1 } from "./shared-core/index.js";
 
 export const PROJECTION_SIDECAR_SCHEMA_VERSION = 1 as const;
 
 export interface PiProjectionEnvelope {
   anchorEntryId: string;
-  event: ContextProjectionEventV1;
+  event: ContextProjectionEvent;
 }
 
 export interface PiContextProjectionSidecar {
@@ -28,18 +28,29 @@ function defaultDocument(sessionId: string): PiContextProjectionSidecar {
   return { schemaVersion: PROJECTION_SIDECAR_SCHEMA_VERSION, sessionId, events: [] };
 }
 
-function isProjectionEvent(value: unknown): value is ContextProjectionEventV1 {
+function isProjectionEvent(value: unknown): value is ContextProjectionEvent {
   if (!value || typeof value !== "object") return false;
   const row = value as Record<string, unknown>;
-  if (
-    row.version !== 1 ||
-    typeof row.transactionId !== "string" ||
-    typeof row.createdAt !== "string" ||
-    typeof row.baseRevision !== "string" ||
-    (row.action !== "exclude" && row.action !== "restore") ||
-    !Array.isArray(row.changes) ||
-    row.changes.length === 0
-  ) return false;
+  if (row.type === "replacement") {
+    if (row.schemaVersion !== 1 || typeof row.eventId !== "string" || typeof row.unitId !== "string" || typeof row.createdAt !== "string" || (typeof row.baseRevision !== "string" && typeof row.baseRevision !== "number")) return false;
+    if (row.action === "undo") return typeof row.undoOf === "string";
+    if (row.action !== "replace" && row.action !== "restore") return false;
+    if (row.unitKind !== "user" && row.unitKind !== "answer") return false;
+    if (!Array.isArray(row.atomRefs) || row.atomRefs.length === 0) return false;
+    if ((typeof row.beforeText !== "string" && row.beforeText !== null) || (typeof row.afterText !== "string" && row.afterText !== null)) return false;
+    if (row.action === "replace" && (typeof row.afterText !== "string" || row.afterText.trim().length === 0)) return false;
+    if (row.action === "restore" && (row.afterText !== null || typeof row.beforeText !== "string")) return false;
+    return row.atomRefs.every((candidate) => {
+      if (!candidate || typeof candidate !== "object") return false;
+      const ref = candidate as Record<string, unknown>;
+      const sourceRef = ref.sourceRef;
+      return typeof ref.atomId === "string" && typeof ref.fingerprint === "string" && !!sourceRef && typeof sourceRef === "object" &&
+        typeof (sourceRef as Record<string, unknown>).entryId === "string" && Number.isInteger((sourceRef as Record<string, unknown>).blockIndex);
+    });
+  }
+  if (row.version !== 1 || typeof row.transactionId !== "string" || typeof row.createdAt !== "string" ||
+    typeof row.baseRevision !== "string" || (row.action !== "exclude" && row.action !== "restore") ||
+    !Array.isArray(row.changes) || row.changes.length === 0) return false;
   return row.changes.every((candidate) => {
     if (!candidate || typeof candidate !== "object") return false;
     const change = candidate as Record<string, unknown>;
@@ -47,11 +58,9 @@ function isProjectionEvent(value: unknown): value is ContextProjectionEventV1 {
     if (!sourceRef || typeof sourceRef !== "object" ||
       typeof (sourceRef as Record<string, unknown>).entryId !== "string" ||
       !Number.isInteger((sourceRef as Record<string, unknown>).blockIndex)) return false;
-    return typeof change.atomId === "string" &&
-      typeof change.fingerprint === "string" &&
+    return typeof change.atomId === "string" && typeof change.fingerprint === "string" &&
       (change.before === "include" || change.before === "exclude") &&
-      (change.after === "include" || change.after === "exclude") &&
-      change.before !== change.after;
+      (change.after === "include" || change.after === "exclude") && change.before !== change.after;
   });
 }
 
@@ -159,7 +168,7 @@ export function appendProjectionSidecarEvent(
   sessionFile: string,
   sessionId: string,
   anchorEntryId: string,
-  event: ContextProjectionEventV1,
+  event: ContextProjectionEvent,
   expectedRevision: string,
 ): string {
   const path = projectionSidecarPath(sessionFile);
@@ -172,6 +181,6 @@ export function appendProjectionSidecarEvent(
       events: [...current.document.events, { anchorEntryId, event }],
     };
     writeDocument(path, next);
-    return event.transactionId;
+    return "type" in event && event.type === "replacement" ? event.eventId : (event as ContextProjectionEventV1).transactionId;
   });
 }

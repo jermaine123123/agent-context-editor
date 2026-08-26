@@ -1,5 +1,5 @@
 import { branchRevision, stableFingerprint } from './fingerprint.js'
-import { reduceProjectionStates, selectProjectionTargets, type ProjectionAtomState } from './projection.js'
+import { reduceProjectionStates, reduceReplacementStates, selectProjectionTargets, type ProjectionAtomState } from './projection.js'
 import { projectRecords } from './records.js'
 import { searchRecords } from './search.js'
 import {
@@ -20,7 +20,9 @@ import type {
   ContextSearchMatch,
   ContextSearchScope,
   ViewState,
+  ContextProjectionEvent,
   ContextProjectionEventV1,
+  ContextReplacementEventV1,
   ContextProjectionState,
 } from './types.js'
 
@@ -32,7 +34,7 @@ export interface ContextEditorAdapterSnapshot {
   revisionProbe: string
   /** V2 events stored outside the host session (for example a Pi sidecar). */
   viewEvents?: readonly ContextEditorViewEventV2[]
-  projectionEvents?: readonly ContextProjectionEventV1[]
+  projectionEvents?: readonly ContextProjectionEvent[]
   projectionAvailable?: boolean
   projectionError?: string
   projectionRevision?: string
@@ -43,7 +45,7 @@ export interface ContextEditorSessionAdapter {
   read(): ContextEditorAdapterSnapshot
   /** Persist a V2 event in host-specific storage. */
   appendViewEvent?(data: ContextEditorViewEventV2): string
-  appendProjectionEvent?(data: ContextProjectionEventV1): string
+  appendProjectionEvent?(data: ContextProjectionEvent): string
   /** @deprecated Use appendViewEvent. Kept for Pi Desktop and old adapters. */
   appendCustomEntry?(customType: typeof VIEW_EVENT_ENTRY_TYPE, data: ContextEditorViewEventV2): string
   isBusy(): boolean
@@ -73,6 +75,12 @@ function recordSnapshot(record: ContextRecord) {
       viewState: unit.viewState,
       projectionState: unit.projectionState,
       mutable: unit.mutable,
+      effectiveText: unit.effectiveText,
+      replacementState: unit.replacementState,
+      replacementSupported: unit.replacementSupported,
+      ...(unit.replacementDisabledReason ? { replacementDisabledReason: unit.replacementDisabledReason } : {}),
+      canRestoreReplacement: unit.canRestoreReplacement,
+      canUndoReplacement: unit.canUndoReplacement,
     })),
     ...(record.entryId ? { entryId: record.entryId } : {}),
     ...(record.entryIds?.length ? { entryIds: record.entryIds } : {}),
@@ -88,8 +96,9 @@ function currentState(adapter: ContextEditorSessionAdapter) {
   const projectionEvents = current.projectionEvents ?? []
   const seenProjection = new Set<string>()
   const projectionEventsUnique = projectionEvents.filter((event) => {
-    if (seenProjection.has(event.transactionId)) return false
-    seenProjection.add(event.transactionId)
+    const id = 'type' in event && event.type === 'replacement' ? event.eventId : (event as ContextProjectionEventV1).transactionId
+    if (seenProjection.has(id)) return false
+    seenProjection.add(id)
     return true
   })
   const sessionEvents = readViewEvents(current.entries)
@@ -102,12 +111,14 @@ function currentState(adapter: ContextEditorSessionAdapter) {
   const states = reduceViewStates(current.atoms, legacy, events)
   const projectionStates: Map<string, ProjectionAtomState> = current.projectionAvailable === false
     ? new Map(current.atoms.map((atom) => [atom.id, 'unavailable' as const]))
-    : reduceProjectionStates(current.atoms, projectionEventsUnique)
-  const records = projectRecords(current.atoms, states, projectionStates)
-  return { ...current, legacy, events, projectionEvents: projectionEventsUnique, states, projectionStates, records }
+    : reduceProjectionStates(current.atoms, projectionEventsUnique.filter((event): event is ContextProjectionEventV1 => !('type' in event)))
+  const baseRecords = projectRecords(current.atoms, states, projectionStates)
+  const replacementStates = reduceReplacementStates(baseRecords.flatMap((record) => record.units), projectionEventsUnique, current.projectionAvailable !== false)
+  const records = projectRecords(current.atoms, states, projectionStates, replacementStates)
+  return { ...current, legacy, events, projectionEvents: projectionEventsUnique, states, projectionStates, replacementStates, records }
 }
 
-function appendProjectionEvent(adapter: ContextEditorSessionAdapter, event: ContextProjectionEventV1): string {
+function appendProjectionEvent(adapter: ContextEditorSessionAdapter, event: ContextProjectionEvent): string {
   if (adapter.appendProjectionEvent) return adapter.appendProjectionEvent(event)
   throw new Error('CONTEXT_EDITOR_PERSISTENCE_UNSUPPORTED')
 }
@@ -154,6 +165,29 @@ function makeEvent(
 function enabledRecordKinds(raw: unknown): Set<ContextRecordKind> {
   const values = Array.isArray(raw) ? raw : ['user', 'ai', 'tool']
   return new Set(values.filter((value): value is ContextRecordKind => value === 'user' || value === 'ai' || value === 'tool'))
+}
+
+function replacementEventId(): string {
+  return `context-replacement-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+}
+
+function revisionMatches(input: string | number, current: string): boolean {
+  return String(input) === String(current)
+}
+
+function replacementTarget(state: ReturnType<typeof currentState>, unitId: string) {
+  for (const record of state.records) {
+    const unit = record.units.find((candidate) => candidate.id === unitId)
+    if (unit) return { record, unit, replacement: state.replacementStates.get(unit.id) }
+  }
+  return null
+}
+
+function assertReplacementTarget(target: ReturnType<typeof replacementTarget>): asserts target is NonNullable<ReturnType<typeof replacementTarget>> {
+  if (!target) throw new Error('CONTEXT_EDITOR_REPLACEMENT_TARGET_NOT_FOUND')
+  if (!target.unit.replacementSupported || target.unit.replacementState === 'unavailable') {
+    throw new Error(`CONTEXT_EDITOR_REPLACEMENT_UNSUPPORTED:${target.unit.replacementDisabledReason ?? 'invalid-target'}`)
+  }
 }
 
 export class ContextEditorService {
@@ -337,6 +371,112 @@ export class ContextEditorService {
       baseRevision: state.revision,
       action: input.action,
       changes,
+    }
+    const eventId = appendProjectionEvent(adapter, event)
+    this.searchCache.clear()
+    return { ok: true, eventId, snapshot: snapshotOf(currentState(adapter)) }
+  }
+
+  commitReplacement(
+    adapter: ContextEditorSessionAdapter,
+    input: { baseRevision: string | number; unitId: string; text: string },
+  ): { ok: boolean; conflict?: boolean; eventId?: string; snapshot: ContextEditorSnapshot } {
+    if (adapter.isBusy()) throw new Error('AGENT_RUNTIME_BUSY')
+    const state = currentState(adapter)
+    if (state.projectionAvailable === false) throw new Error(state.projectionError || 'CONTEXT_EDITOR_PROJECTION_UNAVAILABLE')
+    if (!revisionMatches(input.baseRevision, state.revision)) return { ok: false, conflict: true, snapshot: snapshotOf(currentState(adapter)) }
+    if (input.text.trim().length === 0) throw new Error('CONTEXT_EDITOR_REPLACEMENT_EMPTY')
+    const target = replacementTarget(state, input.unitId)
+    assertReplacementTarget(target)
+    if (input.text === target.unit.effectiveText) return { ok: true, snapshot: snapshotOf(currentState(adapter)) }
+    const beforeText = target.replacement?.replacementText ?? null
+    const atomRefs = target.unit.atoms.map((atom) => ({ atomId: atom.id, sourceRef: atom.sourceRef, fingerprint: atom.fingerprint }))
+    const latest = currentState(adapter)
+    if (latest.revision !== state.revision) return { ok: false, conflict: true, snapshot: snapshotOf(latest) }
+    const latestTarget = replacementTarget(latest, input.unitId)
+    assertReplacementTarget(latestTarget)
+    if (latestTarget.unit.atomIds.join('|') !== target.unit.atomIds.join('|') || (latestTarget.replacement?.replacementText ?? null) !== beforeText) {
+      return { ok: false, conflict: true, snapshot: snapshotOf(latest) }
+    }
+    const event: ContextReplacementEventV1 = {
+      schemaVersion: 1,
+      type: 'replacement',
+      action: 'replace',
+      eventId: replacementEventId(),
+      unitId: target.unit.id,
+      unitKind: target.unit.kind as 'user' | 'answer',
+      atomRefs,
+      beforeText,
+      afterText: input.text,
+      baseRevision: state.revision,
+      createdAt: new Date().toISOString(),
+    }
+    const eventId = appendProjectionEvent(adapter, event)
+    this.searchCache.clear()
+    return { ok: true, eventId, snapshot: snapshotOf(currentState(adapter)) }
+  }
+
+  restoreReplacement(
+    adapter: ContextEditorSessionAdapter,
+    input: { baseRevision: string | number; unitId: string },
+  ): { ok: boolean; conflict?: boolean; eventId?: string; snapshot: ContextEditorSnapshot } {
+    if (adapter.isBusy()) throw new Error('AGENT_RUNTIME_BUSY')
+    const state = currentState(adapter)
+    if (state.projectionAvailable === false) throw new Error(state.projectionError || 'CONTEXT_EDITOR_PROJECTION_UNAVAILABLE')
+    if (!revisionMatches(input.baseRevision, state.revision)) return { ok: false, conflict: true, snapshot: snapshotOf(currentState(adapter)) }
+    const target = replacementTarget(state, input.unitId)
+    assertReplacementTarget(target)
+    const beforeText = target.replacement?.replacementText ?? null
+    if (beforeText === null) return { ok: true, snapshot: snapshotOf(currentState(adapter)) }
+    const latest = currentState(adapter)
+    if (latest.revision !== state.revision) return { ok: false, conflict: true, snapshot: snapshotOf(latest) }
+    const latestTarget = replacementTarget(latest, input.unitId)
+    assertReplacementTarget(latestTarget)
+    if ((latestTarget.replacement?.replacementText ?? null) !== beforeText) return { ok: false, conflict: true, snapshot: snapshotOf(latest) }
+    const event: ContextReplacementEventV1 = {
+      schemaVersion: 1,
+      type: 'replacement',
+      action: 'restore',
+      eventId: replacementEventId(),
+      unitId: target.unit.id,
+      unitKind: target.unit.kind as 'user' | 'answer',
+      atomRefs: target.unit.atoms.map((atom) => ({ atomId: atom.id, sourceRef: atom.sourceRef, fingerprint: atom.fingerprint })),
+      beforeText,
+      afterText: null,
+      baseRevision: state.revision,
+      createdAt: new Date().toISOString(),
+    }
+    const eventId = appendProjectionEvent(adapter, event)
+    this.searchCache.clear()
+    return { ok: true, eventId, snapshot: snapshotOf(currentState(adapter)) }
+  }
+
+  undoReplacement(
+    adapter: ContextEditorSessionAdapter,
+    input: { baseRevision: string | number; unitId: string },
+  ): { ok: boolean; conflict?: boolean; eventId?: string; snapshot: ContextEditorSnapshot } {
+    if (adapter.isBusy()) throw new Error('AGENT_RUNTIME_BUSY')
+    const state = currentState(adapter)
+    if (state.projectionAvailable === false) throw new Error(state.projectionError || 'CONTEXT_EDITOR_PROJECTION_UNAVAILABLE')
+    if (!revisionMatches(input.baseRevision, state.revision)) return { ok: false, conflict: true, snapshot: snapshotOf(currentState(adapter)) }
+    const target = replacementTarget(state, input.unitId)
+    assertReplacementTarget(target)
+    const undoOf = target.replacement?.activeEventId
+    if (!undoOf || !target.unit.canUndoReplacement) return { ok: true, snapshot: snapshotOf(currentState(adapter)) }
+    const latest = currentState(adapter)
+    if (latest.revision !== state.revision) return { ok: false, conflict: true, snapshot: snapshotOf(latest) }
+    const latestTarget = replacementTarget(latest, input.unitId)
+    assertReplacementTarget(latestTarget)
+    if (latestTarget.replacement?.activeEventId !== undoOf) return { ok: false, conflict: true, snapshot: snapshotOf(latest) }
+    const event: ContextReplacementEventV1 = {
+      schemaVersion: 1,
+      type: 'replacement',
+      action: 'undo',
+      eventId: replacementEventId(),
+      unitId: target.unit.id,
+      undoOf,
+      baseRevision: state.revision,
+      createdAt: new Date().toISOString(),
     }
     const eventId = appendProjectionEvent(adapter, event)
     this.searchCache.clear()
