@@ -1,6 +1,7 @@
 # Agent Context Editor
 
 Agent Context Editor is a cross-agent plugin for manually excluding and editing AI conversation context. It also supports searching, filtering, selecting, hiding, restoring, and undoing conversation changes while preserving the original Session.
+
 中文说明: [README.zh-CN.md](README.zh-CN.md)
 ## Features
 
