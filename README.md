@@ -132,6 +132,8 @@ npm run verify
 
 `npm run verify` builds both adapters, runs TypeScript checks and automated tests, scans the packages, and verifies the release archives.
 
+Contributions and host compatibility reports are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). Please report security issues according to [SECURITY.md](SECURITY.md).
+
 ## Repository layout
 
 ```text

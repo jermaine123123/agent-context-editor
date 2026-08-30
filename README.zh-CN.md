@@ -131,6 +131,8 @@ npm run verify
 
 `npm run verify` 会构建两个适配器，执行 TypeScript 检查和自动化测试，扫描发布内容并校验发布包。
 
+欢迎提交贡献和宿主兼容性报告，具体请参阅 [CONTRIBUTING.md](CONTRIBUTING.md)。安全问题请按照 [SECURITY.md](SECURITY.md) 中的说明报告。
+
 ## 目录结构
 
 ```text
