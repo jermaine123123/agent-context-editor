@@ -2,7 +2,18 @@
 
 Agent Context Editor is a cross-agent plugin for manually excluding and editing AI conversation context. It also supports searching, filtering, selecting, hiding, restoring, and undoing conversation changes while preserving the original Session.
 
+It provides a consistent, reversible, and user-controlled context-management option across supported Agent hosts, complementing prompt steering and automatic context compaction rather than replacing them.
+
 中文说明: [README.zh-CN.md](README.zh-CN.md)
+
+## Usage guidance
+
+Long-running Agent sessions can suffer from **context rot**: as the context grows—especially when failed attempts, stale conclusions, and irrelevant Tool output accumulate—the model may become less reliable at finding and correctly applying important information even before the context window is full.
+
+For most tasks, prompt steering and automatic context compaction are usually sufficient. Manual context exclusion and editing are optional controls for cases where the automatic result is not what you want, rather than something users need to manage continuously. They can be useful when compaction drops details worth preserving or when failed attempts and irrelevant history occupy too much of the context.
+
+> **Prompt-cache impact:** Excluding or editing context changes the model-input prefix. Cached prompt content after the earliest changed position may no longer be reusable, so changes near the end of a Session usually affect less cached context than changes near the beginning. Exact behavior depends on the Agent host, model, and provider. The original Session remains preserved.
+
 ## Features
 
 - Manually exclude selected context and restore it later
