@@ -107,6 +107,10 @@ See the [v0.3.0 release notes](docs/release-notes-v0.3.0.md) for detailed change
 - Add AI-assisted Session cleanup and context suggestions
 - Add reversible summary generation and replacement
 
+### Areas for future exploration
+
+- Explore a per-prompt Conversation Context Router: before each request, evaluate how the current task relates to conversation history and assemble a minimal, dependency-safe working set. Routing would affect only the derived model input for that request, never rewrite the original Session, and remain previewable, explainable, overridable, with a full-context fallback.
+
 ## Development
 
 Requirements: Node.js 22.19 or later. Node 24 was used for the recorded local acceptance run.
