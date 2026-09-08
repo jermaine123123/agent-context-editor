@@ -1,5 +1,5 @@
 /* GENERATED FILE - rebuild with npm run build:pi. */
-/* Canonical Core source digest: ee78c652687b71d9efb93c4038276408e866257832c501196c843c75bea65b8a */
+/* Canonical Core source digest: ce8b3d794443b6b76592ad9832b45ef64ea483f4e4b1ab3f8fe911c717b6740f */
 import { decodeKittyPrintable, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -49,21 +49,43 @@ function stateForAtom(states, atom) {
 function reduceProjectionStates(atoms, events) {
 	const result = /* @__PURE__ */ new Map();
 	const byId = new Map(atoms.map((atom) => [atom.id, atom]));
+	const linkedByEvent = /* @__PURE__ */ new Map();
+	const ownerByAtom = /* @__PURE__ */ new Map();
 	for (const atom of atoms) result.set(atom.id, "include");
-	for (const event of events) for (const change of event.changes) {
+	const apply = (change, owner) => {
 		const atom = byId.get(change.atomId);
-		if (!atom) continue;
+		if (!atom) return;
 		if (atom.fingerprint !== change.fingerprint || atom.sourceRef.entryId !== change.sourceRef.entryId || atom.sourceRef.blockIndex !== change.sourceRef.blockIndex) {
 			result.set(atom.id, "unavailable");
-			continue;
+			return;
 		}
 		const current = result.get(atom.id) ?? "include";
-		if (current === "unavailable") continue;
+		if (current === "unavailable") return;
 		if (current !== change.before && current !== change.after) {
 			result.set(atom.id, "unavailable");
-			continue;
+			return;
 		}
 		result.set(atom.id, change.after);
+		ownerByAtom.set(atom.id, owner);
+	};
+	for (const event of events) {
+		if (isReplacementEvent(event)) {
+			if (event.action === "undo") {
+				const changes = linkedByEvent.get(event.undoOf);
+				if (changes) {
+					for (const change of changes) if ((result.get(change.atomId) ?? "include") === change.after && ownerByAtom.get(change.atomId) === event.undoOf) {
+						result.set(change.atomId, change.before);
+						ownerByAtom.delete(change.atomId);
+					}
+				}
+			} else if (event.linkedExclusion?.atomChanges) {
+				const changes = event.linkedExclusion.atomChanges;
+				linkedByEvent.set(event.eventId, changes);
+				for (const change of changes) apply(change, event.eventId);
+			}
+			continue;
+		}
+		for (const change of event.changes) apply(change, event.transactionId);
 	}
 	return result;
 }
@@ -216,6 +238,60 @@ function unitHasKindAndTurn(unit, kind, turnIds) {
 * results are paired by call id. A signed reasoning block is kept with all
 * tool blocks in the same logical turn; the final answer remains independent.
 */
+/** Find same-turn reasoning for an Answer and expand signed reasoning to its tool closure. */
+function selectAssociatedReasoningTargets(records, answerUnitId, projectionStates = /* @__PURE__ */ new Map()) {
+	const units = records.flatMap((record) => record.units.map((unit) => ({
+		record,
+		unit
+	})));
+	const answer = units.find((item) => item.unit.id === answerUnitId && item.unit.kind === "answer")?.unit;
+	if (!answer) return {
+		answerUnitId,
+		associatedReasoningUnitIds: [],
+		requestedUnitIds: [],
+		effectiveUnitIds: [],
+		autoExpandedUnitIds: [],
+		requestedAtomIds: [],
+		effectiveAtomIds: [],
+		unavailableUnitIds: [],
+		touchesRecentTurn: false,
+		newlyExcludedUnitIds: [],
+		alreadyExcludedUnitIds: [],
+		newlyExcludedAtomIds: [],
+		alreadyExcludedAtomIds: [],
+		disabledReason: "invalid-target"
+	};
+	const turnIds = new Set(answer.atoms.map((atom) => atom.turnId));
+	const reasoningIds = units.filter((item) => item.unit.kind === "reasoning" && item.unit.atoms.some((atom) => turnIds.has(atom.turnId))).map((item) => item.unit.id);
+	const selection = selectProjectionTargets(records, reasoningIds);
+	const effectiveItems = units.filter((item) => selection.effectiveUnitIds.includes(item.unit.id));
+	const unavailableUnitIds = [.../* @__PURE__ */ new Set([...selection.unavailableUnitIds, ...effectiveItems.filter((item) => item.unit.projectionState === "unavailable" || item.unit.mutable === false).map((item) => item.unit.id)])];
+	const newlyExcludedUnitIds = [];
+	const alreadyExcludedUnitIds = [];
+	const newlyExcludedAtomIds = [];
+	const alreadyExcludedAtomIds = [];
+	for (const item of effectiveItems) {
+		if (item.unit.id === answerUnitId) continue;
+		const includedAtoms = item.unit.atoms.filter((atom) => (projectionStates.get(atom.id) ?? "include") === "include");
+		const excludedAtoms = item.unit.atoms.filter((atom) => (projectionStates.get(atom.id) ?? "include") === "exclude");
+		if (includedAtoms.length) newlyExcludedUnitIds.push(item.unit.id);
+		else alreadyExcludedUnitIds.push(item.unit.id);
+		newlyExcludedAtomIds.push(...includedAtoms.map((atom) => atom.id));
+		alreadyExcludedAtomIds.push(...excludedAtoms.map((atom) => atom.id));
+	}
+	const disabledReason = unavailableUnitIds.length ? "associated-reasoning-unavailable" : void 0;
+	return {
+		...selection,
+		answerUnitId,
+		associatedReasoningUnitIds: reasoningIds,
+		newlyExcludedUnitIds,
+		alreadyExcludedUnitIds,
+		newlyExcludedAtomIds,
+		alreadyExcludedAtomIds,
+		unavailableUnitIds,
+		disabledReason
+	};
+}
 function selectProjectionTargets(records, unitIds, recordIds) {
 	const units = records.flatMap((record) => record.units.map((unit) => ({
 		record,
@@ -321,7 +397,8 @@ function projectUnits(recordId, atoms, states, projectionStates, replacementStat
 			atoms: grouped,
 			viewState: unitViewState(grouped, states),
 			projectionState: projectionStateForAtoms(grouped, projectionStates ?? /* @__PURE__ */ new Map()),
-			mutable: true
+			mutable: true,
+			...kind === "answer" && groups.has("reasoning") ? { associatedReasoningUnitIds: [`${recordId}#reasoning`] } : {}
 		};
 	}).map((base) => {
 		const originalText = unitOriginalText(base);
@@ -675,7 +752,8 @@ function recordSnapshot(record) {
 			replacementSupported: unit.replacementSupported,
 			...unit.replacementDisabledReason ? { replacementDisabledReason: unit.replacementDisabledReason } : {},
 			canRestoreReplacement: unit.canRestoreReplacement,
-			canUndoReplacement: unit.canUndoReplacement
+			canUndoReplacement: unit.canUndoReplacement,
+			...unit.associatedReasoningUnitIds?.length ? { associatedReasoningUnitIds: unit.associatedReasoningUnitIds } : {}
 		})),
 		...record.entryId ? { entryId: record.entryId } : {},
 		...record.entryIds?.length ? { entryIds: record.entryIds } : {},
@@ -703,7 +781,7 @@ function currentState(adapter) {
 		return true;
 	});
 	const states = reduceViewStates(current.atoms, legacy, events);
-	const projectionStates = current.projectionAvailable === false ? new Map(current.atoms.map((atom) => [atom.id, "unavailable"])) : reduceProjectionStates(current.atoms, projectionEventsUnique.filter((event) => !("type" in event)));
+	const projectionStates = current.projectionAvailable === false ? new Map(current.atoms.map((atom) => [atom.id, "unavailable"])) : reduceProjectionStates(current.atoms, projectionEventsUnique);
 	const replacementStates = reduceReplacementStates(projectRecords(current.atoms, states, projectionStates).flatMap((record) => record.units), projectionEventsUnique, current.projectionAvailable !== false);
 	const records = projectRecords(current.atoms, states, projectionStates, replacementStates);
 	return {
@@ -774,6 +852,43 @@ function replacementTarget(state, unitId) {
 		};
 	}
 	return null;
+}
+function replacementEventById(state, eventId) {
+	return state.projectionEvents.find((event) => "type" in event && event.type === "replacement" && event.eventId === eventId);
+}
+function linkedUndoExclusion(state, undoOf, operationId) {
+	const linked = replacementEventById(state, undoOf)?.linkedExclusion;
+	if (!linked) return void 0;
+	return {
+		operationId,
+		unitIds: [...linked.unitIds],
+		atomChanges: linked.atomChanges.map((change) => ({
+			...change,
+			before: change.after,
+			after: change.before
+		}))
+	};
+}
+function replacementPreviewFailure(state, input, disabledReason) {
+	return {
+		baseRevision: state.revision,
+		unitId: input.unitId,
+		unitKind: "answer",
+		textChanged: false,
+		excludeAssociatedReasoning: Boolean(input.excludeAssociatedReasoning),
+		associatedReasoningUnitIds: [],
+		requestedUnitIds: [],
+		effectiveUnitIds: [],
+		autoExpandedUnitIds: [],
+		newlyExcludedUnitIds: [],
+		alreadyExcludedUnitIds: [],
+		newlyExcludedAtomIds: [],
+		alreadyExcludedAtomIds: [],
+		unavailableUnitIds: [],
+		requiresConfirmation: false,
+		canCommit: false,
+		disabledReason
+	};
 }
 function assertReplacementTarget(target) {
 	if (!target) throw new Error("CONTEXT_EDITOR_REPLACEMENT_TARGET_NOT_FOUND");
@@ -954,32 +1069,80 @@ var ContextEditorService = class {
 			snapshot: snapshotOf(currentState(adapter))
 		};
 	}
+	previewReplacement(adapter, input) {
+		if (adapter.isBusy()) throw new Error("AGENT_RUNTIME_BUSY");
+		const state = currentState(adapter);
+		if (state.projectionAvailable === false) return replacementPreviewFailure(state, input, state.projectionError || "projection-unavailable");
+		if (!revisionMatches(input.baseRevision, state.revision)) return replacementPreviewFailure(state, input, "revision-conflict");
+		const target = replacementTarget(state, input.unitId);
+		if (!target) throw new Error("CONTEXT_EDITOR_REPLACEMENT_TARGET_NOT_FOUND");
+		assertReplacementTarget(target);
+		const text = input.text === void 0 ? target.unit.effectiveText : input.text;
+		if (text.trim().length === 0) throw new Error("CONTEXT_EDITOR_REPLACEMENT_EMPTY");
+		const link = Boolean(input.excludeAssociatedReasoning && target.unit.kind === "answer");
+		const associated = target.unit.kind === "answer" ? selectAssociatedReasoningTargets(state.records, target.unit.id, state.projectionStates) : void 0;
+		const selection = link && associated ? associated : {
+			associatedReasoningUnitIds: associated?.associatedReasoningUnitIds ?? [],
+			requestedUnitIds: [],
+			effectiveUnitIds: [],
+			autoExpandedUnitIds: [],
+			newlyExcludedUnitIds: [],
+			alreadyExcludedUnitIds: [],
+			newlyExcludedAtomIds: [],
+			alreadyExcludedAtomIds: [],
+			unavailableUnitIds: [],
+			disabledReason: void 0
+		};
+		return {
+			baseRevision: state.revision,
+			unitId: target.unit.id,
+			unitKind: target.unit.kind,
+			textChanged: text !== target.unit.effectiveText,
+			excludeAssociatedReasoning: link,
+			associatedReasoningUnitIds: selection.associatedReasoningUnitIds,
+			requestedUnitIds: [target.unit.id, ...selection.requestedUnitIds.filter((id) => id !== target.unit.id)],
+			effectiveUnitIds: [target.unit.id, ...selection.effectiveUnitIds.filter((id) => id !== target.unit.id)],
+			autoExpandedUnitIds: selection.autoExpandedUnitIds,
+			newlyExcludedUnitIds: selection.newlyExcludedUnitIds,
+			alreadyExcludedUnitIds: selection.alreadyExcludedUnitIds,
+			newlyExcludedAtomIds: selection.newlyExcludedAtomIds,
+			alreadyExcludedAtomIds: selection.alreadyExcludedAtomIds,
+			unavailableUnitIds: selection.unavailableUnitIds,
+			requiresConfirmation: selection.autoExpandedUnitIds.length > 0,
+			canCommit: selection.disabledReason === void 0 && selection.unavailableUnitIds.length === 0,
+			...selection.disabledReason ? { disabledReason: selection.disabledReason } : {}
+		};
+	}
 	commitReplacement(adapter, input) {
 		if (adapter.isBusy()) throw new Error("AGENT_RUNTIME_BUSY");
 		const state = currentState(adapter);
+		const operationId = input.operationId ?? replacementEventId();
 		if (state.projectionAvailable === false) throw new Error(state.projectionError || "CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
 		if (!revisionMatches(input.baseRevision, state.revision)) return {
 			ok: false,
 			conflict: true,
+			operationId,
 			snapshot: snapshotOf(currentState(adapter))
 		};
 		if (input.text.trim().length === 0) throw new Error("CONTEXT_EDITOR_REPLACEMENT_EMPTY");
 		const target = replacementTarget(state, input.unitId);
 		assertReplacementTarget(target);
-		if (input.text === target.unit.effectiveText) return {
+		const link = Boolean(input.excludeAssociatedReasoning && target.unit.kind === "answer");
+		const selection = link ? selectAssociatedReasoningTargets(state.records, target.unit.id, state.projectionStates) : void 0;
+		if (selection?.disabledReason || selection?.unavailableUnitIds.length) throw new Error("CONTEXT_EDITOR_REPLACEMENT_LINK_UNAVAILABLE");
+		const confirmed = new Set((input.confirmedUnitIds ?? input.confirmationScope ?? []).map(String));
+		if (selection?.autoExpandedUnitIds.some((id) => !confirmed.has(id))) throw new Error("CONTEXT_EDITOR_REPLACEMENT_CONFIRMATION_REQUIRED");
+		if (input.text === target.unit.effectiveText && !selection?.newlyExcludedAtomIds.length) return {
 			ok: true,
-			snapshot: snapshotOf(currentState(adapter))
+			operationId,
+			snapshot: snapshotOf(state)
 		};
 		const beforeText = target.replacement?.replacementText ?? null;
-		const atomRefs = target.unit.atoms.map((atom) => ({
-			atomId: atom.id,
-			sourceRef: atom.sourceRef,
-			fingerprint: atom.fingerprint
-		}));
 		const latest = currentState(adapter);
 		if (latest.revision !== state.revision) return {
 			ok: false,
 			conflict: true,
+			operationId,
 			snapshot: snapshotOf(latest)
 		};
 		const latestTarget = replacementTarget(latest, input.unitId);
@@ -987,24 +1150,49 @@ var ContextEditorService = class {
 		if (latestTarget.unit.atomIds.join("|") !== target.unit.atomIds.join("|") || (latestTarget.replacement?.replacementText ?? null) !== beforeText) return {
 			ok: false,
 			conflict: true,
+			operationId,
 			snapshot: snapshotOf(latest)
 		};
+		const latestSelection = link ? selectAssociatedReasoningTargets(latest.records, latestTarget.unit.id, latest.projectionStates) : void 0;
+		if (latestSelection?.disabledReason || latestSelection?.unavailableUnitIds.length) throw new Error("CONTEXT_EDITOR_REPLACEMENT_LINK_UNAVAILABLE");
+		if (latestSelection?.autoExpandedUnitIds.some((id) => !confirmed.has(id))) throw new Error("CONTEXT_EDITOR_REPLACEMENT_CONFIRMATION_REQUIRED");
+		const atomRefs = latestTarget.unit.atoms.map((atom) => ({
+			atomId: atom.id,
+			sourceRef: atom.sourceRef,
+			fingerprint: atom.fingerprint
+		}));
+		const linkedChanges = latestSelection?.newlyExcludedAtomIds.map((atomId) => {
+			const atom = latest.atoms.find((candidate) => candidate.id === atomId);
+			return atom ? {
+				atomId: atom.id,
+				fingerprint: atom.fingerprint,
+				sourceRef: atom.sourceRef,
+				before: latest.projectionStates.get(atom.id) === "exclude" ? "exclude" : "include",
+				after: "exclude"
+			} : void 0;
+		}).filter((change) => change !== void 0) ?? [];
 		const eventId = appendProjectionEvent(adapter, {
 			schemaVersion: 1,
 			type: "replacement",
 			action: "replace",
-			eventId: replacementEventId(),
-			unitId: target.unit.id,
-			unitKind: target.unit.kind,
+			eventId: operationId,
+			unitId: latestTarget.unit.id,
+			unitKind: latestTarget.unit.kind,
 			atomRefs,
 			beforeText,
 			afterText: input.text,
 			baseRevision: state.revision,
-			createdAt: (/* @__PURE__ */ new Date()).toISOString()
+			createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+			...link && latestSelection ? { linkedExclusion: {
+				operationId,
+				unitIds: latestSelection.newlyExcludedUnitIds,
+				atomChanges: linkedChanges
+			} } : {}
 		});
 		this.searchCache.clear();
 		return {
 			ok: true,
+			operationId,
 			eventId,
 			snapshot: snapshotOf(currentState(adapter))
 		};
@@ -1012,10 +1200,12 @@ var ContextEditorService = class {
 	restoreReplacement(adapter, input) {
 		if (adapter.isBusy()) throw new Error("AGENT_RUNTIME_BUSY");
 		const state = currentState(adapter);
+		const operationId = input.operationId ?? replacementEventId();
 		if (state.projectionAvailable === false) throw new Error(state.projectionError || "CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
 		if (!revisionMatches(input.baseRevision, state.revision)) return {
 			ok: false,
 			conflict: true,
+			operationId,
 			snapshot: snapshotOf(currentState(adapter))
 		};
 		const target = replacementTarget(state, input.unitId);
@@ -1023,12 +1213,14 @@ var ContextEditorService = class {
 		const beforeText = target.replacement?.replacementText ?? null;
 		if (beforeText === null) return {
 			ok: true,
+			operationId,
 			snapshot: snapshotOf(currentState(adapter))
 		};
 		const latest = currentState(adapter);
 		if (latest.revision !== state.revision) return {
 			ok: false,
 			conflict: true,
+			operationId,
 			snapshot: snapshotOf(latest)
 		};
 		const latestTarget = replacementTarget(latest, input.unitId);
@@ -1036,13 +1228,14 @@ var ContextEditorService = class {
 		if ((latestTarget.replacement?.replacementText ?? null) !== beforeText) return {
 			ok: false,
 			conflict: true,
+			operationId,
 			snapshot: snapshotOf(latest)
 		};
 		const eventId = appendProjectionEvent(adapter, {
 			schemaVersion: 1,
 			type: "replacement",
 			action: "restore",
-			eventId: replacementEventId(),
+			eventId: operationId,
 			unitId: target.unit.id,
 			unitKind: target.unit.kind,
 			atomRefs: target.unit.atoms.map((atom) => ({
@@ -1058,6 +1251,7 @@ var ContextEditorService = class {
 		this.searchCache.clear();
 		return {
 			ok: true,
+			operationId,
 			eventId,
 			snapshot: snapshotOf(currentState(adapter))
 		};
@@ -1065,10 +1259,12 @@ var ContextEditorService = class {
 	undoReplacement(adapter, input) {
 		if (adapter.isBusy()) throw new Error("AGENT_RUNTIME_BUSY");
 		const state = currentState(adapter);
+		const operationId = input.operationId ?? replacementEventId();
 		if (state.projectionAvailable === false) throw new Error(state.projectionError || "CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
 		if (!revisionMatches(input.baseRevision, state.revision)) return {
 			ok: false,
 			conflict: true,
+			operationId,
 			snapshot: snapshotOf(currentState(adapter))
 		};
 		const target = replacementTarget(state, input.unitId);
@@ -1076,12 +1272,14 @@ var ContextEditorService = class {
 		const undoOf = target.replacement?.activeEventId;
 		if (!undoOf || !target.unit.canUndoReplacement) return {
 			ok: true,
+			operationId,
 			snapshot: snapshotOf(currentState(adapter))
 		};
 		const latest = currentState(adapter);
 		if (latest.revision !== state.revision) return {
 			ok: false,
 			conflict: true,
+			operationId,
 			snapshot: snapshotOf(latest)
 		};
 		const latestTarget = replacementTarget(latest, input.unitId);
@@ -1089,21 +1287,25 @@ var ContextEditorService = class {
 		if (latestTarget.replacement?.activeEventId !== undoOf) return {
 			ok: false,
 			conflict: true,
+			operationId,
 			snapshot: snapshotOf(latest)
 		};
+		const linkedExclusion = linkedUndoExclusion(state, undoOf, operationId);
 		const eventId = appendProjectionEvent(adapter, {
 			schemaVersion: 1,
 			type: "replacement",
 			action: "undo",
-			eventId: replacementEventId(),
+			eventId: operationId,
 			unitId: target.unit.id,
 			undoOf,
 			baseRevision: state.revision,
-			createdAt: (/* @__PURE__ */ new Date()).toISOString()
+			createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+			...linkedExclusion ? { linkedExclusion } : {}
 		});
 		this.searchCache.clear();
 		return {
 			ok: true,
+			operationId,
 			eventId,
 			snapshot: snapshotOf(currentState(adapter))
 		};
@@ -1598,10 +1800,35 @@ function createPiText(locale) {
 		sidecarChanged: () => zh ? "会话或 sidecar 已变化，已刷新 Context Editor。" : "The conversation or sidecar changed; Context Editor was refreshed.",
 		operationFailed: (error) => zh ? `Context Editor 操作失败：${error}` : `Context Editor operation failed: ${error}`,
 		busy: () => zh ? "Agent 运行中，暂时不能修改隐藏状态。" : "The Agent is running; hidden state cannot be changed yet.",
+		replacementBusy: () => zh ? "Agent 正在运行，暂时不能编辑上下文。" : "The Agent is running; context editing is temporarily unavailable.",
 		undoConflict: () => zh ? "撤销时发现 revision 冲突，已刷新。" : "A revision conflict occurred while undoing; the view was refreshed.",
 		undoFailed: (error) => zh ? `撤销失败：${error}` : `Undo failed: ${error}`,
 		restoreAllConfirmTitle: () => zh ? "恢复全部隐藏单元？" : "Restore all hidden units?",
-		restoreAllConfirmMessage: () => zh ? "这只会恢复 Context Editor 的视觉状态，不会修改 Session 或模型上下文。" : "This only restores the Context Editor view state; the Session and model context are unchanged."
+		restoreAllConfirmMessage: () => zh ? "这只会恢复 Context Editor 的视觉状态，不会修改 Session 或模型上下文。" : "This only restores the Context Editor view state; the Session and model context are unchanged.",
+		editTitle: (kind) => zh ? `编辑${kind}` : `Edit ${kind}`,
+		replacementReviewTitle: () => zh ? "确认 Answer 编辑与联动排除" : "Review Answer edit and linked exclusion",
+		replacementReviewHint: () => zh ? "Space 切换联动排除 · PgUp/PgDn 滚动 · Enter 保存 · e 返回修改草稿 · Esc 取消整次编辑" : "Space toggle linked exclusion · PgUp/PgDn scroll · Enter save · e edit draft · Esc cancel",
+		replacementReviewAnswer: (changed) => zh ? `Answer 文本：${changed ? "已改变" : "未改变"}` : `Answer text: ${changed ? "changed" : "unchanged"}`,
+		replacementReviewLink: (enabled, count) => zh ? `同时排除本轮思考：[${enabled ? "x" : " "}]（关联 ${count} 个 Reasoning 单元）` : `Exclude associated reasoning: [${enabled ? "x" : " "}] (${count} reasoning unit${count === 1 ? "" : "s"})`,
+		replacementReviewScope: (scope, ids) => {
+			return `${(zh ? {
+				associated: "关联 Reasoning",
+				newlyExcluded: "新增排除",
+				alreadyExcluded: "原已排除",
+				autoExpanded: "自动扩展工具链"
+			} : {
+				associated: "Associated reasoning",
+				newlyExcluded: "Newly excluded",
+				alreadyExcluded: "Already excluded",
+				autoExpanded: "Auto-expanded tool closure"
+			})[scope]}: ${ids.length ? ids.join(", ") : zh ? "无" : "none"}`;
+		},
+		replacementReviewConfirmationRequired: (count) => zh ? `签名思考触发结构闭包：需确认 ${count} 个自动扩展单元。` : `Signed reasoning expands the structural closure; confirm ${count} auto-expanded unit${count === 1 ? "" : "s"}.`,
+		replacementReviewBlocked: (reason) => zh ? `当前联动事务不可保存：${reason}` : `This linked transaction cannot be saved: ${reason}`,
+		replacementReviewNoop: () => zh ? "文本和联动范围都没有变化，未追加事件。" : "No text or linked-scope changes; no event was appended.",
+		replacementRestoreTitle: () => zh ? "恢复 Answer 原文？" : "Restore Answer canonical text?",
+		replacementRestoreMessage: () => zh ? "仅恢复 Answer 原文；本轮 Reasoning 的排除状态会保留。" : "Only the Answer text is restored; Reasoning exclusion for this turn remains.",
+		replacementEmpty: () => zh ? "替换文本不能为空白。" : "Replacement text cannot be blank."
 	};
 }
 //#endregion
@@ -1840,6 +2067,9 @@ const UNIT_KINDS = CONTEXT_EDITOR_UNIT_KINDS;
 function colorForKind(kind) {
 	return kind === "user" ? "accent" : kind === "ai" ? "text" : "toolOutput";
 }
+function replacementOperationId() {
+	return `pi-context-replacement-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
 function visiblePad(text, width) {
 	return truncateToWidth(text, Math.max(1, width), "…", true);
 }
@@ -1852,10 +2082,12 @@ var ContextEditorComponent = class {
 	undoMutation;
 	persistPrefs;
 	notify;
+	isIdle;
 	done;
 	previewContext;
 	commitContext;
 	commitReplacement;
+	previewReplacement;
 	restoreReplacement;
 	undoReplacement;
 	projectionAvailable;
@@ -1880,6 +2112,8 @@ var ContextEditorComponent = class {
 	lastRenderWidth = 0;
 	lastRenderRows = 0;
 	pendingConfirmation = null;
+	replacementReview = null;
+	replacementReviewScrollOffset = 0;
 	operationInFlight = false;
 	bodyCache = /* @__PURE__ */ new Map();
 	constructor(tui, theme, records, snapshot, prefs, deps, done) {
@@ -1891,6 +2125,7 @@ var ContextEditorComponent = class {
 		this.previewContext = deps.previewContext;
 		this.commitContext = deps.commitContext;
 		this.commitReplacement = deps.commitReplacement;
+		this.previewReplacement = deps.previewReplacement;
 		this.restoreReplacement = deps.restoreReplacement;
 		this.undoReplacement = deps.undoReplacement;
 		this.projectionAvailable = snapshot.projectionAvailable !== false && !!deps.previewContext && !!deps.commitContext;
@@ -1907,6 +2142,7 @@ var ContextEditorComponent = class {
 		this.undoMutation = deps.undo;
 		this.persistPrefs = deps.persistPrefs;
 		this.notify = deps.notify;
+		this.isIdle = deps.isIdle;
 		this.done = done;
 		this.text = createPiText(deps.locale ?? detectPiLocale());
 		const selectedUnitId = deps.initialUiState?.selectedUnitId;
@@ -1915,6 +2151,7 @@ var ContextEditorComponent = class {
 			if (index >= 0) this.selectedIndex = index;
 		}
 		this.matches = this.query.trim() ? this.searchOccurrencesForPrefs() : [];
+		this.replacementReview = deps.initialReplacementReview ?? null;
 	}
 	flatUnits() {
 		const enabled = new Set(this.prefs.enabledUnitKinds);
@@ -2148,6 +2385,8 @@ var ContextEditorComponent = class {
 		this.matches = this.query.trim() ? this.searchOccurrencesForPrefs() : [];
 		this.matchIndex = -1;
 		this.pendingConfirmation = null;
+		this.replacementReview = null;
+		this.replacementReviewScrollOffset = 0;
 		this.notify(this.text.sessionChanged(), "info");
 		return true;
 	}
@@ -2160,6 +2399,10 @@ var ContextEditorComponent = class {
 		};
 	}
 	requestEdit() {
+		if (this.isIdle && !this.isIdle()) {
+			this.notify(this.text.replacementBusy(), "warning");
+			return;
+		}
 		if (!this.commitReplacement) {
 			this.notify(this.text.contextUnavailableAction(), "warning");
 			return;
@@ -2175,20 +2418,137 @@ var ContextEditorComponent = class {
 			this.notify(this.text.operationFailed(item.unit.replacementDisabledReason ?? "unsupported-unit-kind"), "warning");
 			return;
 		}
+		const unitKind = item.unit.kind;
 		this.done({
 			kind: "edit",
 			unitId: item.unit.id,
-			title: "Edit " + this.text.unitKind(item.unit.kind),
+			unitKind,
+			title: this.text.editTitle(this.text.unitKind(unitKind)),
 			text: item.unit.effectiveText,
 			originalText: this.originalText(item.unit),
 			baseRevision: this.revision,
+			operationId: replacementOperationId(),
 			uiState: {
 				...this.uiState(),
 				selectedUnitId: item.unit.id
 			}
 		});
 	}
+	replacementReviewLines(width) {
+		const review = this.replacementReview;
+		if (!review) return [];
+		const preview = review.preview;
+		const wrap = (value) => wrapTextWithAnsi(value, Math.max(8, width - 4)).map((line) => this.theme.fg("dim", `  ${line}`));
+		const lines = [this.theme.fg("warning", `⚠ ${this.text.replacementReviewTitle()}`)];
+		lines.push(...wrap(this.text.replacementReviewAnswer(preview.textChanged)));
+		if (preview.associatedReasoningUnitIds.length > 0) {
+			lines.push(...wrap(this.text.replacementReviewLink(review.excludeAssociatedReasoning, preview.associatedReasoningUnitIds.length)));
+			lines.push(...wrap(this.text.replacementReviewScope("associated", preview.associatedReasoningUnitIds)));
+		}
+		lines.push(...wrap(this.text.replacementReviewScope("newlyExcluded", preview.newlyExcludedUnitIds)));
+		lines.push(...wrap(this.text.replacementReviewScope("alreadyExcluded", preview.alreadyExcludedUnitIds)));
+		if (preview.autoExpandedUnitIds.length > 0) {
+			lines.push(...wrap(this.text.replacementReviewScope("autoExpanded", preview.autoExpandedUnitIds)));
+			if (preview.requiresConfirmation) lines.push(...wrap(this.text.replacementReviewConfirmationRequired(preview.autoExpandedUnitIds.length)));
+		}
+		if (!preview.canCommit) lines.push(...wrap(this.text.replacementReviewBlocked(preview.disabledReason ?? "unavailable")));
+		if (!preview.textChanged && preview.newlyExcludedAtomIds.length === 0) lines.push(...wrap(this.text.replacementReviewNoop()));
+		lines.push(this.theme.fg("accent", this.text.replacementReviewHint()));
+		return lines;
+	}
+	scrollReplacementReview(delta) {
+		const lines = this.replacementReviewLines(Math.max(24, this.tui.terminal.columns));
+		const maxOffset = Math.max(0, lines.length - this.availableRows());
+		this.replacementReviewScrollOffset = Math.max(0, Math.min(maxOffset, this.replacementReviewScrollOffset + delta));
+		this.tui.requestRender();
+	}
+	async toggleReplacementReviewLink() {
+		const review = this.replacementReview;
+		if (!review || !this.previewReplacement || review.preview.associatedReasoningUnitIds.length === 0) return;
+		const enabled = !review.excludeAssociatedReasoning;
+		this.operationInFlight = true;
+		this.tui.requestRender();
+		try {
+			const preview = await this.previewReplacement({
+				baseRevision: review.draft.baseRevision,
+				operationId: review.draft.operationId,
+				unitId: review.draft.unitId,
+				text: review.draft.text,
+				excludeAssociatedReasoning: enabled
+			});
+			if (!preview.canCommit && preview.disabledReason === "revision-conflict") {
+				this.replacementReview = null;
+				this.replacementReviewScrollOffset = 0;
+				this.notify(this.text.sidecarChanged(), "warning");
+				this.done({
+					kind: "cancel-edit",
+					uiState: review.draft.uiState
+				});
+				return;
+			}
+			this.replacementReview = {
+				...review,
+				preview,
+				excludeAssociatedReasoning: enabled
+			};
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.notify(message === "CONTEXT_EDITOR_CONFLICT" ? this.text.sidecarChanged() : this.text.operationFailed(message), "warning");
+		} finally {
+			this.operationInFlight = false;
+			this.tui.requestRender();
+		}
+	}
+	handleReplacementReviewInput(data) {
+		const review = this.replacementReview;
+		if (!review) return;
+		if (matchesKey(data, "pageDown") || matchesKey(data, "down") || data === "j") {
+			this.scrollReplacementReview(matchesKey(data, "pageDown") ? this.availableRows() : 1);
+			return;
+		}
+		if (matchesKey(data, "pageUp") || matchesKey(data, "up") || data === "k") {
+			this.scrollReplacementReview(matchesKey(data, "pageUp") ? -this.availableRows() : -1);
+			return;
+		}
+		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data === "q" || data === "Q") {
+			this.replacementReview = null;
+			this.done({
+				kind: "cancel-edit",
+				uiState: review.draft.uiState
+			});
+			return;
+		}
+		if (data === "e") {
+			this.replacementReview = null;
+			this.done({
+				kind: "edit",
+				...review.draft,
+				excludeAssociatedReasoning: review.excludeAssociatedReasoning
+			});
+			return;
+		}
+		if (matchesKey(data, "space")) {
+			this.toggleReplacementReviewLink();
+			return;
+		}
+		if (matchesKey(data, "enter")) {
+			if (!review.preview.canCommit) {
+				this.notify(this.text.replacementReviewBlocked(review.preview.disabledReason ?? "unavailable"), "warning");
+				return;
+			}
+			this.replacementReview = null;
+			this.done({
+				kind: "replacement-commit",
+				review,
+				uiState: review.draft.uiState
+			});
+		}
+	}
 	beginRestoreReplacement() {
+		if (this.isIdle && !this.isIdle()) {
+			this.notify(this.text.replacementBusy(), "warning");
+			return;
+		}
 		if (this.operationInFlight || this.pendingConfirmation || !this.restoreReplacement) return;
 		const selected = this.selectedUnitIds();
 		if (selected.length > 1) {
@@ -2200,7 +2560,7 @@ var ContextEditorComponent = class {
 		this.pendingConfirmation = {
 			kind: "replacement-restore",
 			unitId: item.unit.id,
-			message: "Restore this unit to its canonical text? The replacement history remains undoable."
+			message: this.text.replacementRestoreMessage()
 		};
 		this.tui.requestRender();
 	}
@@ -2210,6 +2570,7 @@ var ContextEditorComponent = class {
 		try {
 			const result = await this.restoreReplacement({
 				baseRevision: this.revision,
+				operationId: replacementOperationId(),
 				unitId: pending.unitId
 			});
 			if (!result.ok || result.conflict) {
@@ -2227,6 +2588,10 @@ var ContextEditorComponent = class {
 		}
 	}
 	async undoCurrentReplacement() {
+		if (this.isIdle && !this.isIdle()) {
+			this.notify(this.text.replacementBusy(), "warning");
+			return;
+		}
 		if (this.operationInFlight || !this.undoReplacement) return;
 		const selected = this.selectedUnitIds();
 		if (selected.length > 1) {
@@ -2239,6 +2604,7 @@ var ContextEditorComponent = class {
 		try {
 			const result = await this.undoReplacement({
 				baseRevision: this.revision,
+				operationId: replacementOperationId(),
 				unitId: item.unit.id
 			});
 			if (!result.ok || result.conflict) {
@@ -2467,7 +2833,7 @@ var ContextEditorComponent = class {
 	confirmationLines(width) {
 		const pending = this.pendingConfirmation;
 		if (!pending) return [];
-		const title = pending.kind === "projection" ? this.text.contextConfirmTitle() : pending.kind === "reset" ? this.text.restoreAllConfirmTitle() : "Restore original text";
+		const title = pending.kind === "projection" ? this.text.contextConfirmTitle() : pending.kind === "reset" ? this.text.restoreAllConfirmTitle() : this.text.replacementRestoreTitle();
 		const hint = this.text.contextConfirmHint();
 		const body = wrapTextWithAnsi(pending.message, Math.max(8, width - 4));
 		return [
@@ -2478,6 +2844,11 @@ var ContextEditorComponent = class {
 	}
 	handleInput(data) {
 		if (this.syncExternalState()) return;
+		if (this.replacementReview) {
+			if (this.operationInFlight) return;
+			this.handleReplacementReviewInput(data);
+			return;
+		}
 		if (this.pendingConfirmation) {
 			this.handleConfirmationInput(data);
 			return;
@@ -2666,7 +3037,12 @@ var ContextEditorComponent = class {
 		const safeWidth = Math.max(24, width);
 		const viewport = this.availableRows();
 		let visible;
-		if (this.pendingConfirmation) visible = this.confirmationLines(safeWidth).slice(0, viewport);
+		if (this.replacementReview) {
+			const reviewLines = this.replacementReviewLines(safeWidth);
+			const maxOffset = Math.max(0, reviewLines.length - viewport);
+			this.replacementReviewScrollOffset = Math.max(0, Math.min(this.replacementReviewScrollOffset, maxOffset));
+			visible = reviewLines.slice(this.replacementReviewScrollOffset, this.replacementReviewScrollOffset + viewport);
+		} else if (this.pendingConfirmation) visible = this.confirmationLines(safeWidth).slice(0, viewport);
 		else if (this.helpMode) visible = this.helpLines().slice(0, viewport);
 		else {
 			const layoutChanged = this.lastRenderWidth !== safeWidth || this.lastRenderRows !== this.tui.terminal.rows;
@@ -2686,10 +3062,10 @@ var ContextEditorComponent = class {
 		const aiState = reasoningEnabled && answerEnabled ? "on" : reasoningEnabled || answerEnabled ? "mixed" : "off";
 		const aiLabel = this.theme.fg(aiState === "on" ? "accent" : aiState === "mixed" ? "warning" : "dim", `${this.text.recordKind("ai")}${aiState === "mixed" ? " ±" : ""}`);
 		const title = this.helpMode ? this.theme.fg("accent", this.text.tuiHelpTitle()) : this.theme.fg("accent", "Pi Context Editor") + this.theme.fg("dim", `  ${this.text.unitCount(this.flatUnits().length)}`);
-		const mode = this.pendingConfirmation ? this.theme.fg("warning", this.text.contextAwaiting()) : this.helpMode ? this.theme.fg("dim", "") : this.searchMode ? this.theme.fg("warning", this.text.tuiSearch(this.query, this.matches.length, this.matchIndex, this.searchScope)) : this.theme.fg("dim", this.text.tuiSearchIdle(this.query, this.matches.length, this.matchIndex, this.searchScope));
-		const filterLine = this.helpMode || this.pendingConfirmation ? "" : `${enabled("user")} [1]  ${aiLabel} [2] (${enabled("reasoning")} [4]  ${enabled("answer")} [5])  ${enabled("tool")} [3]`;
+		const mode = this.replacementReview ? this.theme.fg("warning", this.text.contextAwaiting()) : this.pendingConfirmation ? this.theme.fg("warning", this.text.contextAwaiting()) : this.helpMode ? this.theme.fg("dim", "") : this.searchMode ? this.theme.fg("warning", this.text.tuiSearch(this.query, this.matches.length, this.matchIndex, this.searchScope)) : this.theme.fg("dim", this.text.tuiSearchIdle(this.query, this.matches.length, this.matchIndex, this.searchScope));
+		const filterLine = this.helpMode || this.pendingConfirmation || this.replacementReview ? "" : `${enabled("user")} [1]  ${aiLabel} [2] (${enabled("reasoning")} [4]  ${enabled("answer")} [5])  ${enabled("tool")} [3]`;
 		const statusMode = this.helpMode ? "help" : this.searchMode ? "search" : this.matches.length > 0 ? "results" : "normal";
-		const status = this.pendingConfirmation ? this.theme.fg("dim", this.text.contextConfirmHint()) : this.theme.fg("dim", this.text.tuiStatus(statusMode, this.searchScope));
+		const status = this.replacementReview ? this.theme.fg("dim", this.text.replacementReviewHint()) : this.pendingConfirmation ? this.theme.fg("dim", this.text.contextConfirmHint()) : this.theme.fg("dim", this.text.tuiStatus(statusMode, this.searchScope));
 		return [
 			visiblePad(title, safeWidth),
 			visiblePad(filterLine, safeWidth),
@@ -2709,33 +3085,57 @@ function defaultDocument$1(sessionId) {
 		events: []
 	};
 }
+function isProjectionChange(value) {
+	if (!value || typeof value !== "object") return false;
+	const change = value;
+	const sourceRef = change.sourceRef;
+	if (!sourceRef || typeof sourceRef !== "object") return false;
+	const ref = sourceRef;
+	return typeof change.atomId === "string" && change.atomId.length > 0 && typeof change.fingerprint === "string" && change.fingerprint.length > 0 && typeof ref.entryId === "string" && ref.entryId.length > 0 && typeof ref.blockIndex === "number" && Number.isInteger(ref.blockIndex) && ref.blockIndex >= 0 && (change.before === "include" || change.before === "exclude") && (change.after === "include" || change.after === "exclude") && change.before !== change.after;
+}
+function isLinkedExclusion(value, eventId) {
+	if (!value || typeof value !== "object") return false;
+	const linked = value;
+	if (linked.operationId !== eventId || !Array.isArray(linked.unitIds) || !Array.isArray(linked.atomChanges)) return false;
+	if (!linked.unitIds.every((id) => typeof id === "string" && id.length > 0) || new Set(linked.unitIds).size !== linked.unitIds.length) return false;
+	const atomIds = /* @__PURE__ */ new Set();
+	for (const change of linked.atomChanges) {
+		if (!isProjectionChange(change) || atomIds.has(change.atomId)) return false;
+		atomIds.add(change.atomId);
+	}
+	return true;
+}
 function isProjectionEvent(value) {
 	if (!value || typeof value !== "object") return false;
 	const row = value;
+	if ("type" in row && row.type !== "replacement") return false;
 	if (row.type === "replacement") {
-		if (row.schemaVersion !== 1 || typeof row.eventId !== "string" || typeof row.unitId !== "string" || typeof row.createdAt !== "string" || typeof row.baseRevision !== "string" && typeof row.baseRevision !== "number") return false;
-		if (row.action === "undo") return typeof row.undoOf === "string";
+		if (row.schemaVersion !== 1 || typeof row.eventId !== "string" || row.eventId.length === 0 || typeof row.unitId !== "string" || row.unitId.length === 0 || typeof row.createdAt !== "string" || typeof row.baseRevision !== "string" && typeof row.baseRevision !== "number") return false;
+		if (row.action === "undo") {
+			if (typeof row.undoOf !== "string" || row.undoOf.length === 0) return false;
+			if (row.linkedExclusion !== void 0 && !isLinkedExclusion(row.linkedExclusion, row.eventId)) return false;
+			return true;
+		}
 		if (row.action !== "replace" && row.action !== "restore") return false;
 		if (row.unitKind !== "user" && row.unitKind !== "answer") return false;
 		if (!Array.isArray(row.atomRefs) || row.atomRefs.length === 0) return false;
 		if (typeof row.beforeText !== "string" && row.beforeText !== null || typeof row.afterText !== "string" && row.afterText !== null) return false;
 		if (row.action === "replace" && (typeof row.afterText !== "string" || row.afterText.trim().length === 0)) return false;
 		if (row.action === "restore" && (row.afterText !== null || typeof row.beforeText !== "string")) return false;
+		if (row.linkedExclusion !== void 0 && !isLinkedExclusion(row.linkedExclusion, row.eventId)) return false;
+		const atomIds = /* @__PURE__ */ new Set();
 		return row.atomRefs.every((candidate) => {
 			if (!candidate || typeof candidate !== "object") return false;
 			const ref = candidate;
 			const sourceRef = ref.sourceRef;
-			return typeof ref.atomId === "string" && typeof ref.fingerprint === "string" && !!sourceRef && typeof sourceRef === "object" && typeof sourceRef.entryId === "string" && Number.isInteger(sourceRef.blockIndex);
+			if (typeof ref.atomId !== "string" || atomIds.has(ref.atomId)) return false;
+			atomIds.add(ref.atomId);
+			const source = sourceRef;
+			return typeof ref.atomId === "string" && ref.atomId.length > 0 && typeof ref.fingerprint === "string" && ref.fingerprint.length > 0 && !!sourceRef && typeof sourceRef === "object" && typeof source?.entryId === "string" && typeof source.blockIndex === "number" && Number.isInteger(source.blockIndex) && source.blockIndex >= 0;
 		});
 	}
 	if (row.version !== 1 || typeof row.transactionId !== "string" || typeof row.createdAt !== "string" || typeof row.baseRevision !== "string" || row.action !== "exclude" && row.action !== "restore" || !Array.isArray(row.changes) || row.changes.length === 0) return false;
-	return row.changes.every((candidate) => {
-		if (!candidate || typeof candidate !== "object") return false;
-		const change = candidate;
-		const sourceRef = change.sourceRef;
-		if (!sourceRef || typeof sourceRef !== "object" || typeof sourceRef.entryId !== "string" || !Number.isInteger(sourceRef.blockIndex)) return false;
-		return typeof change.atomId === "string" && typeof change.fingerprint === "string" && (change.before === "include" || change.before === "exclude") && (change.after === "include" || change.after === "exclude") && change.before !== change.after;
-	});
+	return row.changes.every((candidate) => isProjectionChange(candidate));
 }
 function parseDocument$1(raw, sessionId) {
 	if (!raw || typeof raw !== "object") return {
@@ -3131,6 +3531,9 @@ var PiContextEditorHost = class {
 		if (this.read().revision !== current.revision) throw new Error("CONTEXT_EDITOR_CONFLICT");
 		return appendProjectionSidecarEvent(this.sessionFile, this.sessionId, current.leafId ?? "", event, sidecar.revision);
 	}
+	previewReplacementMutation(input) {
+		return service.previewReplacement(this, input);
+	}
 	commitReplacementMutation(input) {
 		try {
 			return service.commitReplacement(this, input);
@@ -3250,6 +3653,10 @@ var PiContextEditorHost = class {
 	async getSearchMatch(request) {
 		asLocator(request.locator, this.sessionId);
 		return this.searchMatch(request);
+	}
+	async previewReplacement(request) {
+		asLocator(request.locator, this.sessionId);
+		return service.previewReplacement(this, request);
 	}
 	async commitReplacement(request) {
 		asLocator(request.locator, this.sessionId);
@@ -3378,11 +3785,8 @@ function uniqueProjectionEvents(events) {
 		return true;
 	});
 }
-function isExclusionEvent(event) {
-	return !("type" in event);
-}
 function activeAtomsByEntry(atoms, events) {
-	const states = reduceProjectionStates(atoms, events.filter(isExclusionEvent));
+	const states = reduceProjectionStates(atoms, events);
 	const result = /* @__PURE__ */ new Map();
 	for (const atom of atoms) {
 		if ((states.get(atom.id) ?? "include") === "unavailable") throw new ProjectionAlignmentError("an active projection fingerprint no longer matches");
@@ -3399,8 +3803,14 @@ function restoredAtomIds(atoms, events, states) {
 	const ids = /* @__PURE__ */ new Set();
 	const known = new Set(atoms.map((atom) => atom.id));
 	for (const event of events) {
-		if (!isExclusionEvent(event) || event.action !== "restore") continue;
-		for (const change of event.changes) if (known.has(change.atomId) && states.get(change.atomId) === "include") ids.add(change.atomId);
+		if (!("type" in event)) {
+			if (event.action !== "restore") continue;
+			for (const change of event.changes) if (known.has(change.atomId) && states.get(change.atomId) === "include") ids.add(change.atomId);
+			continue;
+		}
+		if (event.type === "replacement" && event.action === "undo" && event.linkedExclusion) {
+			for (const change of event.linkedExclusion.atomChanges) if (known.has(change.atomId) && states.get(change.atomId) === "include") ids.add(change.atomId);
+		}
 	}
 	return ids;
 }
@@ -3415,8 +3825,20 @@ function replacementUnits(atoms, exclusionStates, events) {
 	const states = reduceReplacementStates(base.flatMap((record) => record.units), events, true);
 	const byAtom = /* @__PURE__ */ new Map();
 	const historyUnitIds = /* @__PURE__ */ new Set();
+	const historyAtomIds = /* @__PURE__ */ new Set();
+	const linkedTurnIds = /* @__PURE__ */ new Set();
 	const projectedUnits = projectRecords(atoms, void 0, exclusionStates, states).flatMap((record) => record.units);
-	for (const event of events) if ("type" in event && event.type === "replacement") historyUnitIds.add(event.unitId);
+	for (const event of events) {
+		if (!("type" in event) || event.type !== "replacement") continue;
+		historyUnitIds.add(event.unitId);
+		if (event.action !== "undo") for (const ref of event.atomRefs) {
+			historyAtomIds.add(ref.atomId);
+			const atom = atoms.find((candidate) => candidate.id === ref.atomId);
+			if (event.linkedExclusion && atom) linkedTurnIds.add(atom.turnId);
+		}
+		for (const change of event.linkedExclusion?.atomChanges ?? []) historyAtomIds.add(change.atomId);
+	}
+	for (const atom of atoms) if (linkedTurnIds.has(atom.turnId)) historyAtomIds.add(atom.id);
 	for (const record of base) for (const unit of record.units) {
 		const state = states.get(unit.id);
 		if (!state) continue;
@@ -3429,7 +3851,8 @@ function replacementUnits(atoms, exclusionStates, events) {
 	}
 	return {
 		byAtom,
-		historyUnitIds
+		historyUnitIds,
+		historyAtomIds
 	};
 }
 function cloneWithContent(message, content) {
@@ -3498,23 +3921,23 @@ function projectOneMessage(message, atoms, states, unitByAtom) {
 function rowProjection(rowAtoms, unitByAtom) {
 	return rowAtoms.map((atom) => unitByAtom.get(atom.id)).find((item) => !!item && item.state.replacementState === "replaced");
 }
-function rowHasHistory(rowAtoms, unitByAtom, historyUnitIds) {
-	return rowAtoms.some((atom) => {
+function rowHasHistory(rowAtoms, unitByAtom, historyUnitIds, historyAtomIds) {
+	return rowAtoms.some((atom) => historyAtomIds.has(atom.id) || (() => {
 		const item = unitByAtom.get(atom.id);
 		return !!item && historyUnitIds.has(item.unit.id);
-	});
+	})());
 }
 function messagePayloadEqual(left, right) {
 	return roleOf(left) === roleOf(right) && JSON.stringify(left.content) === JSON.stringify(right.content);
 }
-function replacementCompatible(baseline, current, rowAtoms, unitByAtom, historyUnitIds) {
+function replacementCompatible(baseline, current, rowAtoms, unitByAtom, historyUnitIds, historyAtomIds) {
 	if (rowProjection(rowAtoms, unitByAtom)) {
 		const expected = projectOneMessage(baseline, rowAtoms, /* @__PURE__ */ new Map(), unitByAtom);
 		if (messagePayloadEqual(baseline, current) || expected && messagePayloadEqual(expected, current)) return true;
 		if (roleOf(baseline) === "user") return false;
 		return structurallyCompatible(baseline, current) || isKindSubsequence(baseline, current) || !!expected && (structurallyCompatible(expected, current) || isKindSubsequence(expected, current));
 	}
-	if (rowHasHistory(rowAtoms, unitByAtom, historyUnitIds)) return restoreCompatible(baseline, current) || structurallyCompatible(baseline, current);
+	if (rowHasHistory(rowAtoms, unitByAtom, historyUnitIds, historyAtomIds)) return restoreCompatible(baseline, current) || structurallyCompatible(baseline, current);
 	return structurallyCompatible(baseline, current) || isKindSubsequence(baseline, current);
 }
 function projectModelContext(input) {
@@ -3522,7 +3945,7 @@ function projectModelContext(input) {
 	if (projectionEvents.length === 0) return [...input.messages];
 	const rows = rowsForEntries(input.entries);
 	const { states, byEntry } = activeAtomsByEntry(input.atoms, projectionEvents);
-	const { byAtom: unitByAtom, historyUnitIds } = replacementUnits(input.atoms, states, projectionEvents);
+	const { byAtom: unitByAtom, historyUnitIds, historyAtomIds } = replacementUnits(input.atoms, states, projectionEvents);
 	const restoredIds = restoredAtomIds(input.atoms, projectionEvents, states);
 	const output = [];
 	let cursor = 0;
@@ -3531,17 +3954,17 @@ function projectModelContext(input) {
 		const projection = rowProjection(rowAtoms, unitByAtom);
 		const hasExcluded = rowAtoms.some((atom) => states.get(atom.id) === "exclude");
 		const hasRestored = rowAtoms.some((atom) => restoredIds.has(atom.id));
-		const hasHistory = rowHasHistory(rowAtoms, unitByAtom, historyUnitIds);
-		let match = -1;
-		let reconstructed = false;
+		const hasHistory = rowHasHistory(rowAtoms, unitByAtom, historyUnitIds, historyAtomIds);
 		const compatible = [];
 		for (let index = cursor; index < input.messages.length; index += 1) {
 			const candidate = input.messages[index];
-			if (candidate && replacementCompatible(row.baseline, candidate, rowAtoms, unitByAtom, historyUnitIds)) compatible.push({
+			if (candidate && replacementCompatible(row.baseline, candidate, rowAtoms, unitByAtom, historyUnitIds, historyAtomIds)) compatible.push({
 				candidate,
 				index
 			});
 		}
+		let match = -1;
+		let reconstructed = false;
 		if (projection) {
 			const expected = projectOneMessage(row.baseline, rowAtoms, /* @__PURE__ */ new Map(), unitByAtom);
 			const exact = compatible.filter(({ candidate }) => messagePayloadEqual(row.baseline, candidate) || !!expected && messagePayloadEqual(expected, candidate));
@@ -3559,27 +3982,20 @@ function projectModelContext(input) {
 			reconstructed = hasHistory || hasRestored && !structurallyCompatible(row.baseline, compatible[0].candidate);
 		}
 		if (match < 0) {
+			if (hasExcluded) {
+				if (hasHistory) continue;
+				throw new ProjectionAlignmentError("excluded message could not be aligned with the active context");
+			}
+			if (hasRestored || hasHistory) {
+				const restored = projectOneMessage(row.baseline, rowAtoms, states, unitByAtom);
+				if (restored) output.push(restored);
+				continue;
+			}
 			if (projection) {
 				if (projectOneMessage(row.baseline, rowAtoms, states, unitByAtom)) throw new ProjectionAlignmentError("projected message could not be aligned");
 				continue;
 			}
-			if (hasExcluded && !projection) throw new ProjectionAlignmentError("excluded message could not be aligned with the active context");
-			if (hasRestored || projection || hasHistory) {
-				const candidates = input.messages.map((candidate, index) => ({
-					candidate,
-					index
-				})).filter(({ candidate, index }) => index >= cursor && replacementCompatible(row.baseline, candidate, rowAtoms, unitByAtom, historyUnitIds));
-				if (candidates.length > 1 && projection) throw new ProjectionAlignmentError("projected message could not be aligned unambiguously");
-				if (candidates.length === 1) {
-					match = candidates[0].index;
-					reconstructed = true;
-				} else {
-					const restored = projectOneMessage(row.baseline, rowAtoms, states, unitByAtom);
-					if (restored) output.push(restored);
-					continue;
-				}
-			}
-			if (match < 0) continue;
+			continue;
 		}
 		for (let index = cursor; index < match; index += 1) {
 			const extra = input.messages[index];
@@ -3600,7 +4016,7 @@ function projectModelContext(input) {
 }
 function projectionOverlapsEntryIds(entryIds, atoms, projectionEvents) {
 	const uniqueEvents = uniqueProjectionEvents(projectionEvents);
-	const states = reduceProjectionStates(atoms, uniqueEvents.filter(isExclusionEvent));
+	const states = reduceProjectionStates(atoms, uniqueEvents);
 	if ([...states.values()].some((state) => state === "unavailable")) throw new ProjectionAlignmentError("active projection is unavailable");
 	if (atoms.some((atom) => entryIds.has(atom.sourceRef.entryId) && states.get(atom.id) === "exclude")) return true;
 	const { byAtom } = replacementUnits(atoms, states, uniqueEvents);
@@ -3719,6 +4135,8 @@ function contextEditorExtension(pi) {
 				return;
 			}
 			let uiState;
+			let replacementReview;
+			const text = createPiText(locale);
 			while (true) {
 				const host = new PiContextEditorHost(ctx);
 				const records = host.records();
@@ -3745,13 +4163,16 @@ function contextEditorExtension(pi) {
 						locator,
 						...input
 					}),
+					previewReplacement: (input) => host.previewReplacementMutation(input),
 					commitReplacement: (input) => host.commitReplacementMutation(input),
 					restoreReplacement: (input) => host.restoreReplacementMutation(input),
 					undoReplacement: (input) => host.undoReplacementMutation(input),
 					undo: (baseRevision) => host.undo(baseRevision),
 					persistPrefs: (nextPrefs) => host.setPrefs(nextPrefs),
 					notify: (message, type = "info") => ctx.ui.notify(message, type),
+					isIdle: () => ctx.isIdle(),
 					initialUiState: uiState,
+					initialReplacementReview: replacementReview,
 					locale
 				}, (result) => {
 					exit = result;
@@ -3759,7 +4180,33 @@ function contextEditorExtension(pi) {
 				}));
 				if (!exit || exit.kind === "close") break;
 				uiState = exit.uiState;
+				if (exit.kind === "cancel-edit") {
+					replacementReview = void 0;
+					continue;
+				}
+				if (exit.kind === "replacement-commit") {
+					const review = exit.review;
+					replacementReview = void 0;
+					try {
+						const result = host.commitReplacementMutation({
+							baseRevision: review.draft.baseRevision,
+							operationId: review.draft.operationId,
+							unitId: review.draft.unitId,
+							text: review.draft.text,
+							excludeAssociatedReasoning: review.excludeAssociatedReasoning,
+							confirmedUnitIds: review.preview.effectiveUnitIds,
+							confirmationScope: review.preview.effectiveUnitIds
+						});
+						if (!result.ok || result.conflict) ctx.ui.notify(text.sidecarChanged(), "warning");
+						else if (!result.eventId) ctx.ui.notify(text.replacementReviewNoop(), "info");
+					} catch (error) {
+						const message = error instanceof Error ? error.message : String(error);
+						ctx.ui.notify(message === "CONTEXT_EDITOR_REPLACEMENT_EMPTY" ? text.replacementReviewBlocked(text.replacementEmpty()) : text.operationFailed(message), "warning");
+					}
+					continue;
+				}
 				if (exit.kind !== "edit") continue;
+				replacementReview = void 0;
 				let value;
 				try {
 					value = await ctx.ui.editor(exit.title, exit.text);
@@ -3769,15 +4216,70 @@ function contextEditorExtension(pi) {
 				}
 				if (value === void 0) continue;
 				try {
+					const linkRequested = exit.excludeAssociatedReasoning ?? exit.unitKind === "answer";
+					const preview = host.previewReplacementMutation({
+						baseRevision: exit.baseRevision,
+						operationId: exit.operationId,
+						unitId: exit.unitId,
+						text: value,
+						excludeAssociatedReasoning: linkRequested
+					});
+					const draft = {
+						unitId: exit.unitId,
+						title: exit.title,
+						text: value,
+						originalText: exit.originalText,
+						baseRevision: exit.baseRevision,
+						operationId: exit.operationId,
+						unitKind: exit.unitKind,
+						uiState: exit.uiState
+					};
+					if (!preview.canCommit && exit.unitKind === "answer" && linkRequested && preview.associatedReasoningUnitIds.length > 0) {
+						if (host.previewReplacementMutation({
+							baseRevision: exit.baseRevision,
+							operationId: exit.operationId,
+							unitId: exit.unitId,
+							text: value,
+							excludeAssociatedReasoning: false
+						}).canCommit && (preview.textChanged || preview.newlyExcludedAtomIds.length > 0)) {
+							replacementReview = {
+								draft,
+								preview,
+								excludeAssociatedReasoning: true
+							};
+							continue;
+						}
+					}
+					if (!preview.canCommit) {
+						ctx.ui.notify(text.replacementReviewBlocked(preview.disabledReason ?? "unavailable"), "warning");
+						continue;
+					}
+					if (!preview.textChanged && preview.newlyExcludedAtomIds.length === 0) {
+						ctx.ui.notify(text.replacementReviewNoop(), "info");
+						continue;
+					}
+					if (exit.unitKind === "answer" && preview.associatedReasoningUnitIds.length > 0) {
+						replacementReview = {
+							draft,
+							preview,
+							excludeAssociatedReasoning: linkRequested
+						};
+						continue;
+					}
 					const result = host.commitReplacementMutation({
 						baseRevision: exit.baseRevision,
+						operationId: exit.operationId,
 						unitId: exit.unitId,
-						text: value
+						text: value,
+						excludeAssociatedReasoning: false
 					});
-					if (!result.ok || result.conflict) ctx.ui.notify("The session or sidecar changed; edit discarded. Please edit again.", "warning");
+					if (!result.ok || result.conflict) ctx.ui.notify(text.sidecarChanged(), "warning");
+					else if (!result.eventId) ctx.ui.notify(text.replacementReviewNoop(), "info");
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
-					ctx.ui.notify(message === "CONTEXT_EDITOR_REPLACEMENT_EMPTY" ? "Replacement text cannot be blank." : "Edit failed: " + message, "warning");
+					if (message === "CONTEXT_EDITOR_CONFLICT") ctx.ui.notify(text.sidecarChanged(), "warning");
+					else if (message === "CONTEXT_EDITOR_REPLACEMENT_EMPTY") ctx.ui.notify(text.replacementReviewBlocked(text.replacementEmpty()), "warning");
+					else ctx.ui.notify(text.operationFailed(message), "warning");
 				}
 			}
 		}

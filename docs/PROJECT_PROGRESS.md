@@ -1,6 +1,6 @@
 # Agent Context Editor 项目进度
 
-更新日期：2026-08-26
+更新日期：2026-09-09
 当前基线：Pi `0.84.2`、DeepSeek Harness `@deepseek-ai/dsh@0.1.0-rc.8`（commit `141eb6f…`）；Pi TUI 与 DeepSeek Harness 的上下文排除和 User/Answer 手动编辑均已完成，并通过自动化与本地宿主回归
 
 ## 1. 项目目标
@@ -24,13 +24,13 @@
 | 组件 | 当前版本/边界 | 当前状态 |
 | --- | --- | --- |
 | 共享 Core | 根目录 `packages/context-editor-core` | 已完成第一阶段，作为 Pi 与 DeepSeek 的行为基准 |
-| Pi Extension | `pi-context-editor@0.5.0` | 已构建；Pi TUI `/ctx` 支持模型上下文排除和 User/Answer 手动替换，Pi Desktop/RPC 保持旧路径 |
+| Pi Extension | `pi-context-editor@0.5.1` | 已构建；Pi TUI `/ctx` 支持模型上下文排除和 User/Answer 手动替换，Pi Desktop/RPC 保持旧路径 |
 | Pi TUI | Pi `0.84.2` | 全屏编辑器、上下文排除、User/Answer 替换、恢复、LIFO 撤销和状态恢复已实现，自动化测试与宿主回归通过 |
 | Pi Desktop/RPC | Pi Desktop 原生对话框路径 | 可用，但仍是独立管理器，不改主聊天时间线 |
-| DeepSeek Harness | `context-editor-deepseek-harness@0.3.0` | rc.8 原生上下文投影、独立 reasoning/answer、搜索筛选和 User/Answer replacement 已实现；`contextReplacement` 已对符合条件的 User/Answer 单元启用 |
+| DeepSeek Harness | `context-editor-deepseek-harness@0.3.1` | rc.8 原生上下文投影、独立 reasoning/answer、搜索筛选和 User/Answer replacement 已实现；Answer 编辑默认可联动排除同轮 Reasoning，签名思考扩展工具链时要求确认；`contextReplacement` 已对符合条件的 User/Answer 单元启用 |
 | Pi Context Desktop | 独立 fork 的 Windows x64 `0.1.4` 社区构建 | 已发布边界记录，不属于本仓库的可复用适配器源码 |
 
-Pi 和 DeepSeek 的发布包均为预构建 tarball；本次生成并发布 `v0.3.0` 稳定包，DeepSeek 宿主本身仍是 rc.8 Developer Preview。
+Pi 和 DeepSeek 的发布包均为预构建 tarball；`v0.3.1` 通过 GitHub Release 发布；DeepSeek 宿主本身仍是 rc.8 Developer Preview。
 
 ## 3. 按最终功能表的完成度
 
@@ -173,14 +173,14 @@ npm run verify:pack
 - Pi 适配器依赖和主要目标锁定在 `0.84.2`。
 - Pi TUI 已完成本地 `/ctx` 基础冒烟，并已完成隔离 `PI_CODING_AGENT_DIR`、最终 tarball 安装和本地 faux provider payload 捕获；验收记录见 `docs/CONTEXT_REPLACEMENT_ACCEPTANCE.md`。
 - DeepSeek Harness 已按 Developer Preview commit `141eb6fef83422698aef7a981029e843e8161534` 和 CLI `@deepseek-ai/dsh@0.1.0-rc.8` 完成 Host/Core、本地 fake provider 合成、包校验、隔离安装和 Web 启动冒烟，并已安装到 `deepseek-harness-latest/.user-data/profiles/web`（HTTP 200）；本轮不宣称真实外部 API smoke。
-- DeepSeek 0.3.0 手动编辑验收记录见 `docs/DEEPSEEK_HARNESS_REPLACEMENT_ACCEPTANCE.md`。
+- DeepSeek 0.3.1 Answer/Reasoning 联动验收记录见 `docs/DEEPSEEK_HARNESS_ANSWER_REASONING_ACCEPTANCE.md`；0.3.0 记录保留为历史基线。
 - Pi Context Desktop `0.1.4` 已作为独立 Windows x64 社区构建记录。
 
 ### 仍需注意的验证边界
 
 - Pi TUI 在 `80×24`、`120×40` 和动态 resize 下的完整人工回归尚未全部留档。
 - Pi TUI 重启后 sidecar 偏好、长回答滚动、分支切换和冲突刷新需要按正式验收脚本再跑一遍。
-- DeepSeek 0.3.0 已完成隔离 npm profile 安装、Web 启动和本地 fake provider Payload 合成；未重复执行浏览器人工回归和重启回归。
+- DeepSeek 0.3.1 已完成目标 profile 隔离安装、Web 启动和 Host getSnapshot 冒烟；浏览器自动化内核在本机被沙箱初始化错误阻断，真实 API 仍待用户提供凭据后单独验收。
 - 当前环境没有 DeepSeek 真实 API 凭据，因此未执行外部请求 smoke；稳定版兼容范围锁定在已测试的 rc.8 宿主边界。
 - DeepSeek 适配器后续若跟随 Harness 新 commit，需要重新执行完整宿主验收；不能仅凭包安装成功判断兼容。
 
@@ -214,13 +214,13 @@ Pi TUI 与 rc.8 DeepSeek Harness 的契约和安全门已经实现；两者均�
 ### 宿主选择原则
 
 - Pi TUI：继续作为当前产品交互和真实终端行为的主要验证宿主。
-- DeepSeek Harness：已安装并验证 0.3.0 稳定包，继续作为共享 Core、跨宿主记录结构和搜索结果的对照宿主。
+- DeepSeek Harness：已安装并验证 0.3.1 发布包，继续作为共享 Core、跨宿主记录结构和搜索结果的对照宿主。
 - Pi Desktop 或第三个 Agent：作为后续主时间线适配验证，不承担 Core 规则的首次设计。
 
 ## 8. 当前结论
 
-项目已经进入“共享 Core + Pi TUI 上下文排除与手动替换 + DeepSeek 0.3.0 稳定适配 + 独立管理视图”的稳定发布阶段。Pi TUI 和 DeepSeek 都能在不改写原始 Surface/历史事件的前提下生成后续派生模型输入；主聊天时间线原位编辑、AI 精简和摘要替换仍未完成。
+项目已经进入“共享 Core + Pi TUI 上下文排除与手动替换 + DeepSeek 0.3.1 稳定适配 + 独立管理视图”的稳定发布阶段。Pi TUI 和 DeepSeek 都能在不改写原始 Surface/历史事件的前提下生成后续派生模型输入；主聊天时间线原位编辑、AI 精简和摘要替换仍未完成。
 
 因此当前最准确的状态是：
 
-> 当前状态：共享 Core、Pi TUI 和 DeepSeek Harness replacement 实现已完成；本轮 `npm run verify` 通过，DeepSeek 0.3.0 稳定 tarball 与 SHA-256 已生成，目标 rc.8 profile 安装和 Web 启动冒烟通过；未执行外部 API smoke，主聊天时间线原位编辑、AI 精简和摘要替换仍未完成。
+> 当前状态：共享 Core、Pi TUI 和 DeepSeek Harness replacement + Answer/Reasoning 联动实现已完成；0.3.1 定向测试、检查、扫描、构建和候选 tarball 已生成，目标 rc.8 profile 已安装并启动，Host getSnapshot 冒烟通过。浏览器自动化受本机沙箱初始化错误阻断，真实外部 API smoke 仍未执行；主聊天时间线原位编辑、AI 精简和摘要替换仍未完成。

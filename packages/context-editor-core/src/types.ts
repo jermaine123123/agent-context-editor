@@ -124,12 +124,13 @@ export interface ContextEditableUnit {
   replacementDisabledReason?: ContextReplacementDisabledReason
   canRestoreReplacement: boolean
   canUndoReplacement: boolean
+  associatedReasoningUnitIds?: string[]
 }
 
 export interface ContextEditorSnapshot {
   revision: string
   sourceLeafId: string | null
-  records: Array<Pick<ContextRecord, 'id' | 'kind' | 'viewState' | 'mutable' | 'entryId' | 'entryIds' | 'anchorEntryId' | 'toolCallId'> & { projectionState?: ContextEditableUnitProjectionState; units: Array<Pick<ContextEditableUnit, 'id' | 'recordId' | 'kind' | 'atomIds' | 'viewState' | 'mutable'> & { projectionState?: ContextEditableUnitProjectionState; effectiveText?: string; replacementState?: ContextReplacementProjectionState; replacementSupported?: boolean; replacementDisabledReason?: ContextReplacementDisabledReason; canRestoreReplacement?: boolean; canUndoReplacement?: boolean }> }>
+  records: Array<Pick<ContextRecord, 'id' | 'kind' | 'viewState' | 'mutable' | 'entryId' | 'entryIds' | 'anchorEntryId' | 'toolCallId'> & { projectionState?: ContextEditableUnitProjectionState; units: Array<Pick<ContextEditableUnit, 'id' | 'recordId' | 'kind' | 'atomIds' | 'viewState' | 'mutable'> & { projectionState?: ContextEditableUnitProjectionState; effectiveText?: string; replacementState?: ContextReplacementProjectionState; replacementSupported?: boolean; replacementDisabledReason?: ContextReplacementDisabledReason; canRestoreReplacement?: boolean; canUndoReplacement?: boolean; associatedReasoningUnitIds?: string[] }> }>
   canUndo: boolean
   legacyStateFound: boolean
   projectionAvailable?: boolean
@@ -179,6 +180,16 @@ export interface ContextReplacementAtomRef {
   fingerprint: string
 }
 
+/** Metadata carried by an Answer replacement that also excludes its reasoning. */
+export interface ContextReplacementLinkedExclusion {
+  /** The operation that owns this linked exclusion (normally the replacement event id). */
+  operationId: string
+  /** Reasoning/tool units newly affected by this operation. */
+  unitIds: string[]
+  /** Atom-level transitions, including the state that must be restored on whole-operation undo. */
+  atomChanges: ContextProjectionChange[]
+}
+
 export type ContextReplacementEventV1 =
   | {
       schemaVersion: 1
@@ -192,6 +203,7 @@ export type ContextReplacementEventV1 =
       afterText: ReplacementText
       baseRevision: ContextRevision
       createdAt: string
+      linkedExclusion?: ContextReplacementLinkedExclusion
     }
   | {
       schemaVersion: 1
@@ -202,6 +214,7 @@ export type ContextReplacementEventV1 =
       undoOf: string
       baseRevision: ContextRevision
       createdAt: string
+      linkedExclusion?: ContextReplacementLinkedExclusion
     }
 
 export type ContextProjectionEvent = ContextProjectionEventV1 | ContextReplacementEventV1

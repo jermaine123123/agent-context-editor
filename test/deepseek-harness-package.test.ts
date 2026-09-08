@@ -14,7 +14,7 @@ describe('DeepSeek Harness installable bundle', () => {
       dsh?: { bundle?: { patch?: string }; client?: { platform?: string } }
     }
     expect(manifest.name).toBe('context-editor-deepseek-harness')
-    expect(manifest.version).toBe('0.3.0')
+    expect(manifest.version).toBe('0.3.1')
     expect(manifest.dsh?.bundle?.patch).toBe('./cordis.patch.yml')
     expect(manifest.dsh?.client?.platform).toBe('web')
     expect(readFileSync(resolve(root, 'cordis.patch.yml'), 'utf8')).toContain('id: context-editor')
@@ -48,7 +48,7 @@ describe('DeepSeek Harness installable bundle', () => {
 
   it('exports the direct Remote surface with context replacement methods', () => {
     expect(descriptors.map(descriptor => descriptor.method)).toEqual([
-      'getSnapshot', 'listRecords', 'getRecord', 'searchRecords', 'getSearchMatch', 'previewContext', 'commitContext', 'commitView', 'undoView', 'commitReplacement', 'restoreReplacement', 'undoReplacement',
+      'getSnapshot', 'listRecords', 'getRecord', 'searchRecords', 'getSearchMatch', 'previewContext', 'previewReplacement', 'commitContext', 'commitView', 'undoView', 'commitReplacement', 'restoreReplacement', 'undoReplacement',
     ])
     expect(descriptors.every(descriptor => descriptor.namespace === 'contextEditor')).toBe(true)
     expect(descriptors.every(descriptor => descriptor.parameters[0]?.codec.mode === 'strict')).toBe(true)
@@ -56,6 +56,6 @@ describe('DeepSeek Harness installable bundle', () => {
     expect(descriptors.every(descriptor => typeof (descriptor.parameters[0]?.codec.schema as { parse?: unknown }).parse === 'function')).toBe(true)
     expect(descriptors.every(descriptor => typeof (descriptor.result.schema as { parse?: unknown }).parse === 'function')).toBe(true)
     expect(TYPERT.face).toBe('host')
-    expect(TYPERT.invocations).toHaveLength(12)
+    expect(TYPERT.invocations).toHaveLength(13)
   })
 })

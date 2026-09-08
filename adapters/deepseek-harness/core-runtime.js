@@ -1,6 +1,6 @@
 /*
  * GENERATED FILE - do not edit directly.
- * Canonical Core source digest: f3f2e5d503d28a435a6ed6c681602b742d856aaae096212ff0b2f0588af2230d
+ * Canonical Core source digest: c5eea2828a07537c783172568092103d8f5ae0c63b201a70877fc088b651bb65
  * Rebuild with: npm run build:deepseek
  */
 //#region packages/context-editor-core/src/projection.ts
@@ -10,21 +10,43 @@ function stateForAtom(states, atom) {
 function reduceProjectionStates(atoms, events) {
 	const result = /* @__PURE__ */ new Map();
 	const byId = new Map(atoms.map((atom) => [atom.id, atom]));
+	const linkedByEvent = /* @__PURE__ */ new Map();
+	const ownerByAtom = /* @__PURE__ */ new Map();
 	for (const atom of atoms) result.set(atom.id, "include");
-	for (const event of events) for (const change of event.changes) {
+	const apply = (change, owner) => {
 		const atom = byId.get(change.atomId);
-		if (!atom) continue;
+		if (!atom) return;
 		if (atom.fingerprint !== change.fingerprint || atom.sourceRef.entryId !== change.sourceRef.entryId || atom.sourceRef.blockIndex !== change.sourceRef.blockIndex) {
 			result.set(atom.id, "unavailable");
-			continue;
+			return;
 		}
 		const current = result.get(atom.id) ?? "include";
-		if (current === "unavailable") continue;
+		if (current === "unavailable") return;
 		if (current !== change.before && current !== change.after) {
 			result.set(atom.id, "unavailable");
-			continue;
+			return;
 		}
 		result.set(atom.id, change.after);
+		ownerByAtom.set(atom.id, owner);
+	};
+	for (const event of events) {
+		if (isReplacementEvent(event)) {
+			if (event.action === "undo") {
+				const changes = linkedByEvent.get(event.undoOf);
+				if (changes) {
+					for (const change of changes) if ((result.get(change.atomId) ?? "include") === change.after && ownerByAtom.get(change.atomId) === event.undoOf) {
+						result.set(change.atomId, change.before);
+						ownerByAtom.delete(change.atomId);
+					}
+				}
+			} else if (event.linkedExclusion?.atomChanges) {
+				const changes = event.linkedExclusion.atomChanges;
+				linkedByEvent.set(event.eventId, changes);
+				for (const change of changes) apply(change, event.eventId);
+			}
+			continue;
+		}
+		for (const change of event.changes) apply(change, event.transactionId);
 	}
 	return result;
 }
@@ -177,6 +199,60 @@ function unitHasKindAndTurn(unit, kind, turnIds) {
 * results are paired by call id. A signed reasoning block is kept with all
 * tool blocks in the same logical turn; the final answer remains independent.
 */
+/** Find same-turn reasoning for an Answer and expand signed reasoning to its tool closure. */
+function selectAssociatedReasoningTargets(records, answerUnitId, projectionStates = /* @__PURE__ */ new Map()) {
+	const units = records.flatMap((record) => record.units.map((unit) => ({
+		record,
+		unit
+	})));
+	const answer = units.find((item) => item.unit.id === answerUnitId && item.unit.kind === "answer")?.unit;
+	if (!answer) return {
+		answerUnitId,
+		associatedReasoningUnitIds: [],
+		requestedUnitIds: [],
+		effectiveUnitIds: [],
+		autoExpandedUnitIds: [],
+		requestedAtomIds: [],
+		effectiveAtomIds: [],
+		unavailableUnitIds: [],
+		touchesRecentTurn: false,
+		newlyExcludedUnitIds: [],
+		alreadyExcludedUnitIds: [],
+		newlyExcludedAtomIds: [],
+		alreadyExcludedAtomIds: [],
+		disabledReason: "invalid-target"
+	};
+	const turnIds = new Set(answer.atoms.map((atom) => atom.turnId));
+	const reasoningIds = units.filter((item) => item.unit.kind === "reasoning" && item.unit.atoms.some((atom) => turnIds.has(atom.turnId))).map((item) => item.unit.id);
+	const selection = selectProjectionTargets(records, reasoningIds);
+	const effectiveItems = units.filter((item) => selection.effectiveUnitIds.includes(item.unit.id));
+	const unavailableUnitIds = [.../* @__PURE__ */ new Set([...selection.unavailableUnitIds, ...effectiveItems.filter((item) => item.unit.projectionState === "unavailable" || item.unit.mutable === false).map((item) => item.unit.id)])];
+	const newlyExcludedUnitIds = [];
+	const alreadyExcludedUnitIds = [];
+	const newlyExcludedAtomIds = [];
+	const alreadyExcludedAtomIds = [];
+	for (const item of effectiveItems) {
+		if (item.unit.id === answerUnitId) continue;
+		const includedAtoms = item.unit.atoms.filter((atom) => (projectionStates.get(atom.id) ?? "include") === "include");
+		const excludedAtoms = item.unit.atoms.filter((atom) => (projectionStates.get(atom.id) ?? "include") === "exclude");
+		if (includedAtoms.length) newlyExcludedUnitIds.push(item.unit.id);
+		else alreadyExcludedUnitIds.push(item.unit.id);
+		newlyExcludedAtomIds.push(...includedAtoms.map((atom) => atom.id));
+		alreadyExcludedAtomIds.push(...excludedAtoms.map((atom) => atom.id));
+	}
+	const disabledReason = unavailableUnitIds.length ? "associated-reasoning-unavailable" : void 0;
+	return {
+		...selection,
+		answerUnitId,
+		associatedReasoningUnitIds: reasoningIds,
+		newlyExcludedUnitIds,
+		alreadyExcludedUnitIds,
+		newlyExcludedAtomIds,
+		alreadyExcludedAtomIds,
+		unavailableUnitIds,
+		disabledReason
+	};
+}
 function selectProjectionTargets(records, unitIds, recordIds) {
 	const units = records.flatMap((record) => record.units.map((unit) => ({
 		record,
@@ -282,7 +358,8 @@ function projectUnits(recordId, atoms, states, projectionStates, replacementStat
 			atoms: grouped,
 			viewState: unitViewState(grouped, states),
 			projectionState: projectionStateForAtoms(grouped, projectionStates ?? /* @__PURE__ */ new Map()),
-			mutable: true
+			mutable: true,
+			...kind === "answer" && groups.has("reasoning") ? { associatedReasoningUnitIds: [`${recordId}#reasoning`] } : {}
 		};
 	}).map((base) => {
 		const originalText = unitOriginalText(base);
@@ -435,4 +512,4 @@ function searchRecords(records, query, enabledKinds, scope = "dialogue", enabled
 	});
 }
 //#endregion
-export { atomMatchesSearchScope, projectRecords, reduceProjectionStates, reduceReplacementStates, searchRecords, selectProjectionTargets };
+export { atomMatchesSearchScope, projectRecords, reduceProjectionStates, reduceReplacementStates, searchRecords, selectAssociatedReasoningTargets, selectProjectionTargets };

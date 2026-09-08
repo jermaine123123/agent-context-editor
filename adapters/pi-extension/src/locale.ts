@@ -86,10 +86,23 @@ export interface PiText {
   sidecarChanged(): string;
   operationFailed(error: string): string;
   busy(): string;
+  replacementBusy(): string;
   undoConflict(): string;
   undoFailed(error: string): string;
   restoreAllConfirmTitle(): string;
   restoreAllConfirmMessage(): string;
+  editTitle(kind: string): string;
+  replacementReviewTitle(): string;
+  replacementReviewHint(): string;
+  replacementReviewAnswer(changed: boolean): string;
+  replacementReviewLink(enabled: boolean, count: number): string;
+  replacementReviewScope(scope: "associated" | "newlyExcluded" | "alreadyExcluded" | "autoExpanded", ids: readonly string[]): string;
+  replacementReviewConfirmationRequired(count: number): string;
+  replacementReviewBlocked(reason: string): string;
+  replacementReviewNoop(): string;
+  replacementRestoreTitle(): string;
+  replacementRestoreMessage(): string;
+  replacementEmpty(): string;
 }
 
 function format(template: string, values: Record<string, string | number>): string {
@@ -247,9 +260,25 @@ export function createPiText(locale: PiLocale): PiText {
     sidecarChanged: () => zh ? "会话或 sidecar 已变化，已刷新 Context Editor。" : "The conversation or sidecar changed; Context Editor was refreshed.",
     operationFailed: (error) => zh ? `Context Editor 操作失败：${error}` : `Context Editor operation failed: ${error}`,
     busy: () => zh ? "Agent 运行中，暂时不能修改隐藏状态。" : "The Agent is running; hidden state cannot be changed yet.",
+    replacementBusy: () => zh ? "Agent 正在运行，暂时不能编辑上下文。" : "The Agent is running; context editing is temporarily unavailable.",
     undoConflict: () => zh ? "撤销时发现 revision 冲突，已刷新。" : "A revision conflict occurred while undoing; the view was refreshed.",
     undoFailed: (error) => zh ? `撤销失败：${error}` : `Undo failed: ${error}`,
     restoreAllConfirmTitle: () => zh ? "恢复全部隐藏单元？" : "Restore all hidden units?",
     restoreAllConfirmMessage: () => zh ? "这只会恢复 Context Editor 的视觉状态，不会修改 Session 或模型上下文。" : "This only restores the Context Editor view state; the Session and model context are unchanged.",
+    editTitle: (kind) => zh ? `编辑${kind}` : `Edit ${kind}`,
+    replacementReviewTitle: () => zh ? "确认 Answer 编辑与联动排除" : "Review Answer edit and linked exclusion",
+    replacementReviewHint: () => zh ? "Space 切换联动排除 · PgUp/PgDn 滚动 · Enter 保存 · e 返回修改草稿 · Esc 取消整次编辑" : "Space toggle linked exclusion · PgUp/PgDn scroll · Enter save · e edit draft · Esc cancel",
+    replacementReviewAnswer: (changed) => zh ? `Answer 文本：${changed ? "已改变" : "未改变"}` : `Answer text: ${changed ? "changed" : "unchanged"}`,
+    replacementReviewLink: (enabled, count) => zh ? `同时排除本轮思考：[${enabled ? "x" : " "}]（关联 ${count} 个 Reasoning 单元）` : `Exclude associated reasoning: [${enabled ? "x" : " "}] (${count} reasoning unit${count === 1 ? "" : "s"})`,
+    replacementReviewScope: (scope, ids) => {
+      const labels = zh ? { associated: "关联 Reasoning", newlyExcluded: "新增排除", alreadyExcluded: "原已排除", autoExpanded: "自动扩展工具链" } : { associated: "Associated reasoning", newlyExcluded: "Newly excluded", alreadyExcluded: "Already excluded", autoExpanded: "Auto-expanded tool closure" };
+      return `${labels[scope]}: ${ids.length ? ids.join(", ") : (zh ? "无" : "none")}`;
+    },
+    replacementReviewConfirmationRequired: (count) => zh ? `签名思考触发结构闭包：需确认 ${count} 个自动扩展单元。` : `Signed reasoning expands the structural closure; confirm ${count} auto-expanded unit${count === 1 ? "" : "s"}.`,
+    replacementReviewBlocked: (reason) => zh ? `当前联动事务不可保存：${reason}` : `This linked transaction cannot be saved: ${reason}`,
+    replacementReviewNoop: () => zh ? "文本和联动范围都没有变化，未追加事件。" : "No text or linked-scope changes; no event was appended.",
+    replacementRestoreTitle: () => zh ? "恢复 Answer 原文？" : "Restore Answer canonical text?",
+    replacementRestoreMessage: () => zh ? "仅恢复 Answer 原文；本轮 Reasoning 的排除状态会保留。" : "Only the Answer text is restored; Reasoning exclusion for this turn remains.",
+    replacementEmpty: () => zh ? "替换文本不能为空白。" : "Replacement text cannot be blank.",
   };
 }

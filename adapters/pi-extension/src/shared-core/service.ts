@@ -1,6 +1,6 @@
 /* GENERATED FROM packages/context-editor-core; do not edit directly. */
 import { branchRevision, stableFingerprint } from './fingerprint.js'
-import { reduceProjectionStates, reduceReplacementStates, selectProjectionTargets, type ProjectionAtomState } from './projection.js'
+import { reduceProjectionStates, reduceReplacementStates, selectProjectionTargets, selectAssociatedReasoningTargets, type ProjectionAtomState } from './projection.js'
 import { projectRecords } from './records.js'
 import { searchRecords } from './search.js'
 import {
@@ -82,6 +82,7 @@ function recordSnapshot(record: ContextRecord) {
       ...(unit.replacementDisabledReason ? { replacementDisabledReason: unit.replacementDisabledReason } : {}),
       canRestoreReplacement: unit.canRestoreReplacement,
       canUndoReplacement: unit.canUndoReplacement,
+      ...(unit.associatedReasoningUnitIds?.length ? { associatedReasoningUnitIds: unit.associatedReasoningUnitIds } : {}),
     })),
     ...(record.entryId ? { entryId: record.entryId } : {}),
     ...(record.entryIds?.length ? { entryIds: record.entryIds } : {}),
@@ -112,7 +113,7 @@ function currentState(adapter: ContextEditorSessionAdapter) {
   const states = reduceViewStates(current.atoms, legacy, events)
   const projectionStates: Map<string, ProjectionAtomState> = current.projectionAvailable === false
     ? new Map(current.atoms.map((atom) => [atom.id, 'unavailable' as const]))
-    : reduceProjectionStates(current.atoms, projectionEventsUnique.filter((event): event is ContextProjectionEventV1 => !('type' in event)))
+    : reduceProjectionStates(current.atoms, projectionEventsUnique)
   const baseRecords = projectRecords(current.atoms, states, projectionStates)
   const replacementStates = reduceReplacementStates(baseRecords.flatMap((record) => record.units), projectionEventsUnique, current.projectionAvailable !== false)
   const records = projectRecords(current.atoms, states, projectionStates, replacementStates)
@@ -182,6 +183,52 @@ function replacementTarget(state: ReturnType<typeof currentState>, unitId: strin
     if (unit) return { record, unit, replacement: state.replacementStates.get(unit.id) }
   }
   return null
+}
+
+function replacementEventById(state: ReturnType<typeof currentState>, eventId: string): ContextReplacementEventV1 | undefined {
+  return state.projectionEvents.find((event): event is ContextReplacementEventV1 =>
+    'type' in event && event.type === 'replacement' && event.eventId === eventId,
+  )
+}
+
+function linkedUndoExclusion(state: ReturnType<typeof currentState>, undoOf: string, operationId: string) {
+  const linked = replacementEventById(state, undoOf)?.linkedExclusion
+  if (!linked) return undefined
+  return {
+    operationId,
+    unitIds: [...linked.unitIds],
+    atomChanges: linked.atomChanges.map((change) => ({
+      ...change,
+      before: change.after,
+      after: change.before,
+    })),
+  }
+}
+
+function replacementPreviewFailure(
+  state: ReturnType<typeof currentState>,
+  input: { unitId: string; excludeAssociatedReasoning?: boolean },
+  disabledReason: string,
+) {
+  return {
+    baseRevision: state.revision,
+    unitId: input.unitId,
+    unitKind: 'answer' as const,
+    textChanged: false,
+    excludeAssociatedReasoning: Boolean(input.excludeAssociatedReasoning),
+    associatedReasoningUnitIds: [],
+    requestedUnitIds: [],
+    effectiveUnitIds: [],
+    autoExpandedUnitIds: [],
+    newlyExcludedUnitIds: [],
+    alreadyExcludedUnitIds: [],
+    newlyExcludedAtomIds: [],
+    alreadyExcludedAtomIds: [],
+    unavailableUnitIds: [],
+    requiresConfirmation: false,
+    canCommit: false,
+    disabledReason,
+  }
 }
 
 function assertReplacementTarget(target: ReturnType<typeof replacementTarget>): asserts target is NonNullable<ReturnType<typeof replacementTarget>> {
@@ -378,67 +425,123 @@ export class ContextEditorService {
     return { ok: true, eventId, snapshot: snapshotOf(currentState(adapter)) }
   }
 
-  commitReplacement(
+  previewReplacement(
     adapter: ContextEditorSessionAdapter,
-    input: { baseRevision: string | number; unitId: string; text: string },
-  ): { ok: boolean; conflict?: boolean; eventId?: string; snapshot: ContextEditorSnapshot } {
+    input: { baseRevision: string | number; unitId: string; text?: string; excludeAssociatedReasoning?: boolean },
+  ) {
     if (adapter.isBusy()) throw new Error('AGENT_RUNTIME_BUSY')
     const state = currentState(adapter)
+    if (state.projectionAvailable === false) return replacementPreviewFailure(state, input, state.projectionError || 'projection-unavailable')
+    if (!revisionMatches(input.baseRevision, state.revision)) return replacementPreviewFailure(state, input, 'revision-conflict')
+    const target = replacementTarget(state, input.unitId)
+    if (!target) throw new Error('CONTEXT_EDITOR_REPLACEMENT_TARGET_NOT_FOUND')
+    assertReplacementTarget(target)
+    const text = input.text === undefined ? target.unit.effectiveText : input.text
+    if (text.trim().length === 0) throw new Error('CONTEXT_EDITOR_REPLACEMENT_EMPTY')
+    const link = Boolean(input.excludeAssociatedReasoning && target.unit.kind === 'answer')
+    // Keep the association visible even when the checkbox is toggled off so
+    // the review screen can be toggled back on without re-opening the draft.
+    const associated = target.unit.kind === 'answer'
+      ? selectAssociatedReasoningTargets(state.records, target.unit.id, state.projectionStates)
+      : undefined
+    const selection = link && associated
+      ? associated
+      : { associatedReasoningUnitIds: associated?.associatedReasoningUnitIds ?? [], requestedUnitIds: [], effectiveUnitIds: [], autoExpandedUnitIds: [], newlyExcludedUnitIds: [], alreadyExcludedUnitIds: [], newlyExcludedAtomIds: [], alreadyExcludedAtomIds: [], unavailableUnitIds: [], disabledReason: undefined }
+    return {
+      baseRevision: state.revision,
+      unitId: target.unit.id,
+      unitKind: target.unit.kind as 'user' | 'answer',
+      textChanged: text !== target.unit.effectiveText,
+      excludeAssociatedReasoning: link,
+      associatedReasoningUnitIds: selection.associatedReasoningUnitIds,
+      requestedUnitIds: [target.unit.id, ...selection.requestedUnitIds.filter(id => id !== target.unit.id)],
+      effectiveUnitIds: [target.unit.id, ...selection.effectiveUnitIds.filter(id => id !== target.unit.id)],
+      autoExpandedUnitIds: selection.autoExpandedUnitIds,
+      newlyExcludedUnitIds: selection.newlyExcludedUnitIds,
+      alreadyExcludedUnitIds: selection.alreadyExcludedUnitIds,
+      newlyExcludedAtomIds: selection.newlyExcludedAtomIds,
+      alreadyExcludedAtomIds: selection.alreadyExcludedAtomIds,
+      unavailableUnitIds: selection.unavailableUnitIds,
+      requiresConfirmation: selection.autoExpandedUnitIds.length > 0,
+      canCommit: selection.disabledReason === undefined && selection.unavailableUnitIds.length === 0,
+      ...(selection.disabledReason ? { disabledReason: selection.disabledReason } : {}),
+    }
+  }
+
+  commitReplacement(
+    adapter: ContextEditorSessionAdapter,
+    input: { baseRevision: string | number; unitId: string; text: string; operationId?: string; excludeAssociatedReasoning?: boolean; confirmedUnitIds?: readonly string[]; confirmationScope?: readonly string[] },
+  ): { ok: boolean; conflict?: boolean; operationId?: string; eventId?: string; snapshot: ContextEditorSnapshot } {
+    if (adapter.isBusy()) throw new Error('AGENT_RUNTIME_BUSY')
+    const state = currentState(adapter)
+    const operationId = input.operationId ?? replacementEventId()
     if (state.projectionAvailable === false) throw new Error(state.projectionError || 'CONTEXT_EDITOR_PROJECTION_UNAVAILABLE')
-    if (!revisionMatches(input.baseRevision, state.revision)) return { ok: false, conflict: true, snapshot: snapshotOf(currentState(adapter)) }
+    if (!revisionMatches(input.baseRevision, state.revision)) return { ok: false, conflict: true, operationId, snapshot: snapshotOf(currentState(adapter)) }
     if (input.text.trim().length === 0) throw new Error('CONTEXT_EDITOR_REPLACEMENT_EMPTY')
     const target = replacementTarget(state, input.unitId)
     assertReplacementTarget(target)
-    if (input.text === target.unit.effectiveText) return { ok: true, snapshot: snapshotOf(currentState(adapter)) }
+    const link = Boolean(input.excludeAssociatedReasoning && target.unit.kind === 'answer')
+    const selection = link ? selectAssociatedReasoningTargets(state.records, target.unit.id, state.projectionStates) : undefined
+    if (selection?.disabledReason || selection?.unavailableUnitIds.length) throw new Error('CONTEXT_EDITOR_REPLACEMENT_LINK_UNAVAILABLE')
+    const confirmed = new Set((input.confirmedUnitIds ?? input.confirmationScope ?? []).map(String))
+    if (selection?.autoExpandedUnitIds.some(id => !confirmed.has(id))) throw new Error('CONTEXT_EDITOR_REPLACEMENT_CONFIRMATION_REQUIRED')
+    if (input.text === target.unit.effectiveText && !(selection?.newlyExcludedAtomIds.length)) return { ok: true, operationId, snapshot: snapshotOf(state) }
     const beforeText = target.replacement?.replacementText ?? null
-    const atomRefs = target.unit.atoms.map((atom) => ({ atomId: atom.id, sourceRef: atom.sourceRef, fingerprint: atom.fingerprint }))
     const latest = currentState(adapter)
-    if (latest.revision !== state.revision) return { ok: false, conflict: true, snapshot: snapshotOf(latest) }
+    if (latest.revision !== state.revision) return { ok: false, conflict: true, operationId, snapshot: snapshotOf(latest) }
     const latestTarget = replacementTarget(latest, input.unitId)
     assertReplacementTarget(latestTarget)
-    if (latestTarget.unit.atomIds.join('|') !== target.unit.atomIds.join('|') || (latestTarget.replacement?.replacementText ?? null) !== beforeText) {
-      return { ok: false, conflict: true, snapshot: snapshotOf(latest) }
-    }
+    if (latestTarget.unit.atomIds.join('|') !== target.unit.atomIds.join('|') || (latestTarget.replacement?.replacementText ?? null) !== beforeText) return { ok: false, conflict: true, operationId, snapshot: snapshotOf(latest) }
+    const latestSelection = link ? selectAssociatedReasoningTargets(latest.records, latestTarget.unit.id, latest.projectionStates) : undefined
+    if (latestSelection?.disabledReason || latestSelection?.unavailableUnitIds.length) throw new Error('CONTEXT_EDITOR_REPLACEMENT_LINK_UNAVAILABLE')
+    if (latestSelection?.autoExpandedUnitIds.some(id => !confirmed.has(id))) throw new Error('CONTEXT_EDITOR_REPLACEMENT_CONFIRMATION_REQUIRED')
+    const atomRefs = latestTarget.unit.atoms.map((atom) => ({ atomId: atom.id, sourceRef: atom.sourceRef, fingerprint: atom.fingerprint }))
+    const linkedChanges = latestSelection?.newlyExcludedAtomIds.map((atomId) => {
+      const atom = latest.atoms.find((candidate) => candidate.id === atomId)
+      return atom ? { atomId: atom.id, fingerprint: atom.fingerprint, sourceRef: atom.sourceRef, before: latest.projectionStates.get(atom.id) === 'exclude' ? 'exclude' as const : 'include' as const, after: 'exclude' as const } : undefined
+    }).filter((change): change is NonNullable<typeof change> => change !== undefined) ?? []
     const event: ContextReplacementEventV1 = {
       schemaVersion: 1,
       type: 'replacement',
       action: 'replace',
-      eventId: replacementEventId(),
-      unitId: target.unit.id,
-      unitKind: target.unit.kind as 'user' | 'answer',
+      eventId: operationId,
+      unitId: latestTarget.unit.id,
+      unitKind: latestTarget.unit.kind as 'user' | 'answer',
       atomRefs,
       beforeText,
       afterText: input.text,
       baseRevision: state.revision,
       createdAt: new Date().toISOString(),
+      ...(link && latestSelection ? { linkedExclusion: { operationId, unitIds: latestSelection.newlyExcludedUnitIds, atomChanges: linkedChanges } } : {}),
     }
     const eventId = appendProjectionEvent(adapter, event)
     this.searchCache.clear()
-    return { ok: true, eventId, snapshot: snapshotOf(currentState(adapter)) }
+    return { ok: true, operationId, eventId, snapshot: snapshotOf(currentState(adapter)) }
   }
 
   restoreReplacement(
     adapter: ContextEditorSessionAdapter,
-    input: { baseRevision: string | number; unitId: string },
-  ): { ok: boolean; conflict?: boolean; eventId?: string; snapshot: ContextEditorSnapshot } {
+    input: { baseRevision: string | number; operationId?: string; unitId: string },
+  ): { ok: boolean; conflict?: boolean; operationId?: string; eventId?: string; snapshot: ContextEditorSnapshot } {
     if (adapter.isBusy()) throw new Error('AGENT_RUNTIME_BUSY')
     const state = currentState(adapter)
+    const operationId = input.operationId ?? replacementEventId()
     if (state.projectionAvailable === false) throw new Error(state.projectionError || 'CONTEXT_EDITOR_PROJECTION_UNAVAILABLE')
-    if (!revisionMatches(input.baseRevision, state.revision)) return { ok: false, conflict: true, snapshot: snapshotOf(currentState(adapter)) }
+    if (!revisionMatches(input.baseRevision, state.revision)) return { ok: false, conflict: true, operationId, snapshot: snapshotOf(currentState(adapter)) }
     const target = replacementTarget(state, input.unitId)
     assertReplacementTarget(target)
     const beforeText = target.replacement?.replacementText ?? null
-    if (beforeText === null) return { ok: true, snapshot: snapshotOf(currentState(adapter)) }
+    if (beforeText === null) return { ok: true, operationId, snapshot: snapshotOf(currentState(adapter)) }
     const latest = currentState(adapter)
-    if (latest.revision !== state.revision) return { ok: false, conflict: true, snapshot: snapshotOf(latest) }
+    if (latest.revision !== state.revision) return { ok: false, conflict: true, operationId, snapshot: snapshotOf(latest) }
     const latestTarget = replacementTarget(latest, input.unitId)
     assertReplacementTarget(latestTarget)
-    if ((latestTarget.replacement?.replacementText ?? null) !== beforeText) return { ok: false, conflict: true, snapshot: snapshotOf(latest) }
+    if ((latestTarget.replacement?.replacementText ?? null) !== beforeText) return { ok: false, conflict: true, operationId, snapshot: snapshotOf(latest) }
     const event: ContextReplacementEventV1 = {
       schemaVersion: 1,
       type: 'replacement',
       action: 'restore',
-      eventId: replacementEventId(),
+      eventId: operationId,
       unitId: target.unit.id,
       unitKind: target.unit.kind as 'user' | 'answer',
       atomRefs: target.unit.atoms.map((atom) => ({ atomId: atom.id, sourceRef: atom.sourceRef, fingerprint: atom.fingerprint })),
@@ -449,39 +552,42 @@ export class ContextEditorService {
     }
     const eventId = appendProjectionEvent(adapter, event)
     this.searchCache.clear()
-    return { ok: true, eventId, snapshot: snapshotOf(currentState(adapter)) }
+    return { ok: true, operationId, eventId, snapshot: snapshotOf(currentState(adapter)) }
   }
 
   undoReplacement(
     adapter: ContextEditorSessionAdapter,
-    input: { baseRevision: string | number; unitId: string },
-  ): { ok: boolean; conflict?: boolean; eventId?: string; snapshot: ContextEditorSnapshot } {
+    input: { baseRevision: string | number; operationId?: string; unitId: string },
+  ): { ok: boolean; conflict?: boolean; operationId?: string; eventId?: string; snapshot: ContextEditorSnapshot } {
     if (adapter.isBusy()) throw new Error('AGENT_RUNTIME_BUSY')
     const state = currentState(adapter)
+    const operationId = input.operationId ?? replacementEventId()
     if (state.projectionAvailable === false) throw new Error(state.projectionError || 'CONTEXT_EDITOR_PROJECTION_UNAVAILABLE')
-    if (!revisionMatches(input.baseRevision, state.revision)) return { ok: false, conflict: true, snapshot: snapshotOf(currentState(adapter)) }
+    if (!revisionMatches(input.baseRevision, state.revision)) return { ok: false, conflict: true, operationId, snapshot: snapshotOf(currentState(adapter)) }
     const target = replacementTarget(state, input.unitId)
     assertReplacementTarget(target)
     const undoOf = target.replacement?.activeEventId
-    if (!undoOf || !target.unit.canUndoReplacement) return { ok: true, snapshot: snapshotOf(currentState(adapter)) }
+    if (!undoOf || !target.unit.canUndoReplacement) return { ok: true, operationId, snapshot: snapshotOf(currentState(adapter)) }
     const latest = currentState(adapter)
-    if (latest.revision !== state.revision) return { ok: false, conflict: true, snapshot: snapshotOf(latest) }
+    if (latest.revision !== state.revision) return { ok: false, conflict: true, operationId, snapshot: snapshotOf(latest) }
     const latestTarget = replacementTarget(latest, input.unitId)
     assertReplacementTarget(latestTarget)
-    if (latestTarget.replacement?.activeEventId !== undoOf) return { ok: false, conflict: true, snapshot: snapshotOf(latest) }
+    if (latestTarget.replacement?.activeEventId !== undoOf) return { ok: false, conflict: true, operationId, snapshot: snapshotOf(latest) }
+    const linkedExclusion = linkedUndoExclusion(state, undoOf, operationId)
     const event: ContextReplacementEventV1 = {
       schemaVersion: 1,
       type: 'replacement',
       action: 'undo',
-      eventId: replacementEventId(),
+      eventId: operationId,
       unitId: target.unit.id,
       undoOf,
       baseRevision: state.revision,
       createdAt: new Date().toISOString(),
+      ...(linkedExclusion ? { linkedExclusion } : {}),
     }
     const eventId = appendProjectionEvent(adapter, event)
     this.searchCache.clear()
-    return { ok: true, eventId, snapshot: snapshotOf(currentState(adapter)) }
+    return { ok: true, operationId, eventId, snapshot: snapshotOf(currentState(adapter)) }
   }
 
   undoContextView(

@@ -10,6 +10,7 @@ import {
   type ContextEditorSnapshot,
   type ContextMutationResult,
   type ContextProjectionPreview,
+  type ContextReplacementPreview,
   type ContextRecord,
   type ContextRecordKind,
   type ContextSearchOccurrence,
@@ -23,8 +24,24 @@ type LoadRecords = () => ContextRecord[];
 type LoadSnapshot = () => ContextEditorSnapshot;
 type Mutate = (input: { baseRevision: string; action: "hide" | "restore" | "reset"; unitIds?: readonly string[] }) => ContextMutationResult;
 type Undo = (baseRevision: string) => ContextMutationResult;
-type ReplacementMutation = (input: { baseRevision: string; unitId: string; text: string }) => ContextMutationResult | Promise<ContextMutationResult>;
-type ReplacementUnitMutation = (input: { baseRevision: string; unitId: string }) => ContextMutationResult | Promise<ContextMutationResult>;
+type ReplacementMutation = (input: { baseRevision: string; operationId: string; unitId: string; text: string; excludeAssociatedReasoning?: boolean; confirmedUnitIds?: readonly string[]; confirmationScope?: readonly string[] }) => ContextMutationResult | Promise<ContextMutationResult>;
+type ReplacementPreview = (input: { baseRevision: string; operationId: string; unitId: string; text: string; excludeAssociatedReasoning?: boolean }) => ContextReplacementPreview | Promise<ContextReplacementPreview>;
+type ReplacementUnitMutation = (input: { baseRevision: string; operationId: string; unitId: string }) => ContextMutationResult | Promise<ContextMutationResult>;
+
+export interface ReplacementReview {
+  draft: {
+    unitId: string;
+    title: string;
+    text: string;
+    originalText: string;
+    baseRevision: string;
+    operationId: string;
+    unitKind: "user" | "answer";
+    uiState: ContextEditorUiState;
+  };
+  preview: ContextReplacementPreview;
+  excludeAssociatedReasoning: boolean;
+}
 
 export interface ContextEditorUiState {
   query: string;
@@ -35,7 +52,9 @@ export interface ContextEditorUiState {
 
 export type ContextEditorExit =
   | { kind: "close" }
-  | { kind: "edit"; unitId: string; title: string; text: string; originalText: string; baseRevision: string; uiState: ContextEditorUiState };
+  | { kind: "edit"; unitId: string; title: string; text: string; originalText: string; baseRevision: string; operationId: string; unitKind: "user" | "answer"; excludeAssociatedReasoning?: boolean; uiState: ContextEditorUiState }
+  | { kind: "replacement-commit"; review: ReplacementReview; uiState: ContextEditorUiState }
+  | { kind: "cancel-edit"; uiState: ContextEditorUiState };
 type PreviewContext = (input: { baseRevision: string; action: "exclude" | "restore"; unitIds?: readonly string[] }) => ContextProjectionPreview | Promise<ContextProjectionPreview>;
 type CommitContext = (input: { baseRevision: string; action: "exclude" | "restore"; unitIds?: readonly string[] }) => ContextMutationResult | Promise<ContextMutationResult>;
 type Notify = (message: string, type?: "info" | "warning" | "error") => void;
@@ -51,6 +70,10 @@ function colorForKind(kind: ContextRecordKind): Parameters<Theme["fg"]>[0] {
   return kind === "user" ? "accent" : kind === "ai" ? "text" : "toolOutput";
 }
 
+function replacementOperationId(): string {
+  return `pi-context-replacement-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
 function visiblePad(text: string, width: number): string {
   return truncateToWidth(text, Math.max(1, width), "…", true);
 }
@@ -64,10 +87,12 @@ export class ContextEditorComponent implements Component {
   private readonly undoMutation: Undo;
   private readonly persistPrefs: PersistPrefs;
   private readonly notify: Notify;
+  private readonly isIdle?: () => boolean;
   private readonly done: (exit?: ContextEditorExit) => void;
   private readonly previewContext?: PreviewContext;
   private readonly commitContext?: CommitContext;
   private readonly commitReplacement?: ReplacementMutation;
+  private readonly previewReplacement?: ReplacementPreview;
   private readonly restoreReplacement?: ReplacementUnitMutation;
   private readonly undoReplacement?: ReplacementUnitMutation;
   private projectionAvailable: boolean;
@@ -93,6 +118,8 @@ export class ContextEditorComponent implements Component {
   private lastRenderWidth = 0;
   private lastRenderRows = 0;
   private pendingConfirmation: PendingConfirmation | null = null;
+  private replacementReview: ReplacementReview | null = null;
+  private replacementReviewScrollOffset = 0;
   private operationInFlight = false;
   private readonly bodyCache = new Map<string, { width: number; text: string; highlightKey: string; lines: string[] }>();
 
@@ -109,14 +136,17 @@ export class ContextEditorComponent implements Component {
       undo: Undo;
       persistPrefs: PersistPrefs;
       notify: Notify;
+      isIdle?: () => boolean;
       confirm?: Confirm;
       previewContext?: PreviewContext;
       commitContext?: CommitContext;
       commitReplacement?: ReplacementMutation;
+      previewReplacement?: ReplacementPreview;
       restoreReplacement?: ReplacementUnitMutation;
       undoReplacement?: ReplacementUnitMutation;
       initialUiState?: Partial<ContextEditorUiState>;
       locale?: PiLocale;
+      initialReplacementReview?: ReplacementReview;
     },
     done: (exit?: ContextEditorExit) => void,
   ) {
@@ -128,6 +158,7 @@ export class ContextEditorComponent implements Component {
     this.previewContext = deps.previewContext;
     this.commitContext = deps.commitContext;
     this.commitReplacement = deps.commitReplacement;
+    this.previewReplacement = deps.previewReplacement;
     this.restoreReplacement = deps.restoreReplacement;
     this.undoReplacement = deps.undoReplacement;
     this.projectionAvailable = snapshot.projectionAvailable !== false && !!deps.previewContext && !!deps.commitContext;
@@ -141,6 +172,7 @@ export class ContextEditorComponent implements Component {
     this.undoMutation = deps.undo;
     this.persistPrefs = deps.persistPrefs;
     this.notify = deps.notify;
+    this.isIdle = deps.isIdle;
     this.done = done;
     this.text = createPiText(deps.locale ?? detectPiLocale());
     const selectedUnitId = deps.initialUiState?.selectedUnitId;
@@ -149,6 +181,8 @@ export class ContextEditorComponent implements Component {
       if (index >= 0) this.selectedIndex = index;
     }
     this.matches = this.query.trim() ? this.searchOccurrencesForPrefs() : [];
+    this.replacementReview = deps.initialReplacementReview ?? null;
+
   }
 
   private flatUnits(): FlatUnit[] {
@@ -419,6 +453,8 @@ export class ContextEditorComponent implements Component {
     this.matches = this.query.trim() ? this.searchOccurrencesForPrefs() : [];
     this.matchIndex = -1;
     this.pendingConfirmation = null;
+    this.replacementReview = null;
+    this.replacementReviewScrollOffset = 0;
     this.notify(this.text.sessionChanged(), "info");
     return true;
   }
@@ -428,6 +464,7 @@ export class ContextEditorComponent implements Component {
   }
 
   private requestEdit(): void {
+    if (this.isIdle && !this.isIdle()) { this.notify(this.text.replacementBusy(), "warning"); return; }
     if (!this.commitReplacement) { this.notify(this.text.contextUnavailableAction(), "warning"); return; }
     const selected = this.selectedUnitIds();
     if (selected.length > 1) { this.notify("Select exactly one User or Answer unit to edit.", "warning"); return; }
@@ -437,16 +474,112 @@ export class ContextEditorComponent implements Component {
       this.notify(this.text.operationFailed(item.unit.replacementDisabledReason ?? "unsupported-unit-kind"), "warning");
       return;
     }
-    this.done({ kind: "edit", unitId: item.unit.id, title: "Edit " + this.text.unitKind(item.unit.kind), text: item.unit.effectiveText, originalText: this.originalText(item.unit), baseRevision: this.revision, uiState: { ...this.uiState(), selectedUnitId: item.unit.id } });
+    const unitKind = item.unit.kind as "user" | "answer";
+    this.done({ kind: "edit", unitId: item.unit.id, unitKind, title: this.text.editTitle(this.text.unitKind(unitKind)), text: item.unit.effectiveText, originalText: this.originalText(item.unit), baseRevision: this.revision, operationId: replacementOperationId(), uiState: { ...this.uiState(), selectedUnitId: item.unit.id } });
   }
 
+  private replacementReviewLines(width: number): string[] {
+    const review = this.replacementReview;
+    if (!review) return [];
+    const preview = review.preview;
+    const wrap = (value: string): string[] => wrapTextWithAnsi(value, Math.max(8, width - 4)).map((line) => this.theme.fg("dim", `  ${line}`));
+    const lines: string[] = [this.theme.fg("warning", `⚠ ${this.text.replacementReviewTitle()}`)];
+    lines.push(...wrap(this.text.replacementReviewAnswer(preview.textChanged)));
+    if (preview.associatedReasoningUnitIds.length > 0) {
+      lines.push(...wrap(this.text.replacementReviewLink(review.excludeAssociatedReasoning, preview.associatedReasoningUnitIds.length)));
+      lines.push(...wrap(this.text.replacementReviewScope("associated", preview.associatedReasoningUnitIds)));
+    }
+    lines.push(...wrap(this.text.replacementReviewScope("newlyExcluded", preview.newlyExcludedUnitIds)));
+    lines.push(...wrap(this.text.replacementReviewScope("alreadyExcluded", preview.alreadyExcludedUnitIds)));
+    if (preview.autoExpandedUnitIds.length > 0) {
+      lines.push(...wrap(this.text.replacementReviewScope("autoExpanded", preview.autoExpandedUnitIds)));
+      if (preview.requiresConfirmation) lines.push(...wrap(this.text.replacementReviewConfirmationRequired(preview.autoExpandedUnitIds.length)));
+    }
+    if (!preview.canCommit) lines.push(...wrap(this.text.replacementReviewBlocked(preview.disabledReason ?? "unavailable")));
+    if (!preview.textChanged && preview.newlyExcludedAtomIds.length === 0) lines.push(...wrap(this.text.replacementReviewNoop()));
+    lines.push(this.theme.fg("accent", this.text.replacementReviewHint()));
+    return lines;
+  }
+
+  private scrollReplacementReview(delta: number): void {
+    const lines = this.replacementReviewLines(Math.max(24, this.tui.terminal.columns));
+    const maxOffset = Math.max(0, lines.length - this.availableRows());
+    this.replacementReviewScrollOffset = Math.max(0, Math.min(maxOffset, this.replacementReviewScrollOffset + delta));
+    this.tui.requestRender();
+  }
+  private async toggleReplacementReviewLink(): Promise<void> {
+    const review = this.replacementReview;
+    if (!review || !this.previewReplacement || review.preview.associatedReasoningUnitIds.length === 0) return;
+    const enabled = !review.excludeAssociatedReasoning;
+    this.operationInFlight = true;
+    this.tui.requestRender();
+    try {
+      const preview = await this.previewReplacement({
+        baseRevision: review.draft.baseRevision,
+        operationId: review.draft.operationId,
+        unitId: review.draft.unitId,
+        text: review.draft.text,
+        excludeAssociatedReasoning: enabled,
+      });
+      if (!preview.canCommit && preview.disabledReason === "revision-conflict") {
+        this.replacementReview = null;
+        this.replacementReviewScrollOffset = 0;
+        this.notify(this.text.sidecarChanged(), "warning");
+        this.done({ kind: "cancel-edit", uiState: review.draft.uiState });
+        return;
+      }
+      this.replacementReview = { ...review, preview, excludeAssociatedReasoning: enabled };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.notify(message === "CONTEXT_EDITOR_CONFLICT" ? this.text.sidecarChanged() : this.text.operationFailed(message), "warning");
+    } finally {
+      this.operationInFlight = false;
+      this.tui.requestRender();
+    }
+  }
+
+  private handleReplacementReviewInput(data: string): void {
+    const review = this.replacementReview;
+    if (!review) return;
+    if (matchesKey(data, "pageDown") || matchesKey(data, "down") || data === "j") {
+      this.scrollReplacementReview(matchesKey(data, "pageDown") ? this.availableRows() : 1);
+      return;
+    }
+    if (matchesKey(data, "pageUp") || matchesKey(data, "up") || data === "k") {
+      this.scrollReplacementReview(matchesKey(data, "pageUp") ? -this.availableRows() : -1);
+      return;
+    }
+    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data === "q" || data === "Q") {
+      this.replacementReview = null;
+      this.done({ kind: "cancel-edit", uiState: review.draft.uiState });
+      return;
+    }
+    if (data === "e") {
+      this.replacementReview = null;
+      this.done({ kind: "edit", ...review.draft, excludeAssociatedReasoning: review.excludeAssociatedReasoning });
+      return;
+    }
+    if (matchesKey(data, "space")) {
+      void this.toggleReplacementReviewLink();
+      return;
+    }
+    if (matchesKey(data, "enter")) {
+      if (!review.preview.canCommit) {
+        this.notify(this.text.replacementReviewBlocked(review.preview.disabledReason ?? "unavailable"), "warning");
+        return;
+      }
+      this.replacementReview = null;
+      this.done({ kind: "replacement-commit", review, uiState: review.draft.uiState });
+    }
+  }
   private beginRestoreReplacement(): void {
+    if (this.isIdle && !this.isIdle()) { this.notify(this.text.replacementBusy(), "warning"); return; }
     if (this.operationInFlight || this.pendingConfirmation || !this.restoreReplacement) return;
     const selected = this.selectedUnitIds();
     if (selected.length > 1) { this.notify("Select exactly one User or Answer unit to restore.", "warning"); return; }
     const item = selected.length === 1 ? this.flatUnits().find(({ unit }) => unit.id === selected[0]) : this.currentUnit();
     if (!item || !item.unit.canRestoreReplacement) return;
-    this.pendingConfirmation = { kind: "replacement-restore", unitId: item.unit.id, message: "Restore this unit to its canonical text? The replacement history remains undoable." };
+    this.pendingConfirmation = { kind: "replacement-restore", unitId: item.unit.id, message: this.text.replacementRestoreMessage() };
     this.tui.requestRender();
   }
 
@@ -454,7 +587,7 @@ export class ContextEditorComponent implements Component {
     if (this.operationInFlight || !this.restoreReplacement) return;
     this.operationInFlight = true;
     try {
-      const result = await this.restoreReplacement({ baseRevision: this.revision, unitId: pending.unitId });
+      const result = await this.restoreReplacement({ baseRevision: this.revision, operationId: replacementOperationId(), unitId: pending.unitId });
       if (!result.ok || result.conflict) { this.notify(this.text.sidecarChanged(), "warning"); this.refreshData(); return; }
       this.refreshData();
     } catch (error) {
@@ -464,6 +597,7 @@ export class ContextEditorComponent implements Component {
   }
 
   private async undoCurrentReplacement(): Promise<void> {
+    if (this.isIdle && !this.isIdle()) { this.notify(this.text.replacementBusy(), "warning"); return; }
     if (this.operationInFlight || !this.undoReplacement) return;
     const selected = this.selectedUnitIds();
     if (selected.length > 1) { this.notify("Select exactly one User or Answer unit to undo.", "warning"); return; }
@@ -471,7 +605,7 @@ export class ContextEditorComponent implements Component {
     if (!item || !item.unit.canUndoReplacement) return;
     this.operationInFlight = true;
     try {
-      const result = await this.undoReplacement({ baseRevision: this.revision, unitId: item.unit.id });
+      const result = await this.undoReplacement({ baseRevision: this.revision, operationId: replacementOperationId(), unitId: item.unit.id });
       if (!result.ok || result.conflict) { this.notify(this.text.sidecarChanged(), "warning"); this.refreshData(); return; }
       this.refreshData();
     } catch (error) {
@@ -707,7 +841,7 @@ export class ContextEditorComponent implements Component {
       ? this.text.contextConfirmTitle()
       : pending.kind === "reset"
         ? this.text.restoreAllConfirmTitle()
-        : "Restore original text";
+        : this.text.replacementRestoreTitle();
     const hint = this.text.contextConfirmHint();
     const body = wrapTextWithAnsi(pending.message, Math.max(8, width - 4));
     return [
@@ -719,6 +853,11 @@ export class ContextEditorComponent implements Component {
 
   handleInput(data: string): void {
     if (this.syncExternalState()) return;
+    if (this.replacementReview) {
+      if (this.operationInFlight) return;
+      this.handleReplacementReviewInput(data);
+      return;
+    }
     if (this.pendingConfirmation) {
       this.handleConfirmationInput(data);
       return;
@@ -824,7 +963,12 @@ export class ContextEditorComponent implements Component {
     const safeWidth = Math.max(24, width);
     const viewport = this.availableRows();
     let visible: string[];
-    if (this.pendingConfirmation) {
+    if (this.replacementReview) {
+      const reviewLines = this.replacementReviewLines(safeWidth);
+      const maxOffset = Math.max(0, reviewLines.length - viewport);
+      this.replacementReviewScrollOffset = Math.max(0, Math.min(this.replacementReviewScrollOffset, maxOffset));
+      visible = reviewLines.slice(this.replacementReviewScrollOffset, this.replacementReviewScrollOffset + viewport);
+    } else if (this.pendingConfirmation) {
       visible = this.confirmationLines(safeWidth).slice(0, viewport);
     } else if (this.helpMode) {
       visible = this.helpLines().slice(0, viewport);
@@ -851,16 +995,20 @@ export class ContextEditorComponent implements Component {
     const title = this.helpMode
       ? this.theme.fg("accent", this.text.tuiHelpTitle())
       : this.theme.fg("accent", "Pi Context Editor") + this.theme.fg("dim", `  ${this.text.unitCount(this.flatUnits().length)}`);
-    const mode = this.pendingConfirmation
+    const mode = this.replacementReview
+      ? this.theme.fg("warning", this.text.contextAwaiting())
+      : this.pendingConfirmation
       ? this.theme.fg("warning", this.text.contextAwaiting())
       : this.helpMode
       ? this.theme.fg("dim", "")
       : this.searchMode
       ? this.theme.fg("warning", this.text.tuiSearch(this.query, this.matches.length, this.matchIndex, this.searchScope))
       : this.theme.fg("dim", this.text.tuiSearchIdle(this.query, this.matches.length, this.matchIndex, this.searchScope));
-    const filterLine = this.helpMode || this.pendingConfirmation ? "" : `${enabled("user")} [1]  ${aiLabel} [2] (${enabled("reasoning")} [4]  ${enabled("answer")} [5])  ${enabled("tool")} [3]`;
+    const filterLine = this.helpMode || this.pendingConfirmation || this.replacementReview ? "" : `${enabled("user")} [1]  ${aiLabel} [2] (${enabled("reasoning")} [4]  ${enabled("answer")} [5])  ${enabled("tool")} [3]`;
     const statusMode = this.helpMode ? "help" : this.searchMode ? "search" : this.matches.length > 0 ? "results" : "normal";
-    const status = this.pendingConfirmation
+    const status = this.replacementReview
+      ? this.theme.fg("dim", this.text.replacementReviewHint())
+      : this.pendingConfirmation
       ? this.theme.fg("dim", this.text.contextConfirmHint())
       : this.theme.fg("dim", this.text.tuiStatus(statusMode, this.searchScope));
     return [

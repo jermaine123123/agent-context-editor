@@ -11,7 +11,7 @@ import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { z } from 'zod'
 import { foldSurface } from '@deepseek-ai/dsh-session'
-import { reduceReplacementStates, selectProjectionTargets } from './core-runtime.js'
+import { reduceReplacementStates, selectAssociatedReasoningTargets, selectProjectionTargets } from './core-runtime.js'
 import {
   buildProjection,
   buildViewEvent,
@@ -52,6 +52,17 @@ const viewEventSchema = z.object({
   changes: z.array(viewChangeSchema).min(1),
   undoOf: z.string().optional(),
 })
+const linkedExclusionSchema = z.object({
+  operationId: z.string().min(1),
+  unitIds: z.array(z.string().min(1)),
+  atomChanges: z.array(z.object({
+    atomId: z.string().min(1),
+    fingerprint: z.string().min(1),
+    sourceRef: z.object({ entryId: z.string(), blockIndex: nonNegativeSafeInteger }),
+    before: z.enum(['include', 'exclude']),
+    after: z.enum(['include', 'exclude']),
+  })),
+})
 const replacementEventSchema = z.object({
   schemaVersion: z.literal(1),
   type: z.literal('replacement'),
@@ -69,6 +80,7 @@ const replacementEventSchema = z.object({
   undoOf: z.string().min(1).optional(),
   baseRevision: z.union([z.string(), z.number()]),
   createdAt: z.string(),
+  linkedExclusion: linkedExclusionSchema.optional(),
 }).passthrough()
 const sidecarRowSchema = z.object({
   session: z.object({
@@ -309,11 +321,21 @@ function buildNativeReplacementChanges(projection, event, request = {}) {
   const virtualStates = reduceReplacementStates(baseRecords.flatMap(record => record.units ?? []), activeEvents, true)
   const virtualRecords = projectRecords(projection.atoms, projection.states, projection.projectionStates, virtualStates)
   const virtualProjection = { ...projection, records: virtualRecords, replacementStates: virtualStates }
+  const linkedExcluded = new Set(event.linkedExclusion?.atomChanges?.filter(change => change.after === 'exclude').map(change => change.atomId) ?? [])
+  const linkedIncluded = new Set(event.linkedExclusion?.atomChanges?.filter(change => change.after === 'include').map(change => change.atomId) ?? [])
   const roots = new Set(target.unit.atoms.map(atom => Number(atom.sourceRef?.entryId)).filter(Number.isSafeInteger))
+  for (const change of event.linkedExclusion?.atomChanges ?? []) {
+    const root = Number(change.sourceRef?.entryId)
+    if (Number.isSafeInteger(root)) roots.add(root)
+  }
   const changes = []
   for (const root of roots) {
     const rootAtoms = projection.atoms.filter(atom => Number(atom.sourceRef?.entryId) === root)
     const excluded = new Set(rootAtoms.filter(atom => projection.projectionStates?.get(atom.id) === 'exclude').map(atom => atom.id))
+    for (const atom of rootAtoms) {
+      if (linkedExcluded.has(atom.id)) excluded.add(atom.id)
+      if (linkedIncluded.has(atom.id)) excluded.delete(atom.id)
+    }
     const composed = composeNativeRoot(virtualProjection, root, virtualStates, virtualRecords)
     if (!composed.message) throw new Error('CONTEXT_EDITOR_CONTEXT_UNAVAILABLE:root-' + root)
     if (excluded.size >= rootAtoms.length) {
@@ -446,6 +468,7 @@ export class ContextEditorHost extends TypertRemoteService {
           ...(unit.replacementDisabledReason ? { replacementDisabledReason: unit.replacementDisabledReason } : {}),
           canRestoreReplacement: unit.canRestoreReplacement,
           canUndoReplacement: unit.canUndoReplacement,
+          ...(unit.associatedReasoningUnitIds?.length ? { associatedReasoningUnitIds: unit.associatedReasoningUnitIds } : {}),
         })),
         ...(record.entryId === undefined ? {} : { entryId: record.entryId }),
         ...(record.entryIds?.length ? { entryIds: record.entryIds } : {}),
@@ -461,9 +484,8 @@ export class ContextEditorHost extends TypertRemoteService {
         viewMutation: !running,
         undo: !running,
         persistence: true,
-        // Native exclusion is enabled for rc.8. Replacement remains a gated
-        // candidate until the independent install and real-provider smoke
-        // checks are recorded for this exact build.
+        // 0.3.1 release: the target profile install gate is complete;
+        // real-provider smoke remains a separate user-owned check.
         contextExclusion: true,
         contextReplacement: true,
       },
@@ -708,6 +730,30 @@ export class ContextEditorHost extends TypertRemoteService {
     })
   }
 
+  async previewReplacement(request) {
+    const sessionId = requestSessionId(request)
+    if (isBusySession(this.ctx, sessionId)) throw new Error('CONTEXT_EDITOR_BUSY')
+    const projection = await this.readProjection(sessionId)
+    const requestedRevision = request?.baseRevision
+    if (requestedRevision !== undefined && String(requestedRevision) !== projection.revision) {
+      return { ok: false, conflict: true, snapshot: this.snapshotOf(projection), baseRevision: projection.revision, unitId: String(request?.unitId ?? ''), unitKind: 'answer', textChanged: false, excludeAssociatedReasoning: Boolean(request?.excludeAssociatedReasoning), associatedReasoningUnitIds: [], requestedUnitIds: [], effectiveUnitIds: [], autoExpandedUnitIds: [], newlyExcludedUnitIds: [], alreadyExcludedUnitIds: [], newlyExcludedAtomIds: [], alreadyExcludedAtomIds: [], unavailableUnitIds: [], requiresConfirmation: false, canCommit: false, disabledReason: 'revision-conflict' }
+    }
+    const target = targetUnit(projection, String(request?.unitId ?? ''))
+    if (!target) throw new Error('CONTEXT_EDITOR_REPLACEMENT_TARGET_NOT_FOUND')
+    if (!target.unit.replacementSupported || target.unit.replacementState === 'unavailable') {
+      return { ok: false, snapshot: this.snapshotOf(projection), baseRevision: projection.revision, unitId: target.unit.id, unitKind: target.unit.kind, textChanged: false, excludeAssociatedReasoning: false, associatedReasoningUnitIds: [], requestedUnitIds: [target.unit.id], effectiveUnitIds: [target.unit.id], autoExpandedUnitIds: [], newlyExcludedUnitIds: [], alreadyExcludedUnitIds: [], newlyExcludedAtomIds: [], alreadyExcludedAtomIds: [], unavailableUnitIds: [], requiresConfirmation: false, canCommit: false, disabledReason: target.unit.replacementDisabledReason ?? 'invalid-target' }
+    }
+    const text = request?.text === undefined ? target.unit.effectiveText : String(request.text)
+    if (text.trim().length === 0) {
+      return { ok: false, snapshot: this.snapshotOf(projection), baseRevision: projection.revision, unitId: target.unit.id, unitKind: target.unit.kind, textChanged: false, excludeAssociatedReasoning: false, associatedReasoningUnitIds: [], requestedUnitIds: [target.unit.id], effectiveUnitIds: [target.unit.id], autoExpandedUnitIds: [], newlyExcludedUnitIds: [], alreadyExcludedUnitIds: [], newlyExcludedAtomIds: [], alreadyExcludedAtomIds: [], unavailableUnitIds: [], requiresConfirmation: false, canCommit: false, disabledReason: 'replacement-empty' }
+    }
+    const link = Boolean(request?.excludeAssociatedReasoning && target.unit.kind === 'answer')
+    const selection = link ? selectAssociatedReasoningTargets(projection.records, target.unit.id, projection.projectionStates) : { associatedReasoningUnitIds: [], requestedUnitIds: [], effectiveUnitIds: [], autoExpandedUnitIds: [], newlyExcludedUnitIds: [], alreadyExcludedUnitIds: [], newlyExcludedAtomIds: [], alreadyExcludedAtomIds: [], unavailableUnitIds: [], disabledReason: undefined }
+    const requestedUnitIds = [target.unit.id, ...selection.requestedUnitIds.filter(id => id !== target.unit.id)]
+    const effectiveUnitIds = [target.unit.id, ...selection.effectiveUnitIds.filter(id => id !== target.unit.id)]
+    return { ok: true, snapshot: this.snapshotOf(projection), baseRevision: projection.revision, unitId: target.unit.id, unitKind: target.unit.kind, textChanged: text !== target.unit.effectiveText, excludeAssociatedReasoning: link, associatedReasoningUnitIds: selection.associatedReasoningUnitIds, requestedUnitIds, effectiveUnitIds, autoExpandedUnitIds: selection.autoExpandedUnitIds, newlyExcludedUnitIds: selection.newlyExcludedUnitIds, alreadyExcludedUnitIds: selection.alreadyExcludedUnitIds, newlyExcludedAtomIds: selection.newlyExcludedAtomIds, alreadyExcludedAtomIds: selection.alreadyExcludedAtomIds, unavailableUnitIds: selection.unavailableUnitIds, requiresConfirmation: selection.autoExpandedUnitIds.length > 0, canCommit: !selection.disabledReason && selection.unavailableUnitIds.length === 0, ...(selection.disabledReason ? { disabledReason: selection.disabledReason } : {}) }
+  }
+
   async commitReplacementMutation(request, action) {
     const sessionId = requestSessionId(request)
     return this.enqueue(sessionId, async () => {
@@ -717,37 +763,60 @@ export class ContextEditorHost extends TypertRemoteService {
       const expectedRevision = String(request?.baseRevision ?? '')
       if (!expectedRevision) throw new Error('CONTEXT_EDITOR_REVISION_REQUIRED')
       const initial = await this.readProjection(sessionId)
+      const initialRow = this.rowFor(initial.identity)
+      const initialExisting = initialRow.replacementEvents.find(event => event.eventId === operationId)
+      const initialNative = (initial.sourceEvents ?? []).find(value => value?.type === 'context/projection' && value?.data?.owner === CONTEXT_PROJECTION_OWNER && value?.data?.operationId === operationId)
+      if (initialNative !== undefined) {
+        if (!initialExisting) throw new Error('CONTEXT_EDITOR_OPERATION_REUSED')
+        if (initialExisting.unitId !== String(request?.unitId ?? '') || initialExisting.action !== action) throw new Error('CONTEXT_EDITOR_OPERATION_REUSED')
+        if (action === 'replace') {
+          if (request?.text !== undefined && String(request.text) !== String(initialExisting.afterText ?? '')) throw new Error('CONTEXT_EDITOR_OPERATION_REUSED')
+          if (Boolean(request?.excludeAssociatedReasoning) !== Boolean(initialExisting.linkedExclusion)) throw new Error('CONTEXT_EDITOR_OPERATION_REUSED')
+        }
+        return success(this.snapshotOf(initial, false), { operationId, eventId: String(initialNative.seq) })
+      }
       if (expectedRevision !== initial.revision) return { ok: false, conflict: true, operationId, snapshot: this.snapshotOf(initial, false) }
       const target = targetUnit(initial, String(request?.unitId ?? ''))
       if (!target) throw new Error('CONTEXT_EDITOR_REPLACEMENT_TARGET_NOT_FOUND')
-      if (!target.unit.replacementSupported || target.unit.replacementState === 'unavailable') {
-        throw new Error(`CONTEXT_EDITOR_REPLACEMENT_UNSUPPORTED:${target.unit.replacementDisabledReason ?? 'invalid-target'}`)
-      }
+      if (!target.unit.replacementSupported || target.unit.replacementState === 'unavailable') throw new Error('CONTEXT_EDITOR_REPLACEMENT_UNSUPPORTED:' + (target.unit.replacementDisabledReason ?? 'invalid-target'))
       const currentState = initial.replacementStates.get(target.unit.id)
       const row = this.rowFor(initial.identity)
       const existing = row.replacementEvents.find(event => event.eventId === operationId)
       let event = existing
-      if (event !== undefined && (event.unitId !== target.unit.id || event.action !== action)) throw new Error('CONTEXT_EDITOR_OPERATION_REUSED')
+      if (event !== undefined) {
+        if (event.unitId !== target.unit.id || event.action !== action) throw new Error('CONTEXT_EDITOR_OPERATION_REUSED')
+        if (action === 'replace') {
+          if (request?.text !== undefined && String(request.text) !== String(event.afterText ?? '')) throw new Error('CONTEXT_EDITOR_OPERATION_REUSED')
+          if (Boolean(request?.excludeAssociatedReasoning) !== Boolean(event.linkedExclusion)) throw new Error('CONTEXT_EDITOR_OPERATION_REUSED')
+        }
+      }
       if (event === undefined && action === 'replace') {
         const text = String(request?.text ?? '')
         if (text.trim().length === 0) throw new Error('CONTEXT_EDITOR_REPLACEMENT_EMPTY')
-        if (text === target.unit.effectiveText) return success(this.snapshotOf(initial, false), { operationId })
-        event = { schemaVersion: 1, type: 'replacement', action: 'replace', eventId: operationId, unitId: target.unit.id, unitKind: target.unit.kind,
-          atomRefs: target.unit.atoms.map(atom => ({ atomId: atom.id, sourceRef: atom.sourceRef, fingerprint: atom.fingerprint })),
-          beforeText: currentState?.replacementText ?? null, afterText: text, baseRevision: initial.revision, createdAt: new Date().toISOString() }
+        const link = Boolean(request?.excludeAssociatedReasoning && target.unit.kind === 'answer')
+        const selection = link ? selectAssociatedReasoningTargets(initial.records, target.unit.id, initial.projectionStates) : undefined
+        if (selection?.disabledReason || selection?.unavailableUnitIds.length) throw new Error('CONTEXT_EDITOR_REPLACEMENT_LINK_UNAVAILABLE')
+        const confirmed = new Set((request?.confirmedUnitIds ?? request?.confirmationScope ?? []).map(String))
+        if (selection?.autoExpandedUnitIds.some(id => !confirmed.has(id))) throw new Error('CONTEXT_EDITOR_REPLACEMENT_CONFIRMATION_REQUIRED')
+        const linkedChanges = selection?.newlyExcludedAtomIds.map(atomId => {
+          const atom = initial.atoms.find(candidate => candidate.id === atomId)
+          if (!atom) return undefined
+          return { atomId: atom.id, fingerprint: atom.fingerprint, sourceRef: atom.sourceRef, before: initial.projectionStates.get(atom.id) === 'exclude' ? 'exclude' : 'include', after: 'exclude' }
+        }).filter(Boolean) ?? []
+        if (text === target.unit.effectiveText && linkedChanges.length === 0) return success(this.snapshotOf(initial, false), { operationId })
+        event = { schemaVersion: 1, type: 'replacement', action: 'replace', eventId: operationId, unitId: target.unit.id, unitKind: target.unit.kind, atomRefs: target.unit.atoms.map(atom => ({ atomId: atom.id, sourceRef: atom.sourceRef, fingerprint: atom.fingerprint })), beforeText: currentState?.replacementText ?? null, afterText: text, baseRevision: initial.revision, createdAt: new Date().toISOString(), ...(link ? { linkedExclusion: { operationId, unitIds: selection?.newlyExcludedUnitIds ?? [], atomChanges: linkedChanges } } : {}) }
       }
       if (event === undefined && action === 'restore') {
         const beforeText = currentState?.replacementText ?? null
         if (beforeText === null) return success(this.snapshotOf(initial, false), { operationId })
-        event = { schemaVersion: 1, type: 'replacement', action: 'restore', eventId: operationId, unitId: target.unit.id, unitKind: target.unit.kind,
-          atomRefs: target.unit.atoms.map(atom => ({ atomId: atom.id, sourceRef: atom.sourceRef, fingerprint: atom.fingerprint })),
-          beforeText, afterText: null, baseRevision: initial.revision, createdAt: new Date().toISOString() }
+        event = { schemaVersion: 1, type: 'replacement', action: 'restore', eventId: operationId, unitId: target.unit.id, unitKind: target.unit.kind, atomRefs: target.unit.atoms.map(atom => ({ atomId: atom.id, sourceRef: atom.sourceRef, fingerprint: atom.fingerprint })), beforeText, afterText: null, baseRevision: initial.revision, createdAt: new Date().toISOString() }
       }
       if (event === undefined && action === 'undo') {
         const undoOf = currentState?.activeEventId
         if (!undoOf || !target.unit.canUndoReplacement) return success(this.snapshotOf(initial, false), { operationId })
-        event = { schemaVersion: 1, type: 'replacement', action: 'undo', eventId: operationId, unitId: target.unit.id, unitKind: target.unit.kind,
-          undoOf, baseRevision: initial.revision, createdAt: new Date().toISOString() }
+        const original = row.replacementEvents.find(value => value.eventId === undoOf)
+        const linked = original?.linkedExclusion
+        event = { schemaVersion: 1, type: 'replacement', action: 'undo', eventId: operationId, unitId: target.unit.id, unitKind: target.unit.kind, undoOf, baseRevision: initial.revision, createdAt: new Date().toISOString(), ...(linked ? { linkedExclusion: { operationId, unitIds: linked.unitIds, atomChanges: linked.atomChanges.map(change => ({ ...change, before: change.after, after: change.before })) } } : {}) }
       }
       if (event === undefined) throw new Error('CONTEXT_EDITOR_REPLACEMENT_ACTION_INVALID')
       const replacementEvents = row.replacementEvents.some(value => value.eventId === event.eventId) ? row.replacementEvents : [...row.replacementEvents, event]

@@ -111,12 +111,8 @@ function uniqueProjectionEvents(events: readonly ContextProjectionEvent[]): Cont
   });
 }
 
-function isExclusionEvent(event: ContextProjectionEvent): event is ContextProjectionEventV1 {
-  return !("type" in event);
-}
-
 function activeAtomsByEntry(atoms: readonly ContextAtom[], events: readonly ContextProjectionEvent[]) {
-  const states = reduceProjectionStates(atoms, events.filter(isExclusionEvent));
+  const states = reduceProjectionStates(atoms, events);
   const result = new Map<string, ContextAtom[]>();
   for (const atom of atoms) {
     const state = states.get(atom.id) ?? "include";
@@ -136,12 +132,21 @@ function restoredAtomIds(
   const ids = new Set<string>();
   const known = new Set(atoms.map((atom) => atom.id));
   for (const event of events) {
-    if (!isExclusionEvent(event) || event.action !== "restore") continue;
-    for (const change of event.changes) if (known.has(change.atomId) && states.get(change.atomId) === "include") ids.add(change.atomId);
+    if (!("type" in event)) {
+      if (event.action !== "restore") continue;
+      for (const change of event.changes) {
+        if (known.has(change.atomId) && states.get(change.atomId) === "include") ids.add(change.atomId);
+      }
+      continue;
+    }
+    if (event.type === "replacement" && event.action === "undo" && event.linkedExclusion) {
+      for (const change of event.linkedExclusion.atomChanges) {
+        if (known.has(change.atomId) && states.get(change.atomId) === "include") ids.add(change.atomId);
+      }
+    }
   }
   return ids;
 }
-
 function atomForAssistantBlock(atoms: readonly ContextAtom[], blockIndex: number, part: unknown): ContextAtom | undefined {
   if (!part || typeof part !== "object") return undefined;
   const type = String((part as { type?: unknown }).type ?? "");
@@ -149,14 +154,35 @@ function atomForAssistantBlock(atoms: readonly ContextAtom[], blockIndex: number
   return atoms.find((atom) => atom.sourceRef.blockIndex === blockIndex && (kind === "" || atom.kind === kind));
 }
 
-function replacementUnits(atoms: readonly ContextAtom[], exclusionStates: ReadonlyMap<string, ProjectionState>, events: readonly ContextProjectionEvent[]): { byAtom: Map<string, UnitProjection>; historyUnitIds: Set<string> } {
+function replacementUnits(
+  atoms: readonly ContextAtom[],
+  exclusionStates: ReadonlyMap<string, ProjectionState>,
+  events: readonly ContextProjectionEvent[],
+): { byAtom: Map<string, UnitProjection>; historyUnitIds: Set<string>; historyAtomIds: Set<string> } {
   const base = projectRecords(atoms, undefined, exclusionStates);
   const units = base.flatMap((record) => record.units);
   const states = reduceReplacementStates(units, events, true);
   const byAtom = new Map<string, UnitProjection>();
   const historyUnitIds = new Set<string>();
+  const historyAtomIds = new Set<string>();
+  const linkedTurnIds = new Set<string>();
   const projectedUnits = projectRecords(atoms, undefined, exclusionStates, states).flatMap((record) => record.units);
-  for (const event of events) if ("type" in event && event.type === "replacement") historyUnitIds.add(event.unitId);
+  for (const event of events) {
+    if (!("type" in event) || event.type !== "replacement") continue;
+    historyUnitIds.add(event.unitId);
+    if (event.action !== "undo") {
+      for (const ref of event.atomRefs) {
+        historyAtomIds.add(ref.atomId);
+        const atom = atoms.find((candidate) => candidate.id === ref.atomId);
+        if (event.linkedExclusion && atom) linkedTurnIds.add(atom.turnId);
+      }
+    }
+    for (const change of event.linkedExclusion?.atomChanges ?? []) historyAtomIds.add(change.atomId);
+  }
+  // If the linked closure was already excluded, atomChanges can be empty. The
+  // touched turn is still historical, so missing reasoning/tool rows from a
+  // previous projected input are expected during a later undo.
+  for (const atom of atoms) if (linkedTurnIds.has(atom.turnId)) historyAtomIds.add(atom.id);
   for (const record of base) for (const unit of record.units) {
     const state = states.get(unit.id);
     if (!state) continue;
@@ -165,9 +191,8 @@ function replacementUnits(atoms: readonly ContextAtom[], exclusionStates: Readon
     const item = { unit: projected, state };
     for (const atom of unit.atoms) byAtom.set(atom.id, item);
   }
-  return { byAtom, historyUnitIds };
+  return { byAtom, historyUnitIds, historyAtomIds };
 }
-
 function cloneWithContent(message: AgentMessage, content: unknown): AgentMessage {
   return { ...(message as object), content } as AgentMessage;
 }
@@ -234,15 +259,29 @@ function rowProjection(rowAtoms: readonly ContextAtom[], unitByAtom: ReadonlyMap
   return rowAtoms.map((atom) => unitByAtom.get(atom.id)).find((item): item is UnitProjection => !!item && item.state.replacementState === "replaced");
 }
 
-function rowHasHistory(rowAtoms: readonly ContextAtom[], unitByAtom: ReadonlyMap<string, UnitProjection>, historyUnitIds: ReadonlySet<string>): boolean {
-  return rowAtoms.some((atom) => { const item = unitByAtom.get(atom.id); return !!item && historyUnitIds.has(item.unit.id); });
+function rowHasHistory(
+  rowAtoms: readonly ContextAtom[],
+  unitByAtom: ReadonlyMap<string, UnitProjection>,
+  historyUnitIds: ReadonlySet<string>,
+  historyAtomIds: ReadonlySet<string>,
+): boolean {
+  return rowAtoms.some((atom) => historyAtomIds.has(atom.id) || (() => {
+    const item = unitByAtom.get(atom.id);
+    return !!item && historyUnitIds.has(item.unit.id);
+  })());
 }
-
 function messagePayloadEqual(left: AgentMessage, right: AgentMessage): boolean {
   return roleOf(left) === roleOf(right) && JSON.stringify((left as { content?: unknown }).content) === JSON.stringify((right as { content?: unknown }).content);
 }
 
-function replacementCompatible(baseline: AgentMessage, current: AgentMessage, rowAtoms: readonly ContextAtom[], unitByAtom: ReadonlyMap<string, UnitProjection>, historyUnitIds: ReadonlySet<string>): boolean {
+function replacementCompatible(
+  baseline: AgentMessage,
+  current: AgentMessage,
+  rowAtoms: readonly ContextAtom[],
+  unitByAtom: ReadonlyMap<string, UnitProjection>,
+  historyUnitIds: ReadonlySet<string>,
+  historyAtomIds: ReadonlySet<string>,
+): boolean {
   const projection = rowProjection(rowAtoms, unitByAtom);
   if (projection) {
     const expected = projectOneMessage(baseline, rowAtoms, new Map(), unitByAtom);
@@ -250,10 +289,9 @@ function replacementCompatible(baseline: AgentMessage, current: AgentMessage, ro
     if (roleOf(baseline) === "user") return false;
     return structurallyCompatible(baseline, current) || isKindSubsequence(baseline, current) || (!!expected && (structurallyCompatible(expected, current) || isKindSubsequence(expected, current)));
   }
-  if (rowHasHistory(rowAtoms, unitByAtom, historyUnitIds)) return restoreCompatible(baseline, current) || structurallyCompatible(baseline, current);
+  if (rowHasHistory(rowAtoms, unitByAtom, historyUnitIds, historyAtomIds)) return restoreCompatible(baseline, current) || structurallyCompatible(baseline, current);
   return structurallyCompatible(baseline, current) || isKindSubsequence(baseline, current);
 }
-
 export interface ProjectContextInput {
   messages: readonly AgentMessage[];
   entries: readonly unknown[];
@@ -266,7 +304,7 @@ export function projectModelContext(input: ProjectContextInput): AgentMessage[] 
   if (projectionEvents.length === 0) return [...input.messages];
   const rows = rowsForEntries(input.entries);
   const { states, byEntry } = activeAtomsByEntry(input.atoms, projectionEvents);
-  const { byAtom: unitByAtom, historyUnitIds } = replacementUnits(input.atoms, states, projectionEvents);
+  const { byAtom: unitByAtom, historyUnitIds, historyAtomIds } = replacementUnits(input.atoms, states, projectionEvents);
   const restoredIds = restoredAtomIds(input.atoms, projectionEvents, states);
   const output: AgentMessage[] = [];
   let cursor = 0;
@@ -275,14 +313,16 @@ export function projectModelContext(input: ProjectContextInput): AgentMessage[] 
     const projection = rowProjection(rowAtoms, unitByAtom);
     const hasExcluded = rowAtoms.some((atom) => states.get(atom.id) === "exclude");
     const hasRestored = rowAtoms.some((atom) => restoredIds.has(atom.id));
-    const hasHistory = rowHasHistory(rowAtoms, unitByAtom, historyUnitIds);
-    let match = -1;
-    let reconstructed = false;
+    const hasHistory = rowHasHistory(rowAtoms, unitByAtom, historyUnitIds, historyAtomIds);
     const compatible: Array<{ candidate: AgentMessage; index: number }> = [];
     for (let index = cursor; index < input.messages.length; index += 1) {
       const candidate = input.messages[index];
-      if (candidate && replacementCompatible(row.baseline, candidate, rowAtoms, unitByAtom, historyUnitIds)) compatible.push({ candidate, index });
+      if (candidate && replacementCompatible(row.baseline, candidate, rowAtoms, unitByAtom, historyUnitIds, historyAtomIds)) {
+        compatible.push({ candidate, index });
+      }
     }
+    let match = -1;
+    let reconstructed = false;
     if (projection) {
       const expected = projectOneMessage(row.baseline, rowAtoms, new Map(), unitByAtom);
       const exact = compatible.filter(({ candidate }) => messagePayloadEqual(row.baseline, candidate) || (!!expected && messagePayloadEqual(expected, candidate)));
@@ -301,25 +341,32 @@ export function projectModelContext(input: ProjectContextInput): AgentMessage[] 
       reconstructed = hasHistory || (hasRestored && !structurallyCompatible(row.baseline, compatible[0]!.candidate));
     }
     if (match < 0) {
+      // A linked exclusion intentionally removes a row from a previously
+      // projected input. Only linked/history rows may disappear silently;
+      // an unrelated missing excluded row remains fail-closed.
+      if (hasExcluded) {
+        if (hasHistory) continue;
+        throw new ProjectionAlignmentError("excluded message could not be aligned with the active context");
+      }
+      // Whole-operation undo can put reasoning/tool rows back even though the
+      // previous provider input no longer contains them. Rebuild only from
+      // canonical Session rows, then apply the current state once.
+      if (hasRestored || hasHistory) {
+        const restored = projectOneMessage(row.baseline, rowAtoms, states, unitByAtom);
+        if (restored) output.push(restored);
+        continue;
+      }
       if (projection) {
         const expected = projectOneMessage(row.baseline, rowAtoms, states, unitByAtom);
         if (expected) throw new ProjectionAlignmentError("projected message could not be aligned");
         continue;
       }
-      if (hasExcluded && !projection) throw new ProjectionAlignmentError("excluded message could not be aligned with the active context");
-      if (hasRestored || projection || hasHistory) {
-        const candidates = input.messages.map((candidate, index) => ({ candidate, index })).filter(({ candidate, index }) => index >= cursor && replacementCompatible(row.baseline, candidate, rowAtoms, unitByAtom, historyUnitIds));
-        if (candidates.length > 1 && projection) throw new ProjectionAlignmentError("projected message could not be aligned unambiguously");
-        if (candidates.length === 1) { match = candidates[0]!.index; reconstructed = true; }
-        else {
-          const restored = projectOneMessage(row.baseline, rowAtoms, states, unitByAtom);
-          if (restored) output.push(restored);
-          continue;
-        }
-      }
-      if (match < 0) continue;
+      continue;
     }
-    for (let index = cursor; index < match; index += 1) { const extra = input.messages[index]; if (extra) output.push(extra); }
+    for (let index = cursor; index < match; index += 1) {
+      const extra = input.messages[index];
+      if (extra) output.push(extra);
+    }
     const current = input.messages[match];
     if (current) {
       const projected = projectOneMessage(reconstructed ? row.baseline : current, rowAtoms, states, unitByAtom);
@@ -327,17 +374,19 @@ export function projectModelContext(input: ProjectContextInput): AgentMessage[] 
     }
     cursor = match + 1;
   }
-  for (let index = cursor; index < input.messages.length; index += 1) { const extra = input.messages[index]; if (extra) output.push(extra); }
+  for (let index = cursor; index < input.messages.length; index += 1) {
+    const extra = input.messages[index];
+    if (extra) output.push(extra);
+  }
   return output;
 }
-
 export function projectionOverlapsEntryIds(
   entryIds: ReadonlySet<string>,
   atoms: readonly ContextAtom[],
   projectionEvents: readonly ContextProjectionEvent[],
 ): boolean {
   const uniqueEvents = uniqueProjectionEvents(projectionEvents);
-  const states = reduceProjectionStates(atoms, uniqueEvents.filter(isExclusionEvent));
+  const states = reduceProjectionStates(atoms, uniqueEvents);
   if ([...states.values()].some((state) => state === "unavailable")) throw new ProjectionAlignmentError("active projection is unavailable");
   if (atoms.some((atom) => entryIds.has(atom.sourceRef.entryId) && states.get(atom.id) === "exclude")) return true;
   const { byAtom } = replacementUnits(atoms, states, uniqueEvents);

@@ -311,8 +311,13 @@ export class ContextEditorController {
     return `context-replacement-${action}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}-${String(unitId).slice(-12)}`
   }
 
-  async commitReplacement(unitId, baseRevision, text) {
-    return this.call('commitReplacement', { operationId: this.replacementOperationId('replace', unitId), unitId, baseRevision, text })
+  async previewReplacement(unitId, baseRevision, text, excludeAssociatedReasoning = false) {
+    return this.call('previewReplacement', { unitId, baseRevision, text, excludeAssociatedReasoning })
+  }
+
+  async commitReplacement(unitId, baseRevision, text, options = {}) {
+    const operationId = options.operationId ?? this.replacementOperationId('replace', unitId)
+    return this.call('commitReplacement', { operationId, unitId, baseRevision, text, ...(options.excludeAssociatedReasoning ? { excludeAssociatedReasoning: true } : {}), ...(options.confirmedUnitIds?.length ? { confirmedUnitIds: options.confirmedUnitIds } : {}) })
   }
 
   async restoreReplacement(unitId, baseRevision) {
@@ -366,12 +371,16 @@ function UnitBody({ unit, match, text, showOriginal = false }) {
 
 function EditDialog({ unit, initialText, text, onCancel, onSave }) {
   const [value, setValue] = useState(initialText)
+  const [linkReasoning, setLinkReasoning] = useState(unit.kind === 'answer' && (unit.associatedReasoningUnitIds?.length ?? 0) > 0)
+  const [impact, setImpact] = useState(null)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   const textarea = useRef(null)
 
   useEffect(() => {
     setValue(initialText)
+    setLinkReasoning(unit.kind === 'answer' && (unit.associatedReasoningUnitIds?.length ?? 0) > 0)
+    setImpact(null)
     setError('')
     const timer = globalThis.setTimeout?.(() => textarea.current?.focus?.(), 0)
     return () => {
@@ -379,23 +388,29 @@ function EditDialog({ unit, initialText, text, onCancel, onSave }) {
     }
   }, [initialText, unit.id])
 
-  const submit = async () => {
+  const submit = async (confirmedUnitIds) => {
     if (saving) return
     if (value.trim().length === 0) {
       setError(text.replacementEmpty)
       return
     }
-    if (value === initialText) {
+    if (value === initialText && !linkReasoning) {
       onCancel()
       return
     }
     setSaving(true)
     setError('')
     try {
-      await onSave(value)
+      await onSave(value, { excludeAssociatedReasoning: linkReasoning, confirmedUnitIds })
+      setImpact(null)
     } catch (cause) {
       setSaving(false)
-      setError(errorText(cause))
+      if (cause?.preview) {
+        setImpact(cause.preview)
+        setError(cause.preview.disabledReason ?? '')
+      } else {
+        setError(errorText(cause))
+      }
     }
   }
 
@@ -407,10 +422,11 @@ function EditDialog({ unit, initialText, text, onCancel, onSave }) {
     }
     if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
       event.preventDefault()
-      void submit()
+      void submit(impact?.effectiveUnitIds)
     }
   }
 
+  const hasReasoning = unit.kind === 'answer' && (unit.associatedReasoningUnitIds?.length ?? 0) > 0
   return h('div', { className: 'context-editor__dialog-backdrop' },
     h('div', {
       className: 'context-editor__dialog',
@@ -427,16 +443,34 @@ function EditDialog({ unit, initialText, text, onCancel, onSave }) {
       ref: textarea,
       className: 'context-editor__dialog-input',
       value,
-      onChange: event => setValue(event.target.value),
+      onChange: event => { setValue(event.target.value); if (impact) setImpact(null) },
       spellCheck: false,
       disabled: saving,
       'aria-label': text.editTitle(unit.kind),
     }),
+    hasReasoning
+      ? h('label', { className: 'context-editor__replacement-link' },
+        h('input', { type: 'checkbox', checked: linkReasoning, disabled: saving, onChange: event => { setLinkReasoning(event.target.checked); setImpact(null); setError('') } }),
+        h('span', null, text.excludeAssociatedReasoning),
+      )
+      : null,
+    hasReasoning ? h('div', { className: 'context-editor__replacement-link-hint' }, text.excludeAssociatedReasoningHint) : null,
+    impact
+      ? h('div', { className: 'context-editor__replacement-impact ' + (impact.canCommit ? '' : 'is-error'), role: impact.canCommit ? 'status' : 'alert' },
+        h('strong', null, text.replacementImpactTitle),
+        impact.disabledReason ? h('div', null, text.replacementImpactDisabled(impact.disabledReason)) : null,
+        impact.requiresConfirmation ? h('div', null, text.replacementImpactExtra(impact.autoExpandedUnitIds.join(', '))) : null,
+        impact.newlyExcludedUnitIds?.length ? h('div', null, text.replacementImpactUnits(impact.newlyExcludedUnitIds.join(', '))) : null,
+        impact.canCommit && impact.requiresConfirmation
+          ? h('button', { type: 'button', disabled: saving, onClick: () => void submit(impact.effectiveUnitIds) }, text.replacementImpactConfirm)
+          : null,
+      )
+      : null,
     h('div', { className: 'context-editor__dialog-hint' }, 'Ctrl/Cmd+Enter', ' · ', text.cancel, ' Esc'),
     error ? h('div', { className: 'context-editor__dialog-error', role: 'alert' }, error) : null,
     h('div', { className: 'context-editor__dialog-actions' },
       h('button', { type: 'button', disabled: saving, onClick: onCancel }, text.cancel),
-      h('button', { type: 'button', disabled: saving, onClick: () => void submit() }, saving ? text.loading : text.save),
+      h('button', { type: 'button', disabled: saving, onClick: () => void submit(impact?.effectiveUnitIds) }, saving ? text.loading : (impact?.requiresConfirmation ? text.replacementImpactConfirm : text.save)),
     ),
     ),
   )
@@ -884,16 +918,37 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
     setEditing({
       unitId: unit.id,
       kind: unit.kind,
+      associatedReasoningUnitIds: unit.associatedReasoningUnitIds ?? [],
       text: String(unit.effectiveText ?? unit.atoms?.map(atom => atom.text ?? '').join('\n') ?? ''),
     })
   }
 
-  const saveReplacement = async value => {
+  const saveReplacement = async (value, options = {}) => {
     if (!editing || loaded.snapshot === null) return
     if (running) throw new Error('CONTEXT_EDITOR_BUSY')
     setContextMutating(true)
     try {
-      const result = await controller.commitReplacement(editing.unitId, loaded.snapshot.revision, value)
+      const preview = await controller.previewReplacement(editing.unitId, loaded.snapshot.revision, value, options.excludeAssociatedReasoning === true)
+      if (preview?.conflict) {
+        setNotice(text.replacementConflict)
+        closeReplacementDialog()
+        await refresh(true)
+        return
+      }
+      if (preview?.canCommit === false) {
+        const failure = new Error(preview.disabledReason ?? 'CONTEXT_EDITOR_REPLACEMENT_LINK_UNAVAILABLE')
+        failure.preview = preview
+        throw failure
+      }
+      if (preview?.requiresConfirmation && !(options.confirmedUnitIds?.length)) {
+        const failure = new Error('CONTEXT_EDITOR_REPLACEMENT_CONFIRMATION_REQUIRED')
+        failure.preview = preview
+        throw failure
+      }
+      const result = await controller.commitReplacement(editing.unitId, loaded.snapshot.revision, value, {
+        excludeAssociatedReasoning: options.excludeAssociatedReasoning === true,
+        confirmedUnitIds: options.confirmedUnitIds,
+      })
       if (result?.conflict) {
         setNotice(text.replacementConflict)
         closeReplacementDialog()
@@ -904,13 +959,12 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
       setNotice('')
       await refresh(true)
     } catch (error) {
-      setNotice(text.editFailed(errorText(error)))
+      if (!error?.preview) setNotice(text.editFailed(errorText(error)))
       throw error
     } finally {
       setContextMutating(false)
     }
   }
-
   const mutateReplacement = async (action, unit) => {
     if (readOnly || !replacementAvailable || unit.replacementSupported !== true || loaded.snapshot === null) return
     if (action === 'restore' && typeof globalThis.confirm === 'function') {

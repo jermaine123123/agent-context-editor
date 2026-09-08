@@ -1,6 +1,6 @@
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { stableFingerprint, type ContextProjectionEvent, type ContextProjectionEventV1 } from "./shared-core/index.js";
+import { stableFingerprint, type ContextProjectionChange, type ContextProjectionEvent, type ContextProjectionEventV1 } from "./shared-core/index.js";
 
 export const PROJECTION_SIDECAR_SCHEMA_VERSION = 1 as const;
 
@@ -28,42 +28,67 @@ function defaultDocument(sessionId: string): PiContextProjectionSidecar {
   return { schemaVersion: PROJECTION_SIDECAR_SCHEMA_VERSION, sessionId, events: [] };
 }
 
+function isProjectionChange(value: unknown): value is ContextProjectionChange {
+  if (!value || typeof value !== "object") return false;
+  const change = value as Record<string, unknown>;
+  const sourceRef = change.sourceRef;
+  if (!sourceRef || typeof sourceRef !== "object") return false;
+  const ref = sourceRef as Record<string, unknown>;
+  return typeof change.atomId === "string" && change.atomId.length > 0 &&
+    typeof change.fingerprint === "string" && change.fingerprint.length > 0 &&
+    typeof ref.entryId === "string" && ref.entryId.length > 0 && typeof ref.blockIndex === "number" && Number.isInteger(ref.blockIndex) && ref.blockIndex >= 0 &&
+    (change.before === "include" || change.before === "exclude") &&
+    (change.after === "include" || change.after === "exclude") && change.before !== change.after;
+}
+
+function isLinkedExclusion(value: unknown, eventId: string): boolean {
+  if (!value || typeof value !== "object") return false;
+  const linked = value as Record<string, unknown>;
+  if (linked.operationId !== eventId || !Array.isArray(linked.unitIds) || !Array.isArray(linked.atomChanges)) return false;
+  if (!linked.unitIds.every((id) => typeof id === "string" && id.length > 0) || new Set(linked.unitIds).size !== linked.unitIds.length) return false;
+  const atomIds = new Set<string>();
+  for (const change of linked.atomChanges) {
+    if (!isProjectionChange(change) || atomIds.has(change.atomId)) return false;
+    atomIds.add(change.atomId);
+  }
+  return true;
+}
+
 function isProjectionEvent(value: unknown): value is ContextProjectionEvent {
   if (!value || typeof value !== "object") return false;
   const row = value as Record<string, unknown>;
+  if ("type" in row && row.type !== "replacement") return false;
   if (row.type === "replacement") {
-    if (row.schemaVersion !== 1 || typeof row.eventId !== "string" || typeof row.unitId !== "string" || typeof row.createdAt !== "string" || (typeof row.baseRevision !== "string" && typeof row.baseRevision !== "number")) return false;
-    if (row.action === "undo") return typeof row.undoOf === "string";
+    if (row.schemaVersion !== 1 || typeof row.eventId !== "string" || row.eventId.length === 0 || typeof row.unitId !== "string" || row.unitId.length === 0 || typeof row.createdAt !== "string" || (typeof row.baseRevision !== "string" && typeof row.baseRevision !== "number")) return false;
+    if (row.action === "undo") {
+      if (typeof row.undoOf !== "string" || row.undoOf.length === 0) return false;
+      if (row.linkedExclusion !== undefined && !isLinkedExclusion(row.linkedExclusion, row.eventId)) return false;
+      return true;
+    }
     if (row.action !== "replace" && row.action !== "restore") return false;
     if (row.unitKind !== "user" && row.unitKind !== "answer") return false;
     if (!Array.isArray(row.atomRefs) || row.atomRefs.length === 0) return false;
     if ((typeof row.beforeText !== "string" && row.beforeText !== null) || (typeof row.afterText !== "string" && row.afterText !== null)) return false;
     if (row.action === "replace" && (typeof row.afterText !== "string" || row.afterText.trim().length === 0)) return false;
     if (row.action === "restore" && (row.afterText !== null || typeof row.beforeText !== "string")) return false;
+    if (row.linkedExclusion !== undefined && !isLinkedExclusion(row.linkedExclusion, row.eventId)) return false;
+    const atomIds = new Set<string>();
     return row.atomRefs.every((candidate) => {
       if (!candidate || typeof candidate !== "object") return false;
       const ref = candidate as Record<string, unknown>;
       const sourceRef = ref.sourceRef;
-      return typeof ref.atomId === "string" && typeof ref.fingerprint === "string" && !!sourceRef && typeof sourceRef === "object" &&
-        typeof (sourceRef as Record<string, unknown>).entryId === "string" && Number.isInteger((sourceRef as Record<string, unknown>).blockIndex);
+      if (typeof ref.atomId !== "string" || atomIds.has(ref.atomId)) return false;
+      atomIds.add(ref.atomId);
+      const source = sourceRef as Record<string, unknown> | undefined;
+      return typeof ref.atomId === "string" && ref.atomId.length > 0 && typeof ref.fingerprint === "string" && ref.fingerprint.length > 0 && !!sourceRef && typeof sourceRef === "object" &&
+        typeof source?.entryId === "string" && typeof source.blockIndex === "number" && Number.isInteger(source.blockIndex) && source.blockIndex >= 0;
     });
   }
   if (row.version !== 1 || typeof row.transactionId !== "string" || typeof row.createdAt !== "string" ||
     typeof row.baseRevision !== "string" || (row.action !== "exclude" && row.action !== "restore") ||
     !Array.isArray(row.changes) || row.changes.length === 0) return false;
-  return row.changes.every((candidate) => {
-    if (!candidate || typeof candidate !== "object") return false;
-    const change = candidate as Record<string, unknown>;
-    const sourceRef = change.sourceRef;
-    if (!sourceRef || typeof sourceRef !== "object" ||
-      typeof (sourceRef as Record<string, unknown>).entryId !== "string" ||
-      !Number.isInteger((sourceRef as Record<string, unknown>).blockIndex)) return false;
-    return typeof change.atomId === "string" && typeof change.fingerprint === "string" &&
-      (change.before === "include" || change.before === "exclude") &&
-      (change.after === "include" || change.after === "exclude") && change.before !== change.after;
-  });
+  return row.changes.every((candidate) => isProjectionChange(candidate));
 }
-
 function parseDocument(raw: unknown, sessionId: string): { document: PiContextProjectionSidecar; error?: string } {
   if (!raw || typeof raw !== "object") return { document: defaultDocument(sessionId), error: "projection sidecar JSON is malformed" };
   const row = raw as Record<string, unknown>;

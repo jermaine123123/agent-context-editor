@@ -63,15 +63,17 @@ export interface ContextEditableUnit {
   replacementDisabledReason?: ContextReplacementDisabledReason
   canRestoreReplacement: boolean
   canUndoReplacement: boolean
+  associatedReasoningUnitIds?: string[]
 }
 
 export type ContextReplacementProjectionState = 'original' | 'replaced' | 'unavailable'
-export type ContextReplacementDisabledReason = 'unsupported-unit-kind' | 'structured-user-content' | 'signed-content' | 'projection-unavailable' | 'invalid-target'
+export type ContextReplacementDisabledReason = 'unsupported-unit-kind' | 'structured-user-content' | 'signed-content' | 'projection-unavailable' | 'invalid-target' | 'associated-reasoning-unavailable'
 export interface ContextReplacementAtomRef {
   atomId: string
   sourceRef: { entryId: string; blockIndex: number }
   fingerprint: string
 }
+export interface ContextReplacementLinkedExclusion { operationId: string; unitIds: string[]; atomChanges: Array<{ atomId: string; fingerprint: string; sourceRef: { entryId: string; blockIndex: number }; before: 'include' | 'exclude'; after: 'include' | 'exclude' }> }
 export type ContextReplacementEventV1 = {
   schemaVersion: 1
   type: 'replacement'
@@ -84,6 +86,7 @@ export type ContextReplacementEventV1 = {
   afterText: string | null
   baseRevision: string | number
   createdAt: string
+  linkedExclusion?: ContextReplacementLinkedExclusion
 } | {
   schemaVersion: 1
   type: 'replacement'
@@ -93,6 +96,7 @@ export type ContextReplacementEventV1 = {
   unitKind: 'user' | 'answer'
   undoOf: string
   baseRevision: string | number
+  linkedExclusion?: ContextReplacementLinkedExclusion
   createdAt: string
 }
 
@@ -111,6 +115,7 @@ export function sessionIdentity(session: unknown): SessionIdentity
 export function sameSessionLifecycle(left: unknown, right: unknown): boolean
 export function normalizeSessionEvents(session: unknown, events: readonly unknown[]): { identity: SessionIdentity; atoms: ContextAtom[]; sourceRevision: number }
 export function projectRecords(atoms: readonly ContextAtom[], states?: ReadonlyMap<string, string>, projectionStates?: ReadonlyMap<string, ContextEditableUnitProjectionState | 'unavailable'>, replacementStates?: ReadonlyMap<string, unknown>): ContextRecord[]
+export function selectAssociatedReasoningTargets(records: readonly ContextRecord[], answerUnitId: string, projectionStates?: ReadonlyMap<string, string>): unknown
 export function selectProjectionTargets(records: readonly ContextRecord[], unitIds?: readonly string[], recordIds?: readonly string[]): { requestedUnitIds: string[]; effectiveUnitIds: string[]; autoExpandedUnitIds: string[]; requestedAtomIds: string[]; effectiveAtomIds: string[]; unavailableUnitIds: string[]; touchesRecentTurn: boolean }
 export function atomMatchesSearchScope(kind: string, scope?: ContextSearchScope): boolean
 export function searchRecords(records: readonly ContextRecord[], query: string, enabledKinds?: readonly string[], scope?: ContextSearchScope, enabledUnitKinds?: readonly ContextEditableUnitKind[] | ReadonlySet<ContextEditableUnitKind>): Array<{

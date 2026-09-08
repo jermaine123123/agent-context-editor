@@ -24,3 +24,10 @@ tool results and model reasoning, so treat its logs and sidecars as sensitive.
 
 Report security issues privately to the repository owner before opening a
 public issue. See [SECURITY.md](../SECURITY.md) for the disclosure contact.
+
+## Linked replacement safeguards
+
+- A linked Answer edit and its associated Reasoning exclusion share one required `operationId`; retries are idempotent and a reused ID with different request data is rejected.
+- The sidecar is written before the native projection, but an unmatched prewrite is ignored. The native event is appended and flushed only after maintenance rechecks running state, ownership and revision, so a crash cannot expose half of the operation.
+- Preview reports newly excluded units, already excluded units and any signed-tool-chain expansion. Unknown or unsafe associations fail closed; the user can cancel the link and retain a normal Answer-only edit.
+- Whole-operation undo uses event ownership rather than replacing the whole turn state. Exclusions made by later independent operations are preserved.

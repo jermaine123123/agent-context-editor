@@ -4,9 +4,11 @@ import { normalizeSessionEntries } from "../adapters/pi-extension/src/normalize.
 import {
   projectRecords,
   reduceProjectionStates,
+  selectAssociatedReasoningTargets,
   selectProjectionTargets,
   type ContextAtom,
   type ContextProjectionEventV1,
+  type ContextReplacementEventV1,
 } from "../packages/context-editor-core/src/index.js";
 import { projectModelContext, projectionOverlapsEntryIds, ProjectionAlignmentError } from "../adapters/pi-extension/src/projection-hook.js";
 
@@ -80,6 +82,42 @@ describe("context projection core", () => {
     expect(reduceProjectionStates(atoms, [changed]).get(user.id)).toBe("unavailable");
   });
 
+  it("associates same-turn Answer roots and undoes only its own linked exclusion", () => {
+    const entries = [
+      { type: "message", id: "u", parentId: null, timestamp: new Date(1).toISOString(), message: { role: "user", content: "question" } },
+      { type: "message", id: "a1", parentId: "u", timestamp: new Date(2).toISOString(), message: { role: "assistant", content: [{ type: "thinking", thinking: "reason", thinkingSignature: "sig" }] } },
+      { type: "message", id: "a2", parentId: "a1", timestamp: new Date(3).toISOString(), message: { role: "assistant", content: [{ type: "text", text: "answer" }] } },
+      { type: "message", id: "a3", parentId: "a2", timestamp: new Date(4).toISOString(), message: { role: "assistant", content: [{ type: "toolCall", id: "call", name: "read", arguments: {} }] } },
+      { type: "message", id: "t", parentId: "a3", timestamp: new Date(5).toISOString(), message: { role: "toolResult", toolCallId: "call", toolName: "read", content: [{ type: "text", text: "tool" }], isError: false } },
+    ];
+    const atoms = normalizeSessionEntries(entries);
+    const records = projectRecords(atoms);
+    const ai = records.find((record) => record.kind === "ai")!;
+    const reasoning = ai.units.find((unit) => unit.kind === "reasoning")!;
+    const answer = ai.units.find((unit) => unit.kind === "answer")!;
+    const tool = records.find((record) => record.kind === "tool")!.units[0]!;
+    expect(answer.associatedReasoningUnitIds).toEqual([reasoning.id]);
+    const selection = selectAssociatedReasoningTargets(records, answer.id);
+    expect(selection.associatedReasoningUnitIds).toEqual([reasoning.id]);
+    expect(selection.effectiveUnitIds).toContain(reasoning.id);
+    expect(selection.effectiveUnitIds).not.toContain(answer.id);
+    expect(selection.autoExpandedUnitIds).toContain(tool.id);
+
+    const reasoningAtom = reasoning.atoms[0]!;
+    const linked: ContextReplacementEventV1 = {
+      schemaVersion: 1, type: "replacement", action: "replace", eventId: "linked", unitId: answer.id, unitKind: "answer",
+      atomRefs: answer.atoms.map((atom) => ({ atomId: atom.id, sourceRef: atom.sourceRef, fingerprint: atom.fingerprint })),
+      beforeText: null, afterText: "edited", baseRevision: "rev", createdAt: new Date().toISOString(),
+      linkedExclusion: { operationId: "linked", unitIds: [reasoning.id], atomChanges: [{ atomId: reasoningAtom.id, sourceRef: reasoningAtom.sourceRef, fingerprint: reasoningAtom.fingerprint, before: "include", after: "exclude" }] },
+    };
+    const independent: ContextProjectionEventV1 = {
+      version: 1, transactionId: "independent", createdAt: new Date().toISOString(), baseRevision: "rev", action: "exclude",
+      changes: [{ atomId: reasoningAtom.id, sourceRef: reasoningAtom.sourceRef, fingerprint: reasoningAtom.fingerprint, before: "include", after: "exclude" }],
+    };
+    const undo: ContextReplacementEventV1 = { schemaVersion: 1, type: "replacement", action: "undo", eventId: "undo-linked", unitId: answer.id, undoOf: "linked", baseRevision: "rev", createdAt: new Date().toISOString() };
+    expect(reduceProjectionStates(atoms, [linked, undo]).get(reasoningAtom.id)).toBe("include");
+    expect(reduceProjectionStates(atoms, [linked, independent, undo]).get(reasoningAtom.id)).toBe("exclude");
+  });
   it("fails summary overlap checks closed on an active fingerprint mismatch", () => {
     const { atoms } = fixture();
     const user = atoms.find((atom) => atom.kind === "user");

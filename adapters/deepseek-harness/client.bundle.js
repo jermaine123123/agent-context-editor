@@ -1978,6 +1978,7 @@ window.__ModuleLoader__.load({
     	"searchRecords",
     	"getSearchMatch",
     	"previewContext",
+    	"previewReplacement",
     	"commitContext",
     	"commitView",
     	"undoView",
@@ -2116,12 +2117,20 @@ window.__ModuleLoader__.load({
     				"signed-content": zh ? "回答包含签名内容" : "the answer contains signed content",
     				"projection-unavailable": zh ? "Provider 投影暂不可用" : "provider projection is unavailable",
     				"unsupported-unit-kind": zh ? "该单元类型不支持编辑" : "this unit type does not support editing",
-    				"invalid-target": zh ? "原文已变化，无法安全编辑" : "the canonical text changed and cannot be edited safely"
+    				"invalid-target": zh ? "原文已变化，无法安全编辑" : "the canonical text changed and cannot be edited safely",
+    				"associated-reasoning-unavailable": zh ? "关联的本轮思考或工具链无法安全投影" : "the associated reasoning or tool chain cannot be projected safely"
     			};
     			return zh ? `不可编辑：${labels[reason] ?? "内容类型不支持"}` : `Not editable: ${labels[reason] ?? "this content is not supported"}`;
     		},
     		replacementDisabled: zh ? "手动上下文编辑尚未启用" : "Manual context editing is not enabled",
     		restoreReplacementConfirm: zh ? "确认恢复该单元的原文吗？" : "Restore this unit to its original text?",
+    		excludeAssociatedReasoning: zh ? "同时从后续上下文中排除本轮思考内容" : "Also exclude this turn's reasoning from later context",
+    		excludeAssociatedReasoningHint: zh ? "避免旧思考与修改后的回答不一致，可能影响下一次请求的提示词缓存。" : "Prevents stale reasoning from disagreeing with the edited answer; prompt-cache behavior may change.",
+    		replacementImpactTitle: zh ? "实际影响范围" : "Actual impact",
+    		replacementImpactExtra: (ids) => zh ? `签名保护会扩展到工具链：${ids}` : `Signature safety expands this to the tool chain: ${ids}`,
+    		replacementImpactUnits: (ids) => zh ? `将新增排除：${ids}` : `Newly excluded units: ${ids}`,
+    		replacementImpactDisabled: (reason) => zh ? `联动已禁用：${reason}` : `Linked exclusion disabled: ${reason}`,
+    		replacementImpactConfirm: zh ? "确认保存" : "Confirm save",
     		editFailed: (error) => zh ? `编辑失败：${error}` : `Edit failed: ${error}`
     	};
     }
@@ -2191,7 +2200,7 @@ window.__ModuleLoader__.load({
     //#endregion
     //#region \0context-editor-client-css
     const style = document.createElement("style");
-    style.textContent = ".context-editor {\n  display: flex;\n  flex-direction: column;\n  gap: 0.65rem;\n  height: 100%;\n  min-height: 0;\n  padding: 0.85rem 1rem 1.25rem;\n  color: var(--dsh-fg, var(--foreground, inherit));\n}\n\n.context-editor__controls {\n  position: sticky;\n  top: 0;\n  z-index: 10;\n  display: grid;\n  gap: 0.55rem;\n  padding: 0.15rem 0 0.65rem;\n  background: var(--dsh-panel-bg, var(--background, var(--dsh-card-bg, #fff)));\n  border-bottom: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  box-shadow: 0 0.35rem 0.75rem color-mix(in srgb, var(--dsh-shadow, #172033) 12%, transparent);\n}\n\n.context-editor__toolbar,\n.context-editor__searchbar,\n.context-editor__actions {\n  display: flex;\n  align-items: center;\n  gap: 0.45rem;\n  flex-wrap: wrap;\n}\n\n.context-editor__filters { display: flex; align-items: flex-start; gap: 0.35rem; flex-wrap: wrap; }\n.context-editor__filter-group { display: inline-flex; align-items: flex-start; gap: 0.25rem; }\n.context-editor__subfilters { display: inline-flex; gap: 0.25rem; padding-top: 0.1rem; }\n.context-editor__filter,\n.context-editor__actions button,\n.context-editor__searchbar button,\n.context-editor__row button {\n  border: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  border-radius: 0.45rem;\n  background: var(--dsh-control-bg, var(--background, transparent));\n  color: inherit;\n  padding: 0.28rem 0.55rem;\n  cursor: pointer;\n}\n.context-editor__filter.is-active,\n.context-editor__filter.is-mixed { background: var(--dsh-accent-soft, #e8efff); border-color: var(--dsh-accent, #7190e8); }\n.context-editor__filter.is-mixed { background: linear-gradient(90deg, var(--dsh-accent-soft, #e8efff) 50%, var(--dsh-control-bg, var(--background, transparent)) 50%); }\n.context-editor button:disabled { cursor: not-allowed; opacity: 0.45; }\n.context-editor__toggle { display: inline-flex; align-items: center; gap: 0.3rem; margin-left: auto; }\n.context-editor__searchbar input { flex: 1 1 20rem; min-width: 12rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.38rem 0.55rem; background: var(--dsh-input-bg, transparent); color: inherit; }\n.context-editor__search-summary { color: var(--dsh-muted, #687386); font-size: 0.82rem; }\n.context-editor__actions { padding-bottom: 0.15rem; }\n.context-editor__running { color: var(--dsh-muted, #687386); font-size: 0.82rem; }\n.context-editor__error { color: var(--dsh-danger, #b42318); font-size: 0.82rem; }\n.context-editor__list { overflow: visible; min-height: 0; display: flex; flex-direction: column; gap: 0.5rem; padding-right: 0.2rem; }\n.context-editor__row { display: flex; align-items: flex-start; gap: 0.6rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.55rem; padding: 0.65rem; background: var(--dsh-card-bg, transparent); }\n.context-editor__row.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }\n.context-editor__row.is-hidden { opacity: 0.82; }\n.context-editor__row--placeholder { align-items: center; min-height: 2.4rem; border-style: dashed; }\n.context-editor__row--placeholder input { margin-top: 0.2rem; }\n.context-editor__placeholder-text { flex: 1; color: var(--dsh-muted, #687386); font-size: 0.9rem; }\n.context-editor__row-content { flex: 1; min-width: 0; }\n.context-editor__row-meta { display: flex; align-items: center; gap: 0.45rem; color: var(--dsh-muted, #687386); font-size: 0.75rem; margin-bottom: 0.35rem; }\n.context-editor__kind { font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }\n.context-editor__hidden-badge { color: var(--dsh-warning, #996b00); }\n.context-editor__context-badge { color: var(--dsh-accent, #4568c4); font-weight: 600; }\n.context-editor__context-badge.is-unavailable { color: var(--dsh-muted, #687386); }\n.context-editor__replacement-badge { color: var(--dsh-accent, #4568c4); font-weight: 600; }\n.context-editor__replacement-reason { color: var(--dsh-muted, #687386); font-size: 0.75rem; }\n.context-editor__replacement-actions { display: inline-flex; align-items: center; gap: 0.3rem; flex-wrap: wrap; }\n.context-editor__unit.is-context-excluded { border-color: color-mix(in srgb, var(--dsh-accent, #7190e8) 55%, var(--dsh-border, #d7dbe2)); }\n.context-editor__context-toggle { margin-left: auto; }\n.context-editor__units { display: grid; gap: 0.45rem; }\n.context-editor__unit { border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.45rem 0.55rem; }\n.context-editor__unit.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }\n.context-editor__unit.is-hidden { opacity: 0.82; }\n.context-editor__unit-header { display: flex; align-items: center; gap: 0.45rem; min-height: 1.65rem; color: var(--dsh-muted, #687386); font-size: 0.78rem; }\n.context-editor__unit-select { display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer; }\n.context-editor__unit-kind { font-weight: 600; }\n.context-editor__unit-header button { margin-left: auto; }\n.context-editor__unit-header .context-editor__replacement-actions button { margin-left: 0; }\n.context-editor__unit-body { min-width: 0; }\n.context-editor__unit-placeholder { color: var(--dsh-muted, #687386); padding: 0.35rem 0; font-size: 0.9rem; }\n.context-editor__record-body { display: grid; gap: 0.25rem; }\n.context-editor__atom { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }\n.context-editor__atom--reasoning { color: var(--dsh-muted, #687386); }\n.context-editor__tool-name { font-weight: 600; }\n.context-editor__hit { border-radius: 0.18rem; background: var(--dsh-highlight, #ffe28a); color: inherit; padding: 0 0.08rem; }\n.context-editor__state { color: var(--dsh-muted, #687386); padding: 2rem 0; text-align: center; }\n.context-editor__empty { color: var(--dsh-muted, #687386); }\n.context-editor__notice { color: var(--dsh-warning, #996b00); font-size: 0.82rem; }\n.context-editor__dialog-backdrop {\n  position: fixed;\n  inset: 0;\n  z-index: 100;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  padding: 1rem;\n  background: color-mix(in srgb, #0b1220 48%, transparent);\n}\n.context-editor__dialog {\n  width: min(48rem, 100%);\n  max-height: min(42rem, 100%);\n  display: grid;\n  gap: 0.75rem;\n  padding: 1rem;\n  border: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  border-radius: 0.7rem;\n  background: var(--dsh-panel-bg, var(--background, #fff));\n  color: var(--dsh-fg, var(--foreground, inherit));\n  box-shadow: 0 1rem 3rem color-mix(in srgb, #172033 35%, transparent);\n}\n.context-editor__dialog-header { display: flex; align-items: center; gap: 0.5rem; }\n.context-editor__dialog-header h2 { flex: 1; margin: 0; font-size: 1rem; }\n.context-editor__dialog-close { margin-left: auto; border: 0; background: transparent; color: inherit; font-size: 1.35rem; cursor: pointer; }\n.context-editor__dialog-input {\n  width: 100%;\n  min-height: 14rem;\n  resize: vertical;\n  box-sizing: border-box;\n  border: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  border-radius: 0.45rem;\n  padding: 0.65rem;\n  background: var(--dsh-input-bg, transparent);\n  color: inherit;\n  font: inherit;\n  line-height: 1.45;\n}\n.context-editor__dialog-hint { color: var(--dsh-muted, #687386); font-size: 0.75rem; }\n.context-editor__dialog-error { color: var(--dsh-danger, #b42318); font-size: 0.82rem; }\n.context-editor__dialog-actions { display: flex; justify-content: flex-end; gap: 0.45rem; }\n.context-editor__dialog-actions button { border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; background: var(--dsh-control-bg, var(--background, transparent)); color: inherit; padding: 0.35rem 0.7rem; cursor: pointer; }\r\n\n@media (max-width: 42rem) {\n  .context-editor__searchbar input { flex-basis: 100%; min-width: 0; }\n  .context-editor__toggle { margin-left: 0; }\n  .context-editor__search-summary { flex: 1 1 100%; }\n}\n";
+    style.textContent = ".context-editor {\n  display: flex;\n  flex-direction: column;\n  gap: 0.65rem;\n  height: 100%;\n  min-height: 0;\n  padding: 0.85rem 1rem 1.25rem;\n  color: var(--dsh-fg, var(--foreground, inherit));\n}\n\n.context-editor__controls {\n  position: sticky;\n  top: 0;\n  z-index: 10;\n  display: grid;\n  gap: 0.55rem;\n  padding: 0.15rem 0 0.65rem;\n  background: var(--dsh-panel-bg, var(--background, var(--dsh-card-bg, #fff)));\n  border-bottom: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  box-shadow: 0 0.35rem 0.75rem color-mix(in srgb, var(--dsh-shadow, #172033) 12%, transparent);\n}\n\n.context-editor__toolbar,\n.context-editor__searchbar,\n.context-editor__actions {\n  display: flex;\n  align-items: center;\n  gap: 0.45rem;\n  flex-wrap: wrap;\n}\n\n.context-editor__filters { display: flex; align-items: flex-start; gap: 0.35rem; flex-wrap: wrap; }\n.context-editor__filter-group { display: inline-flex; align-items: flex-start; gap: 0.25rem; }\n.context-editor__subfilters { display: inline-flex; gap: 0.25rem; padding-top: 0.1rem; }\n.context-editor__filter,\n.context-editor__actions button,\n.context-editor__searchbar button,\n.context-editor__row button {\n  border: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  border-radius: 0.45rem;\n  background: var(--dsh-control-bg, var(--background, transparent));\n  color: inherit;\n  padding: 0.28rem 0.55rem;\n  cursor: pointer;\n}\n.context-editor__filter.is-active,\n.context-editor__filter.is-mixed { background: var(--dsh-accent-soft, #e8efff); border-color: var(--dsh-accent, #7190e8); }\n.context-editor__filter.is-mixed { background: linear-gradient(90deg, var(--dsh-accent-soft, #e8efff) 50%, var(--dsh-control-bg, var(--background, transparent)) 50%); }\n.context-editor button:disabled { cursor: not-allowed; opacity: 0.45; }\n.context-editor__toggle { display: inline-flex; align-items: center; gap: 0.3rem; margin-left: auto; }\n.context-editor__searchbar input { flex: 1 1 20rem; min-width: 12rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.38rem 0.55rem; background: var(--dsh-input-bg, transparent); color: inherit; }\n.context-editor__search-summary { color: var(--dsh-muted, #687386); font-size: 0.82rem; }\n.context-editor__actions { padding-bottom: 0.15rem; }\n.context-editor__running { color: var(--dsh-muted, #687386); font-size: 0.82rem; }\n.context-editor__error { color: var(--dsh-danger, #b42318); font-size: 0.82rem; }\n.context-editor__list { overflow: visible; min-height: 0; display: flex; flex-direction: column; gap: 0.5rem; padding-right: 0.2rem; }\n.context-editor__row { display: flex; align-items: flex-start; gap: 0.6rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.55rem; padding: 0.65rem; background: var(--dsh-card-bg, transparent); }\n.context-editor__row.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }\n.context-editor__row.is-hidden { opacity: 0.82; }\n.context-editor__row--placeholder { align-items: center; min-height: 2.4rem; border-style: dashed; }\n.context-editor__row--placeholder input { margin-top: 0.2rem; }\n.context-editor__placeholder-text { flex: 1; color: var(--dsh-muted, #687386); font-size: 0.9rem; }\n.context-editor__row-content { flex: 1; min-width: 0; }\n.context-editor__row-meta { display: flex; align-items: center; gap: 0.45rem; color: var(--dsh-muted, #687386); font-size: 0.75rem; margin-bottom: 0.35rem; }\n.context-editor__kind { font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }\n.context-editor__hidden-badge { color: var(--dsh-warning, #996b00); }\n.context-editor__context-badge { color: var(--dsh-accent, #4568c4); font-weight: 600; }\n.context-editor__context-badge.is-unavailable { color: var(--dsh-muted, #687386); }\n.context-editor__replacement-badge { color: var(--dsh-accent, #4568c4); font-weight: 600; }\n.context-editor__replacement-reason { color: var(--dsh-muted, #687386); font-size: 0.75rem; }\n.context-editor__replacement-actions { display: inline-flex; align-items: center; gap: 0.3rem; flex-wrap: wrap; }\n.context-editor__unit.is-context-excluded { border-color: color-mix(in srgb, var(--dsh-accent, #7190e8) 55%, var(--dsh-border, #d7dbe2)); }\n.context-editor__context-toggle { margin-left: auto; }\n.context-editor__units { display: grid; gap: 0.45rem; }\n.context-editor__unit { border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.45rem 0.55rem; }\n.context-editor__unit.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }\n.context-editor__unit.is-hidden { opacity: 0.82; }\n.context-editor__unit-header { display: flex; align-items: center; gap: 0.45rem; min-height: 1.65rem; color: var(--dsh-muted, #687386); font-size: 0.78rem; }\n.context-editor__unit-select { display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer; }\n.context-editor__unit-kind { font-weight: 600; }\n.context-editor__unit-header button { margin-left: auto; }\n.context-editor__unit-header .context-editor__replacement-actions button { margin-left: 0; }\n.context-editor__unit-body { min-width: 0; }\n.context-editor__unit-placeholder { color: var(--dsh-muted, #687386); padding: 0.35rem 0; font-size: 0.9rem; }\n.context-editor__record-body { display: grid; gap: 0.25rem; }\n.context-editor__atom { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }\n.context-editor__atom--reasoning { color: var(--dsh-muted, #687386); }\n.context-editor__tool-name { font-weight: 600; }\n.context-editor__hit { border-radius: 0.18rem; background: var(--dsh-highlight, #ffe28a); color: inherit; padding: 0 0.08rem; }\n.context-editor__state { color: var(--dsh-muted, #687386); padding: 2rem 0; text-align: center; }\n.context-editor__empty { color: var(--dsh-muted, #687386); }\n.context-editor__notice { color: var(--dsh-warning, #996b00); font-size: 0.82rem; }\n.context-editor__dialog-backdrop {\n  position: fixed;\n  inset: 0;\n  z-index: 100;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  padding: 1rem;\n  background: color-mix(in srgb, #0b1220 48%, transparent);\n}\n.context-editor__dialog {\n  width: min(48rem, 100%);\n  max-height: min(42rem, 100%);\n  display: grid;\n  gap: 0.75rem;\n  padding: 1rem;\n  border: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  border-radius: 0.7rem;\n  background: var(--dsh-panel-bg, var(--background, #fff));\n  color: var(--dsh-fg, var(--foreground, inherit));\n  box-shadow: 0 1rem 3rem color-mix(in srgb, #172033 35%, transparent);\n}\n.context-editor__dialog-header { display: flex; align-items: center; gap: 0.5rem; }\n.context-editor__dialog-header h2 { flex: 1; margin: 0; font-size: 1rem; }\n.context-editor__dialog-close { margin-left: auto; border: 0; background: transparent; color: inherit; font-size: 1.35rem; cursor: pointer; }\n.context-editor__dialog-input {\n  width: 100%;\n  min-height: 14rem;\n  resize: vertical;\n  box-sizing: border-box;\n  border: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  border-radius: 0.45rem;\n  padding: 0.65rem;\n  background: var(--dsh-input-bg, transparent);\n  color: inherit;\n  font: inherit;\n  line-height: 1.45;\n}\n.context-editor__dialog-hint { color: var(--dsh-muted, #687386); font-size: 0.75rem; }\n.context-editor__dialog-error { color: var(--dsh-danger, #b42318); font-size: 0.82rem; }\n.context-editor__dialog-actions { display: flex; justify-content: flex-end; gap: 0.45rem; }\n.context-editor__dialog-actions button { border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; background: var(--dsh-control-bg, var(--background, transparent)); color: inherit; padding: 0.35rem 0.7rem; cursor: pointer; }\r\n\n@media (max-width: 42rem) {\n  .context-editor__searchbar input { flex-basis: 100%; min-width: 0; }\n  .context-editor__toggle { margin-left: 0; }\n  .context-editor__search-summary { flex: 1 1 100%; }\n}\n\r\n.context-editor__replacement-link { display: flex; align-items: flex-start; gap: 0.45rem; font-size: 0.85rem; }\r\n.context-editor__replacement-link-hint { color: var(--dsh-muted, #687386); font-size: 0.75rem; }\r\n.context-editor__replacement-impact { display: grid; gap: 0.3rem; padding: 0.6rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; font-size: 0.82rem; }\r\n.context-editor__replacement-impact.is-error { border-color: var(--dsh-danger, #b42318); }\r\n";
     document.head.appendChild(style);
     //#endregion
     //#region adapters/deepseek-harness/client.js
@@ -2447,12 +2456,23 @@ window.__ModuleLoader__.load({
     	replacementOperationId(action, unitId) {
     		return `context-replacement-${action}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}-${String(unitId).slice(-12)}`;
     	}
-    	async commitReplacement(unitId, baseRevision, text) {
-    		return this.call("commitReplacement", {
-    			operationId: this.replacementOperationId("replace", unitId),
+    	async previewReplacement(unitId, baseRevision, text, excludeAssociatedReasoning = false) {
+    		return this.call("previewReplacement", {
     			unitId,
     			baseRevision,
-    			text
+    			text,
+    			excludeAssociatedReasoning
+    		});
+    	}
+    	async commitReplacement(unitId, baseRevision, text, options = {}) {
+    		const operationId = options.operationId ?? this.replacementOperationId("replace", unitId);
+    		return this.call("commitReplacement", {
+    			operationId,
+    			unitId,
+    			baseRevision,
+    			text,
+    			...options.excludeAssociatedReasoning ? { excludeAssociatedReasoning: true } : {},
+    			...options.confirmedUnitIds?.length ? { confirmedUnitIds: options.confirmedUnitIds } : {}
     		});
     	}
     	async restoreReplacement(unitId, baseRevision) {
@@ -2502,34 +2522,45 @@ window.__ModuleLoader__.load({
     }
     function EditDialog({ unit, initialText, text, onCancel, onSave }) {
     	const [value, setValue] = (0, react.useState)(initialText);
+    	const [linkReasoning, setLinkReasoning] = (0, react.useState)(unit.kind === "answer" && (unit.associatedReasoningUnitIds?.length ?? 0) > 0);
+    	const [impact, setImpact] = (0, react.useState)(null);
     	const [error, setError] = (0, react.useState)("");
     	const [saving, setSaving] = (0, react.useState)(false);
     	const textarea = (0, react.useRef)(null);
     	(0, react.useEffect)(() => {
     		setValue(initialText);
+    		setLinkReasoning(unit.kind === "answer" && (unit.associatedReasoningUnitIds?.length ?? 0) > 0);
+    		setImpact(null);
     		setError("");
     		const timer = globalThis.setTimeout?.(() => textarea.current?.focus?.(), 0);
     		return () => {
     			if (timer !== void 0) globalThis.clearTimeout?.(timer);
     		};
     	}, [initialText, unit.id]);
-    	const submit = async () => {
+    	const submit = async (confirmedUnitIds) => {
     		if (saving) return;
     		if (value.trim().length === 0) {
     			setError(text.replacementEmpty);
     			return;
     		}
-    		if (value === initialText) {
+    		if (value === initialText && !linkReasoning) {
     			onCancel();
     			return;
     		}
     		setSaving(true);
     		setError("");
     		try {
-    			await onSave(value);
+    			await onSave(value, {
+    				excludeAssociatedReasoning: linkReasoning,
+    				confirmedUnitIds
+    			});
+    			setImpact(null);
     		} catch (cause) {
     			setSaving(false);
-    			setError(errorText(cause));
+    			if (cause?.preview) {
+    				setImpact(cause.preview);
+    				setError(cause.preview.disabledReason ?? "");
+    			} else setError(errorText(cause));
     		}
     	};
     	const onKeyDown = (event) => {
@@ -2540,9 +2571,10 @@ window.__ModuleLoader__.load({
     		}
     		if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
     			event.preventDefault();
-    			submit();
+    			submit(impact?.effectiveUnitIds);
     		}
     	};
+    	const hasReasoning = unit.kind === "answer" && (unit.associatedReasoningUnitIds?.length ?? 0) > 0;
     	return h("div", { className: "context-editor__dialog-backdrop" }, h("div", {
     		className: "context-editor__dialog",
     		role: "dialog",
@@ -2559,11 +2591,30 @@ window.__ModuleLoader__.load({
     		ref: textarea,
     		className: "context-editor__dialog-input",
     		value,
-    		onChange: (event) => setValue(event.target.value),
+    		onChange: (event) => {
+    			setValue(event.target.value);
+    			if (impact) setImpact(null);
+    		},
     		spellCheck: false,
     		disabled: saving,
     		"aria-label": text.editTitle(unit.kind)
-    	}), h("div", { className: "context-editor__dialog-hint" }, "Ctrl/Cmd+Enter", " · ", text.cancel, " Esc"), error ? h("div", {
+    	}), hasReasoning ? h("label", { className: "context-editor__replacement-link" }, h("input", {
+    		type: "checkbox",
+    		checked: linkReasoning,
+    		disabled: saving,
+    		onChange: (event) => {
+    			setLinkReasoning(event.target.checked);
+    			setImpact(null);
+    			setError("");
+    		}
+    	}), h("span", null, text.excludeAssociatedReasoning)) : null, hasReasoning ? h("div", { className: "context-editor__replacement-link-hint" }, text.excludeAssociatedReasoningHint) : null, impact ? h("div", {
+    		className: "context-editor__replacement-impact " + (impact.canCommit ? "" : "is-error"),
+    		role: impact.canCommit ? "status" : "alert"
+    	}, h("strong", null, text.replacementImpactTitle), impact.disabledReason ? h("div", null, text.replacementImpactDisabled(impact.disabledReason)) : null, impact.requiresConfirmation ? h("div", null, text.replacementImpactExtra(impact.autoExpandedUnitIds.join(", "))) : null, impact.newlyExcludedUnitIds?.length ? h("div", null, text.replacementImpactUnits(impact.newlyExcludedUnitIds.join(", "))) : null, impact.canCommit && impact.requiresConfirmation ? h("button", {
+    		type: "button",
+    		disabled: saving,
+    		onClick: () => void submit(impact.effectiveUnitIds)
+    	}, text.replacementImpactConfirm) : null) : null, h("div", { className: "context-editor__dialog-hint" }, "Ctrl/Cmd+Enter", " · ", text.cancel, " Esc"), error ? h("div", {
     		className: "context-editor__dialog-error",
     		role: "alert"
     	}, error) : null, h("div", { className: "context-editor__dialog-actions" }, h("button", {
@@ -2573,8 +2624,8 @@ window.__ModuleLoader__.load({
     	}, text.cancel), h("button", {
     		type: "button",
     		disabled: saving,
-    		onClick: () => void submit()
-    	}, saving ? text.loading : text.save))));
+    		onClick: () => void submit(impact?.effectiveUnitIds)
+    	}, saving ? text.loading : impact?.requiresConfirmation ? text.replacementImpactConfirm : text.save))));
     }
     function UnitSection({ unit, selected, onSelect, focused, showHidden, showOriginal, match, disabled, onRestore, onContextToggle, onEdit, onRestoreReplacement, onUndoReplacement, onCompareOriginal, replacementAvailable, registerNode, text }) {
     	const hidden = unit.viewState === "hide" || unit.viewState === "mixed";
@@ -3003,15 +3054,36 @@ window.__ModuleLoader__.load({
     		setEditing({
     			unitId: unit.id,
     			kind: unit.kind,
+    			associatedReasoningUnitIds: unit.associatedReasoningUnitIds ?? [],
     			text: String(unit.effectiveText ?? unit.atoms?.map((atom) => atom.text ?? "").join("\n") ?? "")
     		});
     	};
-    	const saveReplacement = async (value) => {
+    	const saveReplacement = async (value, options = {}) => {
     		if (!editing || loaded.snapshot === null) return;
     		if (running) throw new Error("CONTEXT_EDITOR_BUSY");
     		setContextMutating(true);
     		try {
-    			if ((await controller.commitReplacement(editing.unitId, loaded.snapshot.revision, value))?.conflict) {
+    			const preview = await controller.previewReplacement(editing.unitId, loaded.snapshot.revision, value, options.excludeAssociatedReasoning === true);
+    			if (preview?.conflict) {
+    				setNotice(text.replacementConflict);
+    				closeReplacementDialog();
+    				await refresh(true);
+    				return;
+    			}
+    			if (preview?.canCommit === false) {
+    				const failure = new Error(preview.disabledReason ?? "CONTEXT_EDITOR_REPLACEMENT_LINK_UNAVAILABLE");
+    				failure.preview = preview;
+    				throw failure;
+    			}
+    			if (preview?.requiresConfirmation && !options.confirmedUnitIds?.length) {
+    				const failure = /* @__PURE__ */ new Error("CONTEXT_EDITOR_REPLACEMENT_CONFIRMATION_REQUIRED");
+    				failure.preview = preview;
+    				throw failure;
+    			}
+    			if ((await controller.commitReplacement(editing.unitId, loaded.snapshot.revision, value, {
+    				excludeAssociatedReasoning: options.excludeAssociatedReasoning === true,
+    				confirmedUnitIds: options.confirmedUnitIds
+    			}))?.conflict) {
     				setNotice(text.replacementConflict);
     				closeReplacementDialog();
     				await refresh(true);
@@ -3021,7 +3093,7 @@ window.__ModuleLoader__.load({
     			setNotice("");
     			await refresh(true);
     		} catch (error) {
-    			setNotice(text.editFailed(errorText(error)));
+    			if (!error?.preview) setNotice(text.editFailed(errorText(error)));
     			throw error;
     		} finally {
     			setContextMutating(false);

@@ -10,6 +10,7 @@ export const methods = Object.freeze([
   'searchRecords',
   'getSearchMatch',
   'previewContext',
+  'previewReplacement',
   'commitContext',
   'commitView',
   'undoView',

@@ -24,6 +24,7 @@ import {
   type ContextProjectionPreview,
   type ContextProjectionEvent,
   type ContextReplacementMutationRequest,
+  type ContextReplacementPreview,
   type ContextReplacementUnitRequest,
 } from "./shared-core/index.js";
 import { appendProjectionSidecarEvent, readProjectionSidecar } from "./projection-sidecar.js";
@@ -133,7 +134,11 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
     );
   }
 
-  commitReplacementMutation(input: Pick<ContextReplacementMutationRequest, "baseRevision" | "unitId" | "text">): ContextMutationResult {
+  previewReplacementMutation(input: Pick<ContextReplacementMutationRequest, "baseRevision" | "unitId" | "text" | "excludeAssociatedReasoning"> & Partial<Pick<ContextReplacementMutationRequest, "operationId">>): ContextReplacementPreview {
+    return service.previewReplacement(this, input);
+  }
+
+  commitReplacementMutation(input: Pick<ContextReplacementMutationRequest, "baseRevision" | "unitId" | "text" | "excludeAssociatedReasoning" | "confirmedUnitIds" | "confirmationScope"> & Partial<Pick<ContextReplacementMutationRequest, "operationId">>): ContextMutationResult {
     try {
       return service.commitReplacement(this, input);
     } catch (error) {
@@ -144,7 +149,7 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
     }
   }
 
-  restoreReplacementMutation(input: Pick<ContextReplacementUnitRequest, "baseRevision" | "unitId">): ContextMutationResult {
+  restoreReplacementMutation(input: Pick<ContextReplacementUnitRequest, "baseRevision" | "unitId"> & Partial<Pick<ContextReplacementUnitRequest, "operationId">>): ContextMutationResult {
     try {
       return service.restoreReplacement(this, input);
     } catch (error) {
@@ -155,7 +160,7 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
     }
   }
 
-  undoReplacementMutation(input: Pick<ContextReplacementUnitRequest, "baseRevision" | "unitId">): ContextMutationResult {
+  undoReplacementMutation(input: Pick<ContextReplacementUnitRequest, "baseRevision" | "unitId"> & Partial<Pick<ContextReplacementUnitRequest, "operationId">>): ContextMutationResult {
     try {
       return service.undoReplacement(this, input);
     } catch (error) {
@@ -249,6 +254,11 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
   async getSearchMatch(request: ContextSearchMatchRequest): Promise<ContextSearchMatch | null> {
     asLocator(request.locator, this.sessionId);
     return this.searchMatch(request);
+  }
+
+  async previewReplacement(request: ContextReplacementMutationRequest): Promise<ContextReplacementPreview> {
+    asLocator(request.locator, this.sessionId);
+    return service.previewReplacement(this, request);
   }
 
   async commitReplacement(request: ContextReplacementMutationRequest): Promise<ContextMutationResult> {

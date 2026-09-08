@@ -138,3 +138,8 @@
   .context-editor__toggle { margin-left: 0; }
   .context-editor__search-summary { flex: 1 1 100%; }
 }
+
+.context-editor__replacement-link { display: flex; align-items: flex-start; gap: 0.45rem; font-size: 0.85rem; }
+.context-editor__replacement-link-hint { color: var(--dsh-muted, #687386); font-size: 0.75rem; }
+.context-editor__replacement-impact { display: grid; gap: 0.3rem; padding: 0.6rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; font-size: 0.82rem; }
+.context-editor__replacement-impact.is-error { border-color: var(--dsh-danger, #b42318); }

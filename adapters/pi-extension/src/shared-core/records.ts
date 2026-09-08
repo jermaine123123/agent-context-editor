@@ -87,7 +87,8 @@ function projectUnits(
       viewState: unitViewState(grouped, states),
       projectionState: projectionStateForAtoms(grouped, projectionStates ?? new Map()),
       mutable: true,
-    } satisfies Omit<ContextEditableUnit, 'effectiveText' | 'replacementState' | 'replacementSupported' | 'replacementDisabledReason' | 'canRestoreReplacement' | 'canUndoReplacement'>
+      ...(kind === 'answer' && groups.has('reasoning') ? { associatedReasoningUnitIds: [`${recordId}#reasoning`] } : {}),
+    } satisfies Omit<ContextEditableUnit, 'effectiveText' | 'replacementState' | 'replacementSupported' | 'replacementDisabledReason' | 'canRestoreReplacement' | 'canUndoReplacement' | 'associatedReasoningUnitIds'>
   }).map((base) => {
     const originalText = unitOriginalText(base)
     const eligibility = replacementEligibility(base)

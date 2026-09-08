@@ -1,14 +1,17 @@
 /*
  * GENERATED FILE - do not edit directly.
- * Canonical Core source digest: f3f2e5d503d28a435a6ed6c681602b742d856aaae096212ff0b2f0588af2230d
+ * Canonical Core source digest: c5eea2828a07537c783172568092103d8f5ae0c63b201a70877fc088b651bb65
  * Rebuild with: npm run build:deepseek
  */
 import {
   atomMatchesSearchScope as atomMatchesSharedSearchScope,
   projectRecords as projectSharedRecords,
   reduceReplacementStates,
+  selectAssociatedReasoningTargets,
   searchRecords as searchSharedRecords,
 } from './core-runtime.js'
+
+export { reduceReplacementStates, selectAssociatedReasoningTargets, selectProjectionTargets } from './core-runtime.js'
 
 export const HOST_ID = 'deepseek-harness'
 export const CONTEXT_PROJECTION_OWNER = 'context-editor-deepseek-harness'
@@ -299,21 +302,50 @@ function validReplacementAtomRef(value) {
     && typeof sourceRef.entryId === 'string' && Number.isSafeInteger(sourceRef.blockIndex)
 }
 
+function validLinkedExclusion(value) {
+  const raw = asObject(value)
+  if (typeof raw.operationId !== 'string' || !raw.operationId || !Array.isArray(raw.unitIds) || !raw.unitIds.every(id => typeof id === 'string')) return false
+  if (!Array.isArray(raw.atomChanges)) return false
+  return raw.atomChanges.every(change => {
+    const candidate = asObject(change)
+    const sourceRef = asObject(candidate.sourceRef)
+    return typeof candidate.atomId === 'string' && candidate.atomId.length > 0
+      && typeof candidate.fingerprint === 'string' && candidate.fingerprint.length > 0
+      && typeof sourceRef.entryId === 'string' && Number.isSafeInteger(sourceRef.blockIndex)
+      && ['include', 'exclude'].includes(candidate.before) && ['include', 'exclude'].includes(candidate.after)
+  })
+}
+
 function validReplacementEvent(value) {
   const raw = asObject(value)
   if (raw.schemaVersion !== 1 || raw.type !== 'replacement' || typeof raw.eventId !== 'string' || !raw.eventId) return false
   if (typeof raw.unitId !== 'string' || !raw.unitId || !['user', 'answer'].includes(raw.unitKind)) return false
-  if (raw.action === 'undo') return typeof raw.undoOf === 'string' && raw.undoOf.length > 0
+  const linkedValid = raw.linkedExclusion === undefined || validLinkedExclusion(raw.linkedExclusion)
+  if (raw.action === 'undo') return typeof raw.undoOf === 'string' && raw.undoOf.length > 0 && linkedValid
   return ['replace', 'restore'].includes(raw.action)
     && Array.isArray(raw.atomRefs) && raw.atomRefs.length > 0
     && raw.atomRefs.every(validReplacementAtomRef)
     && (raw.beforeText === null || typeof raw.beforeText === 'string')
     && (raw.afterText === null || typeof raw.afterText === 'string')
+    && linkedValid
 }
 
 export function normalizeReplacementEvents(events) {
   return (Array.isArray(events) ? events : []).filter(validReplacementEvent).map(value => {
     const raw = asObject(value)
+    const linked = raw.linkedExclusion && validLinkedExclusion(raw.linkedExclusion)
+      ? {
+          operationId: String(raw.linkedExclusion.operationId),
+          unitIds: raw.linkedExclusion.unitIds.map(String),
+          atomChanges: raw.linkedExclusion.atomChanges.map(change => ({
+            atomId: String(change.atomId),
+            fingerprint: String(change.fingerprint),
+            sourceRef: { entryId: String(change.sourceRef.entryId), blockIndex: Number(change.sourceRef.blockIndex) },
+            before: change.before,
+            after: change.after,
+          })),
+        }
+      : undefined
     if (raw.action === 'undo') {
       return {
         schemaVersion: 1,
@@ -325,6 +357,7 @@ export function normalizeReplacementEvents(events) {
         undoOf: String(raw.undoOf),
         baseRevision: raw.baseRevision,
         createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : new Date(0).toISOString(),
+        ...(linked ? { linkedExclusion: linked } : {}),
       }
     }
     return {
@@ -343,6 +376,7 @@ export function normalizeReplacementEvents(events) {
       afterText: raw.afterText === null ? null : String(raw.afterText),
       baseRevision: raw.baseRevision,
       createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : new Date(0).toISOString(),
+      ...(linked ? { linkedExclusion: linked } : {}),
     }
   })
 }
@@ -352,7 +386,7 @@ function nativeProjectionEvents(events) {
 }
 
 function matchedReplacementEvents(rowEvents, events, prepared = []) {
-  const nativeIds = new Set(nativeProjectionEvents(events).map(event => String(event?.data?.operationId ?? '')).filter(Boolean))
+  const nativeIds = new Set(nativeProjectionEvents(events).filter(event => event?.data?.owner === CONTEXT_PROJECTION_OWNER).map(event => String(event?.data?.operationId ?? '')).filter(Boolean))
   const preparedIds = new Set((Array.isArray(prepared) ? prepared : []).map(event => String(event.eventId)))
   return normalizeReplacementEvents(rowEvents).filter(event => nativeIds.has(event.eventId) || preparedIds.has(event.eventId))
 }
@@ -520,6 +554,7 @@ export function recordSnapshot(record) {
       ...(unit.replacementDisabledReason ? { replacementDisabledReason: unit.replacementDisabledReason } : {}),
       canRestoreReplacement: unit.canRestoreReplacement,
       canUndoReplacement: unit.canUndoReplacement,
+      ...(unit.associatedReasoningUnitIds?.length ? { associatedReasoningUnitIds: unit.associatedReasoningUnitIds } : {}),
     })),
     searchableText: record.searchableText,
     ...(record.entryId === undefined ? {} : { entryId: record.entryId }),

@@ -51,3 +51,20 @@ require a fresh acceptance run.
 The Pi Context Desktop fork uses the same contract but remains a separate
 Electron repository so upstream history and binaries do not become part of the
 adapter package.
+
+## Linked Answer/Reasoning replacement (0.3.1)
+
+The shared Core derives Answer-to-Reasoning associations from logical `turnId`
+values, not list adjacency, so an Answer spread over several assistant roots
+still has one edit target. When the link checkbox is selected, Core first
+computes the replacement and then the exclusion closure. A signed reasoning
+block can expand that closure to its paired tool call/result chain; the Host
+shows the extra units and requires confirmation. The precedence remains
+`exclude > replace > original`.
+
+DeepSeek writes one sidecar replacement event and, inside Agent maintenance,
+one matching native `context/projection` event with the same `operationId`.
+Reads activate only adapter-owned matching events. Whole-operation undo carries
+reverse linked atom changes and restores only exclusions owned by that edit;
+later independent exclusions or restores win. The original Surface and history
+remain append-only and unchanged.

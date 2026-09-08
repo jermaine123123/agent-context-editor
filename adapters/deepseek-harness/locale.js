@@ -89,11 +89,19 @@ export function createHarnessText(locale) {
         'projection-unavailable': zh ? 'Provider 投影暂不可用' : 'provider projection is unavailable',
         'unsupported-unit-kind': zh ? '该单元类型不支持编辑' : 'this unit type does not support editing',
         'invalid-target': zh ? '原文已变化，无法安全编辑' : 'the canonical text changed and cannot be edited safely',
+        'associated-reasoning-unavailable': zh ? '关联的本轮思考或工具链无法安全投影' : 'the associated reasoning or tool chain cannot be projected safely',
       }
       return zh ? `不可编辑：${labels[reason] ?? '内容类型不支持'}` : `Not editable: ${labels[reason] ?? 'this content is not supported'}`
     },
     replacementDisabled: zh ? '手动上下文编辑尚未启用' : 'Manual context editing is not enabled',
     restoreReplacementConfirm: zh ? '确认恢复该单元的原文吗？' : 'Restore this unit to its original text?',
+    excludeAssociatedReasoning: zh ? '同时从后续上下文中排除本轮思考内容' : "Also exclude this turn's reasoning from later context",
+    excludeAssociatedReasoningHint: zh ? '避免旧思考与修改后的回答不一致，可能影响下一次请求的提示词缓存。' : 'Prevents stale reasoning from disagreeing with the edited answer; prompt-cache behavior may change.',
+    replacementImpactTitle: zh ? '实际影响范围' : 'Actual impact',
+    replacementImpactExtra: ids => zh ? `签名保护会扩展到工具链：${ids}` : `Signature safety expands this to the tool chain: ${ids}`,
+    replacementImpactUnits: ids => zh ? `将新增排除：${ids}` : `Newly excluded units: ${ids}`,
+    replacementImpactDisabled: reason => zh ? `联动已禁用：${reason}` : `Linked exclusion disabled: ${reason}`,
+    replacementImpactConfirm: zh ? '确认保存' : 'Confirm save',
     editFailed: error => zh ? `编辑失败：${error}` : `Edit failed: ${error}`,
   }
 }

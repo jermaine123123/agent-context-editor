@@ -2,8 +2,8 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import { normalizeSessionEntries } from "../adapters/pi-extension/src/normalize.js";
-import { ContextEditorComponent } from "../adapters/pi-extension/src/ui.js";
-import { projectRecords, type ContextEditorPrefs, type ContextEditorSnapshot, type ContextMutationResult, type ContextProjectionPreview } from "../packages/context-editor-core/src/index.js";
+import { ContextEditorComponent, type ReplacementReview } from "../adapters/pi-extension/src/ui.js";
+import { projectRecords, type ContextEditorPrefs, type ContextReplacementPreview, type ContextEditorSnapshot, type ContextMutationResult, type ContextProjectionPreview } from "../packages/context-editor-core/src/index.js";
 
 function fakeTui(): TUI {
   return {
@@ -466,4 +466,77 @@ describe("ContextEditorComponent", () => {
     expect(currentRecords[0]?.units[0]?.projectionState).toBe("include");
   });
 
+
+  it("shows the post-edit linked preview, toggles it, and preserves the choice when returning to draft", async () => {
+    const atoms = normalizeSessionEntries([
+      { type: "message", id: "u-review", parentId: null, timestamp: new Date(10).toISOString(), message: { role: "user", content: "review user", timestamp: 10 } as never },
+      { type: "message", id: "a-review", parentId: "u-review", timestamp: new Date(20).toISOString(), message: { role: "assistant", content: [{ type: "thinking", thinking: "review reasoning" }, { type: "text", text: "review answer" }], timestamp: 20 } as never },
+    ]);
+    const records = projectRecords(atoms);
+    const snapshot = snapshotFor(records, "rev-review");
+    const answer = records.find((record) => record.kind === "ai")!.units.find((unit) => unit.kind === "answer")!;
+    const reasoning = records.find((record) => record.kind === "ai")!.units.find((unit) => unit.kind === "reasoning")!;
+    const basePreview: ContextReplacementPreview = {
+      baseRevision: "rev-review",
+      unitId: answer.id,
+      unitKind: "answer",
+      textChanged: true,
+      excludeAssociatedReasoning: true,
+      associatedReasoningUnitIds: [reasoning.id],
+      requestedUnitIds: [answer.id, reasoning.id],
+      effectiveUnitIds: [answer.id, reasoning.id],
+      autoExpandedUnitIds: [],
+      newlyExcludedUnitIds: [reasoning.id],
+      alreadyExcludedUnitIds: [],
+      newlyExcludedAtomIds: reasoning.atomIds,
+      alreadyExcludedAtomIds: [],
+      unavailableUnitIds: [],
+      requiresConfirmation: false,
+      canCommit: true,
+    };
+    const review: ReplacementReview = {
+      draft: { unitId: answer.id, title: "Edit Answer", text: "edited answer", originalText: "review answer", baseRevision: "rev-review", operationId: "review-op", unitKind: "answer", uiState: { query: "needle", searchScope: "dialogue", selectedUnitId: answer.id, showOriginal: false } },
+      preview: basePreview,
+      excludeAssociatedReasoning: true,
+    };
+    let previewCalls = 0;
+    let exit: any;
+    const component = new ContextEditorComponent(fakeTui(), fakeTheme(), records, snapshot, { version: 3, enabledUnitKinds: ["user", "reasoning", "answer", "tool"], showHidden: false }, {
+      loadRecords: () => records,
+      loadSnapshot: () => snapshot,
+      mutate: () => ({ ok: true, snapshot }),
+      undo: () => ({ ok: true, snapshot }),
+      persistPrefs: () => undefined,
+      notify: () => undefined,
+      previewReplacement: (input) => {
+        previewCalls += 1;
+        return { ...basePreview, excludeAssociatedReasoning: Boolean(input.excludeAssociatedReasoning), effectiveUnitIds: input.excludeAssociatedReasoning ? [answer.id, reasoning.id] : [answer.id], newlyExcludedUnitIds: input.excludeAssociatedReasoning ? [reasoning.id] : [], newlyExcludedAtomIds: input.excludeAssociatedReasoning ? reasoning.atomIds : [] };
+      },
+      initialReplacementReview: review,
+      locale: "en",
+    }, (value) => { exit = value; });
+    expect(component.render(80).join("\n")).toContain("Review Answer edit and linked exclusion");
+    component.handleInput(" ");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(previewCalls).toBe(1);
+    expect(component.render(80).join("\n")).toContain("[ ]");
+    component.handleInput("e");
+    expect(exit?.kind).toBe("edit");
+    expect(exit?.excludeAssociatedReasoning).toBe(false);
+
+    exit = undefined;
+    const committed = new ContextEditorComponent(fakeTui(), fakeTheme(), records, snapshot, { version: 3, enabledUnitKinds: ["user", "reasoning", "answer", "tool"], showHidden: false }, {
+      loadRecords: () => records,
+      loadSnapshot: () => snapshot,
+      mutate: () => ({ ok: true, snapshot }),
+      undo: () => ({ ok: true, snapshot }),
+      persistPrefs: () => undefined,
+      notify: () => undefined,
+      initialReplacementReview: { ...review, excludeAssociatedReasoning: false },
+      locale: "en",
+    }, (value) => { exit = value; });
+    committed.handleInput("\r");
+    expect(exit?.kind).toBe("replacement-commit");
+    expect(exit?.review.excludeAssociatedReasoning).toBe(false);
+  });
 });

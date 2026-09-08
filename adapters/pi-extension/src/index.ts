@@ -2,10 +2,10 @@ import type { ContextEvent, ExtensionAPI, ExtensionContext, SessionBeforeCompact
 import { normalizeSessionEntries } from "./normalize.js";
 import { readLatestState, STATE_ENTRY_TYPE } from "./state.js";
 import { runDesktopContextEditor } from "./desktop-ui.js";
-import { ContextEditorComponent, type ContextEditorExit, type ContextEditorUiState } from "./ui.js";
+import { ContextEditorComponent, type ContextEditorExit, type ContextEditorUiState, type ReplacementReview } from "./ui.js";
 import { PiContextEditorHost } from "./host.js";
 import type { ContextEditorStateV1 } from "./types.js";
-import { detectPiLocale } from "./locale.js";
+import { createPiText, detectPiLocale } from "./locale.js";
 import { projectModelContext, projectionOverlapsEntryIds } from "./projection-hook.js";
 
 function sourceLeafId(ctx: ExtensionContext): string | undefined {
@@ -141,6 +141,8 @@ export default function contextEditorExtension(pi: ExtensionAPI): void {
       }
 
       let uiState: ContextEditorUiState | undefined;
+      let replacementReview: ReplacementReview | undefined;
+      const text = createPiText(locale);
       while (true) {
         const host = new PiContextEditorHost(ctx);
         const records = host.records();
@@ -165,13 +167,16 @@ export default function contextEditorExtension(pi: ExtensionAPI): void {
               mutate: (input) => host.commit(input),
               previewContext: (input) => host.previewContext({ locator, ...input }),
               commitContext: (input) => host.commitContext({ locator, ...input }),
+              previewReplacement: (input) => host.previewReplacementMutation(input),
               commitReplacement: (input) => host.commitReplacementMutation(input),
               restoreReplacement: (input) => host.restoreReplacementMutation(input),
               undoReplacement: (input) => host.undoReplacementMutation(input),
               undo: (baseRevision) => host.undo(baseRevision),
               persistPrefs: (nextPrefs) => host.setPrefs(nextPrefs),
               notify: (message, type = "info") => ctx.ui.notify(message, type),
+              isIdle: () => ctx.isIdle(),
               initialUiState: uiState,
+              initialReplacementReview: replacementReview,
               locale,
             },
             (result) => { exit = result; done(undefined); },
@@ -179,7 +184,33 @@ export default function contextEditorExtension(pi: ExtensionAPI): void {
         );
         if (!exit || exit.kind === "close") break;
         uiState = exit.uiState;
+        if (exit.kind === "cancel-edit") {
+          replacementReview = undefined;
+          continue;
+        }
+        if (exit.kind === "replacement-commit") {
+          const review = exit.review;
+          replacementReview = undefined;
+          try {
+            const result = host.commitReplacementMutation({
+              baseRevision: review.draft.baseRevision,
+              operationId: review.draft.operationId,
+              unitId: review.draft.unitId,
+              text: review.draft.text,
+              excludeAssociatedReasoning: review.excludeAssociatedReasoning,
+              confirmedUnitIds: review.preview.effectiveUnitIds,
+              confirmationScope: review.preview.effectiveUnitIds,
+            });
+            if (!result.ok || result.conflict) ctx.ui.notify(text.sidecarChanged(), "warning");
+            else if (!result.eventId) ctx.ui.notify(text.replacementReviewNoop(), "info");
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            ctx.ui.notify(message === "CONTEXT_EDITOR_REPLACEMENT_EMPTY" ? text.replacementReviewBlocked(text.replacementEmpty()) : text.operationFailed(message), "warning");
+          }
+          continue;
+        }
         if (exit.kind !== "edit") continue;
+        replacementReview = undefined;
         let value: string | undefined;
         try {
           value = await ctx.ui.editor(exit.title, exit.text);
@@ -189,13 +220,63 @@ export default function contextEditorExtension(pi: ExtensionAPI): void {
         }
         if (value === undefined) continue;
         try {
-          const result = host.commitReplacementMutation({ baseRevision: exit.baseRevision, unitId: exit.unitId, text: value });
-          if (!result.ok || result.conflict) {
-            ctx.ui.notify("The session or sidecar changed; edit discarded. Please edit again.", "warning");
+          const linkRequested = exit.excludeAssociatedReasoning ?? exit.unitKind === "answer";
+          const preview = host.previewReplacementMutation({
+            baseRevision: exit.baseRevision,
+            operationId: exit.operationId,
+            unitId: exit.unitId,
+            text: value,
+            excludeAssociatedReasoning: linkRequested,
+          });
+          const draft = {
+            unitId: exit.unitId,
+            title: exit.title,
+            text: value,
+            originalText: exit.originalText,
+            baseRevision: exit.baseRevision,
+            operationId: exit.operationId,
+            unitKind: exit.unitKind,
+            uiState: exit.uiState,
+          } as const;
+          if (!preview.canCommit && exit.unitKind === "answer" && linkRequested && preview.associatedReasoningUnitIds.length > 0) {
+            const standalonePreview = host.previewReplacementMutation({
+              baseRevision: exit.baseRevision,
+              operationId: exit.operationId,
+              unitId: exit.unitId,
+              text: value,
+              excludeAssociatedReasoning: false,
+            });
+            if (standalonePreview.canCommit && (preview.textChanged || preview.newlyExcludedAtomIds.length > 0)) {
+              replacementReview = { draft, preview, excludeAssociatedReasoning: true };
+              continue;
+            }
           }
+          if (!preview.canCommit) {
+            ctx.ui.notify(text.replacementReviewBlocked(preview.disabledReason ?? "unavailable"), "warning");
+            continue;
+          }
+          if (!preview.textChanged && preview.newlyExcludedAtomIds.length === 0) {
+            ctx.ui.notify(text.replacementReviewNoop(), "info");
+            continue;
+          }
+          if (exit.unitKind === "answer" && preview.associatedReasoningUnitIds.length > 0) {
+            replacementReview = { draft, preview, excludeAssociatedReasoning: linkRequested };
+            continue;
+          }
+          const result = host.commitReplacementMutation({
+            baseRevision: exit.baseRevision,
+            operationId: exit.operationId,
+            unitId: exit.unitId,
+            text: value,
+            excludeAssociatedReasoning: false,
+          });
+          if (!result.ok || result.conflict) ctx.ui.notify(text.sidecarChanged(), "warning");
+          else if (!result.eventId) ctx.ui.notify(text.replacementReviewNoop(), "info");
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          ctx.ui.notify(message === "CONTEXT_EDITOR_REPLACEMENT_EMPTY" ? "Replacement text cannot be blank." : "Edit failed: " + message, "warning");
+          if (message === "CONTEXT_EDITOR_CONFLICT") ctx.ui.notify(text.sidecarChanged(), "warning");
+          else if (message === "CONTEXT_EDITOR_REPLACEMENT_EMPTY") ctx.ui.notify(text.replacementReviewBlocked(text.replacementEmpty()), "warning");
+          else ctx.ui.notify(text.operationFailed(message), "warning");
         }
       }
     },

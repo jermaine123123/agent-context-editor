@@ -14,6 +14,16 @@ import type {
 
 export type ProjectionAtomState = ContextProjectionState | 'unavailable'
 
+export interface AssociatedReasoningSelection extends ProjectionSelection {
+  answerUnitId: string
+  associatedReasoningUnitIds: string[]
+  newlyExcludedUnitIds: string[]
+  alreadyExcludedUnitIds: string[]
+  newlyExcludedAtomIds: string[]
+  alreadyExcludedAtomIds: string[]
+  disabledReason?: string
+}
+
 export interface ProjectionSelection {
   requestedUnitIds: string[]
   effectiveUnitIds: string[]
@@ -30,38 +40,55 @@ function stateForAtom(states: ReadonlyMap<string, ProjectionAtomState>, atom: Co
 
 export function reduceProjectionStates(
   atoms: readonly ContextAtom[],
-  events: readonly ContextProjectionEventV1[],
+  events: readonly ContextProjectionEvent[],
 ): Map<string, ProjectionAtomState> {
   const result = new Map<string, ProjectionAtomState>()
   const byId = new Map(atoms.map((atom) => [atom.id, atom]))
+  const linkedByEvent = new Map<string, readonly { atomId: string; fingerprint: string; sourceRef: { entryId: string; blockIndex: number }; before: ContextProjectionState; after: ContextProjectionState }[]>()
+  const ownerByAtom = new Map<string, string>()
   for (const atom of atoms) result.set(atom.id, 'include')
-  for (const event of events) {
-    for (const change of event.changes) {
-      const atom = byId.get(change.atomId)
-      // An event can legitimately point to a dormant atom that was removed by
-      // compaction from the current branch projection. It is checked again by
-      // the Pi hook when the atom becomes active.
-      if (!atom) continue
-      if (
-        atom.fingerprint !== change.fingerprint ||
-        atom.sourceRef.entryId !== change.sourceRef.entryId ||
-        atom.sourceRef.blockIndex !== change.sourceRef.blockIndex
-      ) {
-        result.set(atom.id, 'unavailable')
-        continue
-      }
-      const current = result.get(atom.id) ?? 'include'
-      if (current === 'unavailable') continue
-      if (current !== change.before && current !== change.after) {
-        result.set(atom.id, 'unavailable')
-        continue
-      }
-      result.set(atom.id, change.after)
+  const apply = (change: { atomId: string; fingerprint: string; sourceRef: { entryId: string; blockIndex: number }; before: ContextProjectionState; after: ContextProjectionState }, owner: string) => {
+    const atom = byId.get(change.atomId)
+    if (!atom) return
+    if (atom.fingerprint !== change.fingerprint || atom.sourceRef.entryId !== change.sourceRef.entryId || atom.sourceRef.blockIndex !== change.sourceRef.blockIndex) {
+      result.set(atom.id, 'unavailable')
+      return
     }
+    const current = result.get(atom.id) ?? 'include'
+    if (current === 'unavailable') return
+    if (current !== change.before && current !== change.after) {
+      result.set(atom.id, 'unavailable')
+      return
+    }
+    result.set(atom.id, change.after)
+    ownerByAtom.set(atom.id, owner)
+  }
+  for (const event of events) {
+    if (isReplacementEvent(event)) {
+      if (event.action === 'undo') {
+        const changes = linkedByEvent.get(event.undoOf)
+        if (changes) {
+          for (const change of changes) {
+            const current = result.get(change.atomId) ?? 'include'
+            // A later independent exclusion/recovery wins; undo only restores
+            // the state that this operation itself introduced.
+            if (current === change.after && ownerByAtom.get(change.atomId) === event.undoOf) {
+              result.set(change.atomId, change.before)
+              ownerByAtom.delete(change.atomId)
+            }
+          }
+        }
+      } else if (event.linkedExclusion?.atomChanges) {
+        const changes = event.linkedExclusion.atomChanges
+        linkedByEvent.set(event.eventId, changes)
+        for (const change of changes) apply(change, event.eventId)
+      }
+      continue
+    }
+    for (const change of event.changes) apply(change, event.transactionId)
   }
   return result
 }
-
 export interface ReplacementUnitProjection {
   unitId: string
   originalText: string
@@ -228,6 +255,40 @@ function unitHasKindAndTurn(unit: ContextEditableUnit, kind: ContextEditableUnit
  * results are paired by call id. A signed reasoning block is kept with all
  * tool blocks in the same logical turn; the final answer remains independent.
  */
+/** Find same-turn reasoning for an Answer and expand signed reasoning to its tool closure. */
+export function selectAssociatedReasoningTargets(
+  records: readonly ContextRecord[],
+  answerUnitId: string,
+  projectionStates: ReadonlyMap<string, ProjectionAtomState> = new Map(),
+): AssociatedReasoningSelection {
+  const units = records.flatMap((record) => record.units.map((unit) => ({ record, unit })))
+  const answer = units.find((item) => item.unit.id === answerUnitId && item.unit.kind === 'answer')?.unit
+  if (!answer) {
+    return { answerUnitId, associatedReasoningUnitIds: [], requestedUnitIds: [], effectiveUnitIds: [], autoExpandedUnitIds: [], requestedAtomIds: [], effectiveAtomIds: [], unavailableUnitIds: [], touchesRecentTurn: false, newlyExcludedUnitIds: [], alreadyExcludedUnitIds: [], newlyExcludedAtomIds: [], alreadyExcludedAtomIds: [], disabledReason: 'invalid-target' }
+  }
+  const turnIds = new Set(answer.atoms.map((atom) => atom.turnId))
+  const reasoning = units.filter((item) => item.unit.kind === 'reasoning' && item.unit.atoms.some((atom) => turnIds.has(atom.turnId)))
+  const reasoningIds = reasoning.map((item) => item.unit.id)
+  const selection = selectProjectionTargets(records, reasoningIds)
+  const effectiveItems = units.filter((item) => selection.effectiveUnitIds.includes(item.unit.id))
+  const unavailableUnitIds = [...new Set([...selection.unavailableUnitIds, ...effectiveItems.filter((item) => item.unit.projectionState === 'unavailable' || item.unit.mutable === false).map((item) => item.unit.id)])]
+  const newlyExcludedUnitIds: string[] = []
+  const alreadyExcludedUnitIds: string[] = []
+  const newlyExcludedAtomIds: string[] = []
+  const alreadyExcludedAtomIds: string[] = []
+  for (const item of effectiveItems) {
+    if (item.unit.id === answerUnitId) continue
+    const includedAtoms = item.unit.atoms.filter((atom) => (projectionStates.get(atom.id) ?? 'include') === 'include')
+    const excludedAtoms = item.unit.atoms.filter((atom) => (projectionStates.get(atom.id) ?? 'include') === 'exclude')
+    if (includedAtoms.length) newlyExcludedUnitIds.push(item.unit.id)
+    else alreadyExcludedUnitIds.push(item.unit.id)
+    newlyExcludedAtomIds.push(...includedAtoms.map((atom) => atom.id))
+    alreadyExcludedAtomIds.push(...excludedAtoms.map((atom) => atom.id))
+  }
+  const disabledReason = unavailableUnitIds.length ? 'associated-reasoning-unavailable' : undefined
+  return { ...selection, answerUnitId, associatedReasoningUnitIds: reasoningIds, newlyExcludedUnitIds, alreadyExcludedUnitIds, newlyExcludedAtomIds, alreadyExcludedAtomIds, unavailableUnitIds, disabledReason }
+}
+
 export function selectProjectionTargets(
   records: readonly ContextRecord[],
   unitIds?: readonly string[],

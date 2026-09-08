@@ -58,4 +58,31 @@ describe("Pi projection sidecar", () => {
     expect(second.revision).not.toBe(first.revision);
     expect(() => appendProjectionSidecarEvent(sessionFile, "session-1", "", event("tx-2"), first.revision)).toThrow("CONTEXT_EDITOR_CONFLICT");
   });
+  it("fails closed for malformed linkedExclusion and preserves valid empty linked scopes", () => {
+    const sessionFile = fixture();
+    const replacement = {
+      schemaVersion: 1,
+      type: "replacement",
+      action: "replace",
+      eventId: "replace-1",
+      unitId: "ai:a#answer",
+      unitKind: "answer",
+      atomRefs: [{ atomId: "a:1:assistant_text", sourceRef: { entryId: "a", blockIndex: 1 }, fingerprint: "answer-fp" }],
+      beforeText: null,
+      afterText: "edited",
+      baseRevision: "base",
+      createdAt: new Date().toISOString(),
+      linkedExclusion: { operationId: "wrong-operation", unitIds: [], atomChanges: [] },
+    };
+    writeFileSync(projectionSidecarPath(sessionFile), JSON.stringify({ schemaVersion: 1, sessionId: "session-1", events: [{ anchorEntryId: "leaf", event: replacement }] }), "utf8");
+    expect(readProjectionSidecar(sessionFile, "session-1").integrity).toBe("invalid");
+
+    const first = readProjectionSidecar(sessionFile, "session-1");
+    const valid = { ...replacement, linkedExclusion: { operationId: "replace-1", unitIds: [], atomChanges: [] } } as any;
+    writeFileSync(projectionSidecarPath(sessionFile), JSON.stringify({ schemaVersion: 1, sessionId: "session-1", events: [] }), "utf8");
+    const empty = readProjectionSidecar(sessionFile, "session-1");
+    appendProjectionSidecarEvent(sessionFile, "session-1", "leaf", valid, empty.revision);
+    expect(readProjectionSidecar(sessionFile, "session-1").integrity).toBe("ok");
+    expect(first.integrity).toBe("invalid");
+  });
 });

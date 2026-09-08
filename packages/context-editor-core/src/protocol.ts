@@ -99,6 +99,12 @@ export interface ContextReplacementMutationRequest {
   readonly operationId: string
   readonly unitId: string
   readonly text: string
+  /** When true, a replace may also exclude same-turn reasoning in one operation. */
+  readonly excludeAssociatedReasoning?: boolean
+  /** Unit ids explicitly confirmed by the impact preview. */
+  readonly confirmedUnitIds?: readonly string[]
+  /** Alias accepted by hosts that call the field a confirmation scope. */
+  readonly confirmationScope?: readonly string[]
 }
 
 export interface ContextReplacementUnitRequest {
@@ -106,6 +112,26 @@ export interface ContextReplacementUnitRequest {
   readonly baseRevision: string | number
   readonly operationId: string
   readonly unitId: string
+}
+
+export interface ContextReplacementPreview {
+  readonly baseRevision: string
+  readonly unitId: string
+  readonly unitKind: 'user' | 'answer'
+  readonly textChanged: boolean
+  readonly excludeAssociatedReasoning: boolean
+  readonly associatedReasoningUnitIds: readonly string[]
+  readonly requestedUnitIds: readonly string[]
+  readonly effectiveUnitIds: readonly string[]
+  readonly autoExpandedUnitIds: readonly string[]
+  readonly newlyExcludedUnitIds: readonly string[]
+  readonly alreadyExcludedUnitIds: readonly string[]
+  readonly newlyExcludedAtomIds: readonly string[]
+  readonly alreadyExcludedAtomIds: readonly string[]
+  readonly unavailableUnitIds: readonly string[]
+  readonly requiresConfirmation: boolean
+  readonly canCommit: boolean
+  readonly disabledReason?: string
 }
 
 export interface ContextProjectionPreview {
@@ -139,6 +165,7 @@ export interface ContextEditorHostAdapter {
   commitView(request: ContextViewMutationRequest): Promise<ContextMutationResult>
   undoView(locator: ContextSessionLocator, baseRevision: string): Promise<ContextMutationResult>
   previewContext(request: ContextProjectionMutationRequest): Promise<ContextProjectionPreview>
+  previewReplacement?(request: ContextReplacementMutationRequest): Promise<ContextReplacementPreview>
   commitContext(request: ContextProjectionMutationRequest): Promise<ContextMutationResult>
   commitReplacement?(request: ContextReplacementMutationRequest): Promise<ContextMutationResult>
   restoreReplacement?(request: ContextReplacementUnitRequest): Promise<ContextMutationResult>
