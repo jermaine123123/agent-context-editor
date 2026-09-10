@@ -1,6 +1,6 @@
 # Agent Context Editor
 
-Agent Context Editor is a cross-agent plugin for manually excluding and editing AI conversation context. It also supports searching, filtering, selecting, hiding, restoring, and undoing conversation changes while preserving the original Session.
+Agent Context Editor is a cross-agent plugin for manually excluding, editing, and selectively compressing AI conversation context. It also supports searching, filtering, selecting, hiding, restoring, and undoing conversation changes while preserving the original Session.
 
 It provides a consistent, reversible, and user-controlled context-management option across supported Agent hosts, complementing prompt steering and automatic context compaction rather than replacing them.
 
@@ -18,7 +18,7 @@ For most tasks, prompt steering and automatic context compaction are usually suf
 
 - Manually exclude selected context and restore it later
 - Edit User messages and AI Answers with restore and undo
-- AI-condense selected context into an editable, reversible summary
+- AI-condense selected context into an editable, reversible summary(selectively compressing)
 - Search conversations and navigate between matches
 - Filter User, AI, Reasoning, Answer, and Tool content
 - Select individual items, continuous ranges, or multiple items
