@@ -539,4 +539,68 @@ describe("ContextEditorComponent", () => {
     expect(exit?.kind).toBe("replacement-commit");
     expect(exit?.review.excludeAssociatedReasoning).toBe(false);
   });
+  it("shows condensation failures inside the settings and keeps multi-selection on re-entry", async () => {
+    const records = projectRecords(normalizeSessionEntries([
+      { type: "message", id: "u", message: { role: "user", content: "goal" } },
+      { type: "message", id: "a", message: { role: "assistant", content: [{ type: "text", text: "answer" }] } },
+    ]));
+    const snapshot = snapshotFor(records, "r1");
+    const prefs: ContextEditorPrefs = { version: 3, enabledUnitKinds: ["user", "answer", "reasoning", "tool"], showHidden: false };
+    let received: any;
+    const make = (initialUiState?: any) => new ContextEditorComponent(fakeTui(), fakeTheme(), records, snapshot, prefs, {
+      loadRecords: () => records, loadSnapshot: () => snapshot,
+      mutate: () => ({ ok: true, snapshot }), undo: () => ({ ok: true, snapshot }),
+      persistPrefs: () => undefined, notify: () => undefined, locale: "en", initialUiState,
+      generateCondensation: async input => { received = input; throw new Error("MODEL_TEST_FAILURE"); },
+    }, () => undefined);
+    const component = make();
+    expect(component.render(80).join("\n")).toContain("Space select/unselect");
+    component.handleInput(" "); component.handleInput("j"); component.handleInput(" ");
+    const restored = make((component as any).uiState());
+    restored.handleInput("c"); restored.handleInput("\r");
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(received.unitIds).toHaveLength(2);
+    expect(received.expandRelated).toBe(false);
+    expect(restored.render(100).join("\n")).toContain("MODEL_TEST_FAILURE");
+    restored.handleInput("\x1b");
+    expect(restored.render(80).join("\n")).toContain("Space select/unselect");
+  });
+
+  it("scrolls summary sources and long expanded units without hiding later context after resize", () => {
+    const records = projectRecords(normalizeSessionEntries([
+      { type: "message", id: "u1", message: { role: "user", content: "SOURCE_GOAL" } },
+      { type: "message", id: "a1", message: { role: "assistant", content: [
+        { type: "thinking", thinking: "LONG_REASONING\n".repeat(40) },
+        { type: "text", text: "LONG_ANSWER\n".repeat(40) },
+      ] } },
+      { type: "message", id: "u2", message: { role: "user", content: "LATER_CONTEXT" } },
+    ]));
+    const snapshot = snapshotFor(records, "r1");
+    const first = records[0]!.units[0]!;
+    snapshot.condensations = [{ operationId: "summary-operation", summary: "SUMMARY_TEXT\n".repeat(30),
+      sourceUnits: [{ id: first.id, kind: first.kind, text: "SOURCE_GOAL", included: true }],
+      metrics: { savedTokens: 100, savingsRatio: 0.5 },
+    } as any];
+    const tui = fakeTui();
+    const component = new ContextEditorComponent(tui, fakeTheme(), records, snapshot,
+      { version: 3, enabledUnitKinds: ["user", "reasoning", "answer", "tool"], showHidden: false }, {
+        loadRecords: () => records, loadSnapshot: () => snapshot, mutate: () => ({ ok: true, snapshot }),
+        undo: () => ({ ok: true, snapshot }), persistPrefs: () => undefined, notify: () => undefined, locale: "en",
+      }, () => undefined);
+    component.handleInput("O");
+    let scrolled = "";
+    for (let n = 0; n < 12; n++) { scrolled += component.render(80).join("\n"); component.handleInput("\x1b[6~"); }
+    expect(scrolled).toContain("SOURCE_GOAL");
+    expect(scrolled).toContain("#1 User");
+    expect(scrolled).toContain("Replaced by summary #1");
+    component.handleInput("j"); component.handleInput("\r");
+    component.handleInput("j"); component.handleInput("\r");
+    component.handleInput("j"); component.handleInput("\r");
+    expect(component.render(80).join("\n")).toContain("LATER_CONTEXT");
+    (tui.terminal as any).columns = 45; (tui.terminal as any).rows = 12;
+    expect(component.render(45).join("\n")).toContain("LATER_CONTEXT");
+    component.handleInput("O");
+    expect(component.render(45).join("\n")).toContain("SUMMARY_TEXT");
+  });
+
 });

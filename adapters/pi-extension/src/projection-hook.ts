@@ -1,13 +1,15 @@
-import { sessionEntryToContextMessages, type SessionEntry } from "@earendil-works/pi-coding-agent";
+﻿import { sessionEntryToContextMessages, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
   projectRecords,
   reduceProjectionStates,
   reduceReplacementStates,
+  frameCondensationSummary,
   type ContextAtom,
   type ContextEditableUnit,
   type ContextProjectionEvent,
   type ContextProjectionEventV1,
+  type ContextCondensationEventV1,
   type ReplacementUnitProjection,
 } from "./shared-core/index.js";
 
@@ -104,7 +106,7 @@ function rowsForEntries(entries: readonly unknown[]): MessageRow[] {
 function uniqueProjectionEvents(events: readonly ContextProjectionEvent[]): ContextProjectionEvent[] {
   const seen = new Set<string>();
   return events.filter((event) => {
-    const id = "type" in event && event.type === "replacement" ? event.eventId : (event as ContextProjectionEventV1).transactionId;
+    const id = "type" in event ? event.eventId : (event as ContextProjectionEventV1).transactionId;
     if (seen.has(id)) return false;
     seen.add(id);
     return true;
@@ -292,6 +294,38 @@ function replacementCompatible(
   if (rowHasHistory(rowAtoms, unitByAtom, historyUnitIds, historyAtomIds)) return restoreCompatible(baseline, current) || structurallyCompatible(baseline, current);
   return structurallyCompatible(baseline, current) || isKindSubsequence(baseline, current);
 }
+function isCondensationEvent(event: ContextProjectionEvent): event is ContextCondensationEventV1 {
+  return "type" in event && event.type === "condensation" && event.schemaVersion === 1;
+}
+
+function condensationMessages(events: readonly ContextProjectionEvent[]): Map<string, AgentMessage | null> {
+  const operations = new Map<string, { event: ContextCondensationEventV1; summaryExcluded: boolean }>();
+  for (const event of events) {
+    if (!isCondensationEvent(event)) continue;
+    const current = operations.get(event.operationId);
+    if (event.action === "apply") operations.set(event.operationId, { event, summaryExcluded: false });
+    else if (event.action === "restore") operations.delete(event.operationId);
+    else if (current) operations.set(event.operationId, { event: current.event, summaryExcluded: event.action === "exclude-summary" });
+  }
+  const result = new Map<string, AgentMessage | null>();
+  for (const { event, summaryExcluded } of operations.values()) {
+    const summaryText = frameCondensationSummary(event.summary);
+    for (const item of event.afterMessages) {
+      let message = item.message as AgentMessage | null;
+      if (message && summaryExcluded) {
+        const content = (message as { content?: unknown }).content;
+        if (Array.isArray(content)) {
+          const next = content.filter((part) => !(part && typeof part === "object" && (part as { type?: unknown }).type === "text" && String((part as { text?: unknown }).text ?? "") === summaryText));
+          message = next.length ? { ...(message as object), content: next } as AgentMessage : null;
+        } else if (content === summaryText) {
+          message = null;
+        }
+      }
+      result.set(String(item.entryId), message ? structuredClone(message) : null);
+    }
+  }
+  return result;
+}
 export interface ProjectContextInput {
   messages: readonly AgentMessage[];
   entries: readonly unknown[];
@@ -306,10 +340,24 @@ export function projectModelContext(input: ProjectContextInput): AgentMessage[] 
   const { states, byEntry } = activeAtomsByEntry(input.atoms, projectionEvents);
   const { byAtom: unitByAtom, historyUnitIds, historyAtomIds } = replacementUnits(input.atoms, states, projectionEvents);
   const restoredIds = restoredAtomIds(input.atoms, projectionEvents, states);
+  const condensationByEntry = condensationMessages(projectionEvents);
   const output: AgentMessage[] = [];
   let cursor = 0;
   for (const row of rows) {
     const rowAtoms = byEntry.get(row.entryId) ?? [];
+    if (condensationByEntry.has(row.entryId)) {
+      const condensed = condensationByEntry.get(row.entryId) ?? null;
+      let condensedMatch = -1;
+      for (let index = cursor; index < input.messages.length; index += 1) {
+        const candidate = input.messages[index];
+        if (candidate && (structurallyCompatible(row.baseline, candidate) || (condensed !== null && roleOf(row.baseline) === roleOf(candidate)))) { condensedMatch = index; break; }
+      }
+      if (condensedMatch < 0) { if (!condensed) continue; throw new ProjectionAlignmentError("condensed message could not be aligned"); }
+      for (let index = cursor; index < condensedMatch; index += 1) { const extra = input.messages[index]; if (extra) output.push(extra); }
+      if (condensed) output.push(structuredClone(condensed));
+      cursor = condensedMatch + 1;
+      continue;
+    }
     const projection = rowProjection(rowAtoms, unitByAtom);
     const hasExcluded = rowAtoms.some((atom) => states.get(atom.id) === "exclude");
     const hasRestored = rowAtoms.some((atom) => restoredIds.has(atom.id));

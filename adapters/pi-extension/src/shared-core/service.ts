@@ -98,7 +98,7 @@ function currentState(adapter: ContextEditorSessionAdapter) {
   const projectionEvents = current.projectionEvents ?? []
   const seenProjection = new Set<string>()
   const projectionEventsUnique = projectionEvents.filter((event) => {
-    const id = 'type' in event && event.type === 'replacement' ? event.eventId : (event as ContextProjectionEventV1).transactionId
+    const id = 'type' in event ? event.eventId : (event as ContextProjectionEventV1).transactionId
     if (seenProjection.has(id)) return false
     seenProjection.add(id)
     return true

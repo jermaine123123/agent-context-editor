@@ -13,6 +13,8 @@ type BranchEntry = {
   summary?: string;
   message?: {
     role?: string;
+    api?: string;
+    provider?: string;
     content?: unknown;
     timestamp?: string | number;
     toolCallId?: string;
@@ -154,7 +156,10 @@ export function normalizeSessionEntries(entries: readonly SessionEntry[] | reado
         });
       } else if (value.type === "thinking" && typeof value.thinking === "string") {
         addAtom(atoms, entry, turnId, blockIndex, "reasoning", value.thinking, {
-          hasSignature: typeof value.thinkingSignature === "string",
+          // OpenAI-compatible providers use this field as a wire-field name, not a signature.
+          hasSignature: typeof value.thinkingSignature === "string" && value.thinkingSignature.length > 0
+            && !((message.api === "openai-completions" || message.provider === "deepseek")
+              && ["reasoning_content", "reasoning", "reasoning_text"].includes(value.thinkingSignature)),
           redacted: value.redacted === true,
         });
       } else if (value.type === "toolCall") {

@@ -21,9 +21,10 @@ Output; they affect only the next provider payload.
 
 Pi TUI also supports manual replacement of one plain-text User or complete unsigned Answer unit. Press `e` to open Pi's multiline editor, `E` to restore canonical text, `z` to undo the latest replacement/restore for the current unit, and `o` to compare canonical text. Replacement events share the projection sidecar and are applied after exclusion (exclusion wins). Structured User content, signed Answer text, reasoning, tools, and batch edits remain disabled.
 
-This release does not filter Pi's main chat timeline or generate summary
-replacements. In Pi TUI, press `x` to preview and confirm model-context
-exclusion/restoration; the confirmation stays inside `/ctx` (`Enter`/`y` to
+This release does not filter Pi's main chat timeline. In Pi TUI, press `c`
+to generate and review a summary for selected context, `C` to exclude or
+restore an applied summary, `D` to restore its source, and `O` to inspect
+that source. Press `x` to preview and confirm model-context exclusion/restoration; the confirmation stays inside `/ctx` (`Enter`/`y` to
 confirm, `Esc`/`n` to cancel); visual `h`/`r` operations remain independent.
 
 Search defaults to User messages and AI final answers. Press `s` outside the

@@ -14,7 +14,7 @@ describe('DeepSeek Harness installable bundle', () => {
       dsh?: { bundle?: { patch?: string }; client?: { platform?: string } }
     }
     expect(manifest.name).toBe('context-editor-deepseek-harness')
-    expect(manifest.version).toBe('0.3.1')
+    expect(manifest.version).toBe('0.4.0')
     expect(manifest.dsh?.bundle?.patch).toBe('./cordis.patch.yml')
     expect(manifest.dsh?.client?.platform).toBe('web')
     expect(readFileSync(resolve(root, 'cordis.patch.yml'), 'utf8')).toContain('id: context-editor')
@@ -33,7 +33,7 @@ describe('DeepSeek Harness installable bundle', () => {
   it('keeps apply and inject on the module namespace for the Cordis loader', () => {
     const hostEntry = readFileSync(resolve(root, 'index.js'), 'utf8')
     const clientEntry = readFileSync(resolve(root, 'client.js'), 'utf8')
-    expect(hostEntry).toContain("export const inject = ['storageDomain', 'sessionPersistence', 'sessions', 'agents']")
+    expect(hostEntry).toContain("export const inject = ['storageDomain', 'sessionPersistence', 'sessions', 'agents', 'llm']")
     expect(hostEntry).toContain("import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'")
     expect(hostEntry).toContain('export class ContextEditorHost extends TypertRemoteService')
     expect(hostEntry).toContain("super(ctx, 'contextEditor')")

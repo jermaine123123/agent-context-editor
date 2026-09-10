@@ -26,6 +26,7 @@ export const inject = ['remote']
 const h = React.createElement
 const ALL_KINDS = CLIENT_KINDS
 const ALL_UNIT_KINDS = CLIENT_UNIT_KINDS
+const condensationModelKey = model => `${model?.provider ?? ''}:${model?.id ?? ''}`
 const PREFS_KEY_V1 = 'dsh-context-editor:prefs:v1'
 const PREFS_KEY_V2 = 'dsh-context-editor:prefs:v2'
 
@@ -290,20 +291,61 @@ export class ContextEditorController {
     return this.call('undoView', { baseRevision })
   }
 
-  async previewContext(action, expectedRevision, unitIds) {
+  async previewContext(action, expectedRevision, unitIds, options = {}) {
     return this.call('previewContext', {
       action,
       expectedRevision,
       ...(unitIds === undefined ? {} : { unitIds }),
+      ...(options.condensationOperationId ? { condensationOperationId: options.condensationOperationId } : {}),
     })
   }
 
-  async commitContext(operationId, action, expectedRevision, unitIds) {
+  async commitContext(operationId, action, expectedRevision, unitIds, options = {}) {
     return this.call('commitContext', {
       operationId,
       action,
       expectedRevision,
       ...(unitIds === undefined ? {} : { unitIds }),
+      ...(options.condensationOperationId ? { condensationOperationId: options.condensationOperationId } : {}),
+    })
+  }
+
+  async listCondensationModels() {
+    return this.call('previewContext', { action: 'condense-models' })
+  }
+
+  async generateCondensation(unitIds, baseRevision, options = {}) {
+    return this.call('previewContext', {
+      action: 'condense',
+      unitIds,
+      baseRevision,
+      ...(options.operationId ? { operationId: options.operationId } : {}),
+      ...(options.provider ? { provider: options.provider } : {}),
+      ...(options.model ? { model: options.model } : {}),
+      expandRelated: options.expandRelated === true,
+      ...(options.maxTokens ? { maxTokens: options.maxTokens } : {}),
+    })
+  }
+
+  async cancelCondensation(operationId) {
+    return this.call('previewContext', { action: 'cancel-condense', operationId })
+  }
+
+  async commitCondensation(proposal, summary) {
+    return this.call('commitContext', {
+      action: 'condense',
+      operationId: proposal.operationId,
+      baseRevision: proposal.baseRevision,
+      unitIds: proposal.requestedUnitIds,
+      summary,
+    })
+  }
+
+  async restoreCondensation(operationId, baseRevision) {
+    return this.call('commitContext', {
+      action: 'restore-condensation',
+      operationId,
+      baseRevision,
     })
   }
 
@@ -476,6 +518,80 @@ function EditDialog({ unit, initialText, text, onCancel, onSave }) {
   )
 }
 
+function CondensationDialog({ proposal, text, onCancel, onRegenerate, onApply, saving, error }) {
+  const [value, setValue] = useState(String(proposal?.summary ?? ''))
+  const [expandRelated, setExpandRelated] = useState(proposal?.expandRelated === true)
+  const scopeChanged = expandRelated !== (proposal?.expandRelated === true)
+  const needsGeneration = proposal?.draft === true || scopeChanged
+  const textarea = useRef(null)
+  useEffect(() => {
+    setValue(String(proposal?.summary ?? ''))
+    setExpandRelated(proposal?.expandRelated === true)
+    const timer = globalThis.setTimeout?.(() => textarea.current?.focus?.(), 0)
+    return () => { if (timer !== undefined) globalThis.clearTimeout?.(timer) }
+  }, [proposal?.operationId])
+  const metrics = proposal?.metrics ?? {}
+  const risks = Array.isArray(proposal?.risks) ? proposal.risks : []
+  const warnings = Array.isArray(proposal?.warnings) ? proposal.warnings : []
+  const editedAfter = Math.ceil((`<condensed-context>\n${value.trim()}\n</condensed-context>`).length / 4)
+  const editedSaved = (Number(metrics.beforeTokens) || 0) - editedAfter
+  const editedRatio = Number(metrics.beforeTokens) > 0 ? editedSaved / Number(metrics.beforeTokens) : 0
+  const editedRisks = Array.from(new Set([
+    ...risks,
+    ...(editedRatio < 0.4 ? ['savings-below-40-percent'] : []),
+    ...(editedSaved < 500 ? ['savings-below-500-tokens'] : []),
+  ]))
+  const submit = () => {
+    if (saving || needsGeneration || !value.trim()) return
+    void onApply(value)
+  }
+  const onKeyDown = event => {
+    if (event.key === 'Escape' && !saving) { event.preventDefault(); onCancel(); return }
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); submit() }
+  }
+  return h('div', { className: 'context-editor__dialog-backdrop' },
+    h('div', { className: 'context-editor__dialog context-editor__condensation-dialog', role: 'dialog', 'aria-modal': 'true', 'aria-label': text.condensationTitle, onKeyDown },
+      h('div', { className: 'context-editor__dialog-header' },
+        h('h2', null, text.condensationTitle),
+        h('button', { type: 'button', className: 'context-editor__dialog-close', disabled: saving, onClick: onCancel, 'aria-label': text.cancel }, '×'),
+      ),
+      h('label', { className: 'context-editor__replacement-link-option' },
+        h('input', { type: 'checkbox', checked: expandRelated, disabled: saving || proposal?.canExpandRelated !== true, onChange: event => setExpandRelated(event.target.checked) }),
+        h('span', { style: proposal?.canExpandRelated === true ? undefined : { opacity: 0.45 } }, text.condensationExpandRelated),
+      ),
+      !needsGeneration ? h('div', { className: 'context-editor__condensation-meta' },
+        h('span', null, text.condensationSource(proposal?.effectiveUnitIds?.length ?? 0, 0)),
+        h('span', null, text.condensationFirstChange(proposal?.sourceRootSeqs?.[0] ?? '—')),
+        h('span', null, text.condensationModel(proposal?.provider, proposal?.model)),
+      ) : null,
+      !needsGeneration ? h('div', { className: 'context-editor__condensation-metrics', role: 'status' },
+        h('span', null, text.condensationBefore(metrics.beforeTokens)),
+        h('span', null, text.condensationAfter(editedAfter)),
+        h('span', null, text.condensationPrefix(proposal?.prefixTokens)),
+        h('strong', null, text.condensationSaved(editedSaved, editedRatio)),
+      ) : null,
+      !needsGeneration && (editedRatio < 0.4 || editedSaved < 500) ? h('div', { className: 'context-editor__condensation-risks' }, text.condensationLowSaving) : null,
+      !needsGeneration && warnings.includes('prefix-not-reused') ? h('div', { className: 'context-editor__condensation-risks' }, text.condensationPrefixNotReused) : null,
+      !needsGeneration && editedRisks.length ? h('div', { className: 'context-editor__condensation-risks' }, text.condensationRisks(editedRisks.join(', '))) : null,
+      !needsGeneration ? h('details', { className: 'context-editor__condensation-source' },
+        h('summary', null, text.condensationOriginal),
+        h('div', null, (proposal?.sourceUnits ?? []).filter(source => source.included).map(source => h('article', { key: source.id },
+          h('strong', null, `${source.kind} · ${source.id}`),
+          h('pre', null, source.text),
+        ))),
+      ) : null,
+      !needsGeneration ? h('textarea', { ref: textarea, className: 'context-editor__dialog-input', value, onChange: event => setValue(event.target.value), spellCheck: false, disabled: saving, 'aria-label': text.condensationSummary }) : null,
+      h('div', { className: 'context-editor__dialog-hint' }, text.condensationHint),
+      error ? h('div', { className: 'context-editor__dialog-error', role: 'alert' }, error) : null,
+      h('div', { className: 'context-editor__dialog-actions' },
+        h('button', { type: 'button', disabled: saving, onClick: onCancel }, text.cancel),
+        h('button', { type: 'button', disabled: saving, onClick: () => onRegenerate(expandRelated) }, needsGeneration ? text.generateCondensation : text.regenerateCondensation),
+        h('button', { type: 'button', disabled: saving || needsGeneration || !value.trim(), onClick: submit }, saving ? text.loading : text.applyCondensation),
+      ),
+    ),
+  )
+}
+
 function UnitSection({ unit, selected, onSelect, focused, showHidden, showOriginal, match, disabled, onRestore, onContextToggle, onEdit, onRestoreReplacement, onUndoReplacement, onCompareOriginal, replacementAvailable, registerNode, text }) {
   const hidden = unit.viewState === 'hide' || unit.viewState === 'mixed'
   const mixed = unit.viewState === 'mixed'
@@ -543,7 +659,7 @@ function UnitSection({ unit, selected, onSelect, focused, showHidden, showOrigin
   )
 }
 
-function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, showOriginalUnitId, match, disabled, onRestore, onContextToggle, onEdit, onRestoreReplacement, onUndoReplacement, onCompareOriginal, replacementAvailable, registerNode, text }) {
+function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, showOriginalUnitId, match, disabled, disabledUnitIds, onRestore, onContextToggle, onEdit, onRestoreReplacement, onUndoReplacement, onCompareOriginal, replacementAvailable, registerNode, text }) {
   const units = unitsForRecord(record)
   const focused = units.some(unit => unit.id === focusedUnitId)
   return h('article', {
@@ -564,7 +680,7 @@ function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, show
       showHidden,
       showOriginal: showOriginalUnitId === unit.id,
       match: focusedUnitId === unit.id ? match : null,
-      disabled,
+      disabled: disabled || disabledUnitIds?.has(unit.id),
       onRestore: () => onRestore(unit.id),
       onContextToggle: () => onContextToggle(unit),
       onEdit: () => onEdit(unit),
@@ -596,6 +712,12 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
   const [contextMutating, setContextMutating] = useState(false)
   const [editing, setEditing] = useState(null)
   const [comparisonUnitId, setComparisonUnitId] = useState(null)
+  const [condensation, setCondensation] = useState(null)
+  const [condensationLoading, setCondensationLoading] = useState(false)
+  const [condensationError, setCondensationError] = useState('')
+  const [condensationModels, setCondensationModels] = useState([])
+  const [condensationModel, setCondensationModel] = useState('')
+  const [condensationOperationId, setCondensationOperationId] = useState('')
   const [notice, setNotice] = useState('')
   const lastSelectedIndex = useRef(null)
   const loadSequence = useRef(0)
@@ -618,6 +740,12 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
     setSearchIndex(0)
     setEditing(null)
     setComparisonUnitId(null)
+    setCondensation(null)
+    setCondensationLoading(false)
+    setCondensationError('')
+    setCondensationModels([])
+    setCondensationModel('')
+    setCondensationOperationId('')
     setNotice('')
   }, [sessionId])
 
@@ -629,24 +757,35 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
   const enabledRecordKinds = useMemo(() => enabledRecordKindsForUnits(prefs.enabledUnitKinds), [prefs.enabledUnitKinds])
   const visibleRecords = useMemo(() => {
     const records = []
+    const summaries = loaded.snapshot?.condensations ?? []
+    const covered = new Set(summaries.flatMap(item => item.effectiveUnitIds ?? []))
+    const inserted = new Set()
     for (const record of loaded.records) {
-      if (!enabledRecordKinds.includes(record.kind)) continue
       const units = unitsForRecord(record)
-      const visibleUnitsForRecord = record.kind === 'ai'
-        ? units.filter(unit => prefs.enabledUnitKinds.includes(unit.kind))
-        : units
-      if (visibleUnitsForRecord.length === 0) continue
-      records.push(visibleUnitsForRecord.length === units.length
-        ? record
-        : { ...record, units: visibleUnitsForRecord })
+      for (const item of summaries) {
+        if (!inserted.has(item.operationId) && units.some(unit => item.effectiveUnitIds?.includes(unit.id))) {
+          records.push({ id: 'condensation-' + item.operationId, condensation: item, units: [] })
+          inserted.add(item.operationId)
+        }
+      }
+      if (!enabledRecordKinds.includes(record.kind)) continue
+      const remaining = units.filter(unit => !covered.has(unit.id)
+        && (record.kind !== 'ai' || prefs.enabledUnitKinds.includes(unit.kind)))
+      if (remaining.length) records.push(remaining.length === units.length ? record : { ...record, units: remaining })
+    }
+    // Keep recovery accessible even when a source range is outside the loaded page.
+    for (const item of summaries) {
+      if (!inserted.has(item.operationId)) records.push({ id: 'condensation-' + item.operationId, condensation: item, units: [] })
     }
     return records
-  }, [enabledRecordKinds, loaded.records, prefs.enabledUnitKinds])
-  const visibleUnits = useMemo(() => visibleRecords.flatMap(record => unitsForRecord(record)), [visibleRecords])
+  }, [enabledRecordKinds, loaded.records, loaded.snapshot?.condensations, prefs.enabledUnitKinds])
+  const visibleUnits = useMemo(() => visibleRecords.filter(record => !record.condensation).flatMap(record => unitsForRecord(record)), [visibleRecords])
   const selectedCount = selected.size
-  const readOnly = running || loaded.status === 'loading' || loaded.status === 'refreshing' || contextMutating
+  const readOnly = running || loaded.status === 'loading' || loaded.status === 'refreshing' || contextMutating || condensationLoading
   const contextAvailable = loaded.snapshot?.capabilities?.contextExclusion === true
   const replacementAvailable = loaded.snapshot?.capabilities?.contextReplacement === true
+  const condensationAvailable = loaded.snapshot?.capabilities?.contextCondensation === true
+  const condensedUnitIds = useMemo(() => new Set((loaded.snapshot?.condensations ?? []).flatMap(item => item.effectiveUnitIds ?? [])), [loaded.snapshot?.condensations])
 
   const refresh = useCallback(async (preserveSelection = false) => {
     const ticket = ++loadSequence.current
@@ -673,6 +812,20 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
   useEffect(() => {
     if (!running) void refresh()
   }, [running, refresh])
+
+  useEffect(() => {
+    if (!condensationAvailable) return undefined
+    let cancelled = false
+    void controller.listCondensationModels().then(value => {
+      if (cancelled) return
+      const models = Array.isArray(value?.models) ? value.models : []
+      setCondensationModels(models)
+      setCondensationModel(current => current || condensationModelKey(models[0]))
+    }).catch(() => {
+      if (!cancelled) setCondensationModels([])
+    })
+    return () => { cancelled = true }
+  }, [controller, condensationAvailable, sessionId])
 
   useEffect(() => {
     const visibleIds = new Set(visibleUnits.map(unit => unit.id))
@@ -868,11 +1021,11 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
     }
   }
 
-  const mutateContext = async (action, unitIds) => {
+  const mutateContext = async (action, unitIds, options = {}) => {
     if (readOnly || !contextAvailable || loaded.snapshot === null) return
     setContextMutating(true)
     try {
-      const preview = await controller.previewContext(action, loaded.snapshot.revision, unitIds)
+      const preview = await controller.previewContext(action, loaded.snapshot.revision, unitIds, options)
       if (preview?.conflict) {
         await refresh()
         return
@@ -890,6 +1043,7 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
         action,
         preview.expectedRevision ?? loaded.snapshot.revision,
         unitIds,
+        options,
       )
       if (value?.conflict) {
         await refresh()
@@ -901,6 +1055,113 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
     } finally {
       setContextMutating(false)
     }
+  }
+
+  const openCondensation = () => {
+    const unit = selectedCount === 1 ? visibleUnits.find(item => selected.has(item.id)) : undefined
+    setCondensationError('')
+    setCondensation({ draft: true, operationId: 'draft-' + Date.now(), canExpandRelated: unit?.kind === 'answer', expandRelated: false, summary: '' })
+  }
+
+  const startCondensation = async (expandRelated = false) => {
+    if (readOnly || !condensationAvailable || selectedCount === 0 || loaded.snapshot === null) return
+    setCondensationLoading(true)
+    setCondensationError('')
+    const operationId = `condensation-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    setCondensationOperationId(operationId)
+    try {
+      const selectedModel = condensationModels.find(value => condensationModelKey(value) === condensationModel)
+      const proposal = await controller.generateCondensation([...selected], loaded.snapshot.revision, {
+        operationId,
+        expandRelated,
+        ...(selectedModel?.provider ? { provider: selectedModel.provider } : {}),
+        ...(selectedModel?.id ? { model: selectedModel.id } : {}),
+      })
+      if (proposal?.conflict) {
+        setCondensationOperationId('')
+        await refresh(true)
+        return
+      }
+      setCondensation(proposal)
+      setCondensationOperationId(String(proposal?.operationId ?? operationId))
+    } catch (error) {
+      setCondensationOperationId('')
+      if (!String(error?.message ?? error).includes('CANCELLED')) setCondensationError(text.condensationFailed(errorText(error)))
+    } finally {
+      setCondensationLoading(false)
+    }
+  }
+
+  const cancelCondensation = async () => {
+    if (!condensationOperationId) return
+    try { await controller.cancelCondensation(condensationOperationId) } catch { /* the stream will settle and clear its state */ }
+  }
+
+  const applyCondensation = async summary => {
+    if (!condensation || loaded.snapshot === null) return
+    setCondensationLoading(true)
+    setCondensationError('')
+    try {
+      const result = await controller.commitCondensation(condensation, summary)
+      if (result?.conflict) {
+        setCondensation(null)
+        setCondensationOperationId('')
+        await refresh(true)
+        return
+      }
+      setCondensation(null)
+      setCondensationOperationId('')
+      setSelected(new Set())
+      await refresh()
+    } catch (error) {
+      setCondensationError(text.condensationFailed(errorText(error)))
+    } finally {
+      setCondensationLoading(false)
+    }
+  }
+
+  const discardCondensation = async () => {
+    const operationId = condensationOperationId || condensation?.operationId
+    if (operationId) {
+      try { await controller.cancelCondensation(operationId) } catch { /* stale proposals are harmless */ }
+    }
+    setCondensation(null)
+    setCondensationOperationId('')
+    setCondensationError('')
+  }
+
+  const regenerateCondensation = async (expandRelated = false) => {
+    // Keep the window open during generation; an old summary cannot be applied.
+    const old = condensationOperationId
+    if (old) { try { await controller.cancelCondensation(old) } catch {} }
+    setCondensation(current => ({ ...current, draft: true, expandRelated }))
+    await startCondensation(expandRelated)
+  }
+
+  const restoreCondensation = async operationId => {
+    if (readOnly || loaded.snapshot === null) return
+    setContextMutating(true)
+    setCondensationError('')
+    try {
+      const result = await controller.restoreCondensation(operationId, loaded.snapshot.revision)
+      if (result?.conflict) {
+        await refresh(true)
+        return
+      }
+      await refresh(true)
+    } catch (error) {
+      setCondensationError(text.condensationFailed(errorText(error)))
+    } finally {
+      setContextMutating(false)
+    }
+  }
+
+  const toggleCondensationContext = async item => {
+    if (readOnly || loaded.snapshot === null) return
+    const summaryUnitId = (item.sourceUnits ?? []).find(source => source.included !== false)?.id
+    if (!summaryUnitId) return
+    const action = item.contextExcluded === true ? 'restore' : 'exclude'
+    await mutateContext(action, [summaryUnitId], { condensationOperationId: item.operationId })
   }
 
   const closeReplacementDialog = () => {
@@ -1031,6 +1292,28 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
 
   const matchUnitId = match?.unitId
   const aiState = aiFilterState(prefs.enabledUnitKinds)
+  const renderCondensation = item => h('article', { key: item.operationId, className: 'context-editor__condensation-card', 'data-condensation-operation-id': item.operationId },
+         h('div', { className: 'context-editor__condensation-card-header' },
+           h('strong', null, text.activeCondensation),
+           h('span', null, text.condensationModel(item.provider, item.model)),
+           h('button', { type: 'button', disabled: readOnly, onClick: () => void toggleCondensationContext(item) }, item.contextExcluded === true ? text.restoreContext : text.excludeContext),
+           h('button', { type: 'button', disabled: readOnly, onClick: () => void restoreCondensation(item.operationId) }, text.restoreCondensation),
+         ),
+         h('pre', { className: 'context-editor__condensation-summary' }, item.summary),
+         h('div', { className: 'context-editor__condensation-card-metrics' },
+           h('span', null, text.condensationBefore(item.metrics?.beforeTokens)), ' → ',
+           h('span', null, text.condensationAfter(item.metrics?.afterTokens)),
+           h('strong', null, ' · ' + text.condensationSaved(item.metrics?.savedTokens, item.metrics?.savingsRatio))),
+         item.metrics?.belowRecommendedThreshold ? h('div', { className: 'context-editor__condensation-risks' }, text.condensationLowSaving) : null,
+         h('details', { className: 'context-editor__condensation-source' },
+           h('summary', null, text.condensationOriginal),
+           h('div', null, (item.sourceUnits ?? []).filter(source => source.included).map(source => h('article', { key: source.id },
+             h('strong', null, `${source.kind} · ${source.id}`),
+             h('pre', null, source.text),
+           ))),
+         ),
+       )
+
   return h('section', { className: 'context-editor', 'aria-label': 'Context Editor' },
     h('div', { className: 'context-editor__controls', ref: controlsNode },
       h('div', { className: 'context-editor__toolbar' },
@@ -1105,15 +1388,26 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
         h('button', { type: 'button', disabled: readOnly || selectedCount === 0, onClick: () => void mutate('hide', [...selected]) }, text.hideSelected(selectedCount)),
         h('button', { type: 'button', disabled: readOnly || selectedCount === 0, onClick: () => void mutate('restore', [...selected]) }, text.restoreSelected),
         h('button', { type: 'button', disabled: readOnly, onClick: () => void mutate('reset') }, text.restoreAll),
-        h('button', { type: 'button', disabled: readOnly || !contextAvailable || selectedCount === 0, onClick: () => void mutateContext('exclude', [...selected]) }, text.excludeSelected(selectedCount)),
-        h('button', { type: 'button', disabled: readOnly || !contextAvailable || selectedCount === 0, onClick: () => void mutateContext('restore', [...selected]) }, text.restoreContextSelected),
-        h('button', { type: 'button', disabled: readOnly || !loaded.snapshot?.canUndo, onClick: () => void undo() }, text.undo),
+         h('button', { type: 'button', disabled: readOnly || !contextAvailable || selectedCount === 0, onClick: () => void mutateContext('exclude', [...selected]) }, text.excludeSelected(selectedCount)),
+         h('button', { type: 'button', disabled: readOnly || !contextAvailable || selectedCount === 0, onClick: () => void mutateContext('restore', [...selected]) }, text.restoreContextSelected),
+         condensationModels.length > 0
+           ? h('label', { className: 'context-editor__condensation-model' },
+             h('span', null, text.condensationModelPicker),
+             h('select', { value: condensationModel, disabled: readOnly, onChange: event => setCondensationModel(event.target.value), 'aria-label': text.condensationModelPicker }, condensationModels.map(model => h('option', { key: condensationModelKey(model), value: condensationModelKey(model) }, `${model.name ?? model.id}`))),
+           )
+           : null,
+         h('button', { type: 'button', className: 'context-editor__condensation-action', disabled: readOnly || !condensationAvailable || selectedCount === 0, onClick: openCondensation }, condensationLoading ? text.condensationGenerating : text.condenseSelected(selectedCount)),
+         condensationLoading && condensationOperationId
+           ? h('button', { type: 'button', onClick: () => void cancelCondensation() }, text.cancelCondensation)
+           : null,
+         h('button', { type: 'button', disabled: readOnly || !loaded.snapshot?.canUndo, onClick: () => void undo() }, text.undo),
         running ? h('span', { className: 'context-editor__running' }, text.running) : null,
         loaded.status === 'error' ? h('span', { className: 'context-editor__error' }, errorText(loaded.error)) : null,
-        notice ? h('span', { className: 'context-editor__notice', role: 'status' }, notice) : null,
-      ),
-    ),
-    h('div', { className: 'context-editor__list' }, visibleRecords.map(record => h(RecordRow, {
+         notice ? h('span', { className: 'context-editor__notice', role: 'status' }, notice) : null,
+         condensationError ? h('span', { className: 'context-editor__error', role: 'alert' }, condensationError) : null,
+       ),
+     ),
+     h('div', { className: 'context-editor__list' }, visibleRecords.map(record => record.condensation ? renderCondensation(record.condensation) : h(RecordRow, {
       key: record.id,
       record,
       selected,
@@ -1123,6 +1417,7 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
       showOriginalUnitId: comparisonUnitId,
       match: matchUnitId === match?.unitId ? match : null,
       disabled: readOnly,
+      disabledUnitIds: condensedUnitIds,
       onRestore: unitId => void mutate('restore', [unitId]),
       onContextToggle: unit => void mutateContext(unit.projectionState === 'exclude' || unit.projectionState === 'mixed' ? 'restore' : 'exclude', [unit.id]),
       onEdit: openReplacementEdit,
@@ -1135,16 +1430,27 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
     }))),
     loaded.status === 'loading' ? h('div', { className: 'context-editor__state' }, text.loading) : null,
     loaded.status !== 'loading' && visibleRecords.length === 0 ? h('div', { className: 'context-editor__state' }, text.noRecords) : null,
-    editing
+     editing
       ? h(EditDialog, {
         unit: editing,
         initialText: editing.text,
         text,
         onCancel: closeReplacementDialog,
         onSave: saveReplacement,
-      })
-      : null,
-  )
+       })
+       : null,
+     condensation
+       ? h(CondensationDialog, {
+         proposal: condensation,
+         text,
+         saving: condensationLoading,
+         error: condensationError,
+         onCancel: () => { if (!condensationLoading) void discardCondensation() },
+         onRegenerate: expandRelated => { if (!condensationLoading) void regenerateCondensation(expandRelated) },
+         onApply: applyCondensation,
+       })
+       : null,
+   )
 }
 
 export async function apply(ctx) {

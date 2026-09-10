@@ -16,6 +16,8 @@ import {
   searchRecords as searchSharedRecords,
 } from './core-runtime.js'
 
+export { selectCondensationRange, validateCondensationSummary, frameCondensationSummary, estimateCondensationTokens } from './core-runtime.js'
+
 export { reduceReplacementStates, selectAssociatedReasoningTargets, selectProjectionTargets } from './core-runtime.js'
 
 export const HOST_ID = 'deepseek-harness'
@@ -127,6 +129,7 @@ function atom(identity, event, blockIndex, kind, text, options = {}) {
     ...(options.toolName === undefined ? {} : { toolName: String(options.toolName) }),
     ...(options.isError === undefined ? {} : { isError: Boolean(options.isError) }),
     ...(options.hasSignature === undefined ? {} : { hasSignature: Boolean(options.hasSignature) }),
+    ...(options.structured === undefined ? {} : { structured: Boolean(options.structured) }),
     mutable: true,
   }
 }

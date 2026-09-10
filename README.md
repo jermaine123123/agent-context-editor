@@ -18,6 +18,7 @@ For most tasks, prompt steering and automatic context compaction are usually suf
 
 - Manually exclude selected context and restore it later
 - Edit User messages and AI Answers with restore and undo
+- AI-condense selected context into an editable, reversible summary
 - Search conversations and navigate between matches
 - Filter User, AI, Reasoning, Answer, and Tool content
 - Select individual items, continuous ranges, or multiple items
@@ -36,10 +37,11 @@ For most tasks, prompt steering and automatic context compaction are usually suf
 | Visual hide, restore, reset, and undo | Yes | Yes | Yes |
 | Manual context exclusion | Yes | No | Yes |
 | Manual User/Answer editing | Yes | No | Yes |
+| AI condensation and replacement | Yes | No | Yes |
 | Original Session preserved | Yes | Yes | Yes |
 | Chinese and English UI | Yes | Yes | Yes |
 
-Manual context exclusion and text editing are currently available in Pi TUI and DeepSeek Harness. Editable content is limited to plain-text User messages and complete unsigned Answers.
+Manual context exclusion, text editing, and selected-context AI condensation are available in Pi TUI and DeepSeek Harness. Editable content is limited to plain-text User messages and complete unsigned Answers.
 
 The separate [Pi Context Desktop](https://github.com/jermaine123123/pi-app) community build provides visual conversation management for Windows x64.
 
@@ -47,10 +49,10 @@ The separate [Pi Context Desktop](https://github.com/jermaine123123/pi-app) comm
 
 ### Pi extension
 
-Download `pi-context-editor-0.5.0.tgz` from the [release assets](https://github.com/jermaine123123/agent-context-editor/releases). Pi `0.84.2` installs a local package directory rather than a `.tgz` file. Extract the archive so that `package.json` is at the package directory root, then run:
+Download `pi-context-editor-0.6.0.tgz` from the [release assets](https://github.com/jermaine123123/agent-context-editor/releases). Pi `0.84.2` installs a local package directory rather than a `.tgz` file. Extract the archive so that `package.json` is at the package directory root, then run:
 
 ```sh
-pi install ./pi-context-editor-0.5.0
+pi install ./pi-context-editor-0.6.0
 ```
 
 When working directly from this repository:
@@ -63,10 +65,10 @@ For Pi Desktop registration, run `adapters/pi-extension/scripts/install-desktop.
 
 ### DeepSeek Harness
 
-Download `context-editor-deepseek-harness-0.3.0.tgz` from the release assets and install it with the official Harness CLI:
+Download `context-editor-deepseek-harness-0.4.0.tgz` from the release assets and install it with the official Harness CLI:
 
 ```sh
-dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.3.0.tgz
+dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.4.0.tgz
 ```
 
 The adapter targets DeepSeek Harness Developer Preview commit `141eb6fef83422698aef7a981029e843e8161534` and `@deepseek-ai/dsh@0.1.0-rc.8`. See [COMPATIBILITY.md](adapters/deepseek-harness/COMPATIBILITY.md) for the tested host boundary.
@@ -75,7 +77,7 @@ The adapter targets DeepSeek Harness Developer Preview commit `141eb6fef83422698
 
 ### Pi TUI
 
-Enter `/ctx` to open the full-screen Context Editor. The primary controls are `x` for context exclusion or restoration, `e` for editing, `E` for restoring original text, `h` and `r` for visual hiding and restoration, and `s` for switching the search scope. Press `?` for the complete shortcut reference.
+Enter `/ctx` to open the full-screen Context Editor. The primary controls are `x` for context exclusion or restoration, `e` for editing, `E` for restoring original text, `h` and `r` for visual hiding and restoration, and `s` for switching the search scope. Use `c` to generate and review a summary for the selected context, `C` to exclude or restore an applied summary, and `D` to restore the original context. Press `?` for the complete shortcut reference.
 
 ### Pi Desktop/RPC
 
@@ -83,13 +85,13 @@ Enter `/ctx` to open the native Context Editor dialogs. This path supports searc
 
 ### DeepSeek Harness
 
-Open the `Context Editor` tab beside the normal Chat view. The tab manages the same Session and provides context exclusion, User/Answer editing, search, filters, selection, visual hiding, restoration, and undo.
+Open the `Context Editor` tab beside the normal Chat view. The tab manages the same Session and provides context exclusion, User/Answer editing, search, filters, selection, visual hiding, restoration, and undo. Selected context can be condensed into an editable summary, applied after review, and restored later.
 
 ## How it works
 
 Agent Context Editor reads the existing Session and presents User, AI, Reasoning, Answer, and Tool content in an independent management view. Reasoning and final Answers from the same AI turn remain separately manageable, while related Tool Calls and Tool Results remain paired.
 
-Visual changes and model-context changes are stored separately. Visual hiding only changes the Context Editor view. Confirmed context exclusion and supported text edits change the derived input sent to the model without overwriting the original Session or the host's main chat timeline.
+Visual changes and model-context changes are stored separately. Visual hiding only changes the Context Editor view. Confirmed context exclusion, supported text edits, and applied condensation summaries change the derived input sent to the model without overwriting the original Session or the host's main chat timeline.
 
 ## Current limitations
 
@@ -99,23 +101,22 @@ Visual changes and model-context changes are stored separately. Visual hiding on
 - Batch text replacement is not supported.
 - Visual hiding does not change model input or reduce token usage.
 - There is no separate hide-all operation; restore-all is available.
-- AI-assisted cleanup, selected-range summaries, and summary replacement are not yet available.
+- AI condensation is available in Pi TUI and DeepSeek Harness, but not Pi Desktop/RPC; whole-session automatic cleanup is not included.
 - DeepSeek Harness compatibility is limited to the tested rc.8 host boundary.
 
 ## Current release
 
-The current stable project release is `v0.3.0`:
+The current stable project release is `v0.4.0`:
 
-- Pi extension: `pi-context-editor@0.5.0`
-- DeepSeek Harness adapter: `context-editor-deepseek-harness@0.3.0`
+- Pi extension: `pi-context-editor@0.6.0`
+- DeepSeek Harness adapter: `context-editor-deepseek-harness@0.4.0`
 - Pi Context Desktop community build: `context-editor-v0.1.4`
 
-See the [v0.3.0 release notes](docs/release-notes-v0.3.0.md) for detailed changes and verification results.
+See the [v0.4.0 release notes](docs/release-notes-v0.4.0.md) for AI condensation behavior, safeguards, and verification results.
 
 ## Roadmap
 
 - Support more Agent hosts
-- Add reversible summary generation and replacement
 
 ### Future exploration
 

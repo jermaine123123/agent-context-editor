@@ -25,6 +25,7 @@ export type ContextReplacementDisabledReason =
   | 'signed-content'
   | 'projection-unavailable'
   | 'invalid-target'
+  | 'condensation-active'
 
 /** The revision type is string in Pi, while small in-memory hosts often use a number. */
 export type ContextRevision = string | number
@@ -136,6 +137,56 @@ export interface ContextEditorSnapshot {
   legacyStateFound: boolean
   projectionAvailable?: boolean
   projectionError?: string
+  capabilities?: {
+    paging: boolean
+    search: boolean
+    viewMutation: boolean
+    undo: boolean
+    persistence: boolean
+    contextExclusion: boolean
+    contextReplacement: boolean
+    contextCondensation?: boolean
+  }
+  /** Applied AI condensation summaries currently visible in the model projection. */
+  condensations?: ContextCondensationSnapshot[]
+}
+
+export interface ContextCondensationSnapshot {
+  operationId: string
+  status: 'applied' | 'restored'
+  contextExcluded?: boolean
+  summary: string
+  requestedUnitIds: string[]
+  effectiveUnitIds: string[]
+  autoExpandedUnitIds: string[]
+  recordIds: string[]
+  sourceRootSeqs: number[]
+  sourceFingerprint?: string
+  sourceUnits: Array<{
+    id: string
+    recordId: string
+    kind: ContextEditableUnitKind
+    atomIds: string[]
+    sourceEntryIds?: string[]
+    sourceRootSeqs: number[]
+    text: string
+    included: boolean
+    approxTokens: number
+    toolNames?: string[]
+    isError?: boolean
+    hasSignature?: boolean
+    structured?: boolean
+  }>
+  metrics: {
+    beforeTokens: number
+    afterTokens: number
+    savedTokens: number
+    savingsRatio: number
+    belowRecommendedThreshold: boolean
+  }
+  provider: string
+  model: string
+  createdAt: string
 }
 
 export interface ContextSearchOccurrence {
@@ -218,8 +269,60 @@ export type ContextReplacementEventV1 =
       linkedExclusion?: ContextReplacementLinkedExclusion
     }
 
-export type ContextProjectionEvent = ContextProjectionEventV1 | ContextReplacementEventV1
+/** A host-neutral, reversible model-context condensation projection. */
+export interface ContextCondensationEventV1 {
+  schemaVersion: 1
+  type: 'condensation'
+  action: 'apply' | 'restore' | 'exclude-summary' | 'restore-summary'
+  eventId: string
+  operationId: string
+  sessionId: string
+  baseRevision: ContextRevision
+  requestedUnitIds: string[]
+  effectiveUnitIds: string[]
+  autoExpandedUnitIds?: string[]
+  recordIds?: string[]
+  sourceEntryIds: string[]
+  sourceRootSeqs: number[]
+  sourceFingerprint?: string
+  sourceUnits: Array<{
+    id: string
+    recordId: string
+    kind: ContextEditableUnitKind
+    atomIds: string[]
+    sourceEntryIds?: string[]
+    sourceRootSeqs: number[]
+    text: string
+    included: boolean
+    approxTokens: number
+    toolNames?: string[]
+    isError?: boolean
+    hasSignature?: boolean
+    structured?: boolean
+  }>
+  summary: string
+  provider: string
+  model: string
+  metrics: {
+    beforeTokens: number
+    afterTokens: number
+    savedTokens: number
+    savingsRatio: number
+    belowRecommendedThreshold: boolean
+  }
+  prefixTokens: number
+  prefixReused?: boolean
+  summaryTokens: number
+  createdAt: string
+  /** Provider-shaped messages before and after the condensation. */
+  beforeMessages: Array<{ entryId: string; message: unknown }>
+  afterMessages: Array<{ entryId: string; message: unknown }>
+}
+
+export type ContextProjectionEvent = ContextProjectionEventV1 | ContextReplacementEventV1 | ContextCondensationEventV1
 
 export function contextProjectionEventId(event: ContextProjectionEvent): string {
-  return 'type' in event && event.type === 'replacement' ? event.eventId : (event as ContextProjectionEventV1).transactionId
+  if ('type' in event && event.type === 'replacement') return event.eventId
+  if ('type' in event && event.type === 'condensation') return event.eventId
+  return (event as ContextProjectionEventV1).transactionId
 }

@@ -14,8 +14,16 @@ export declare class ContextEditorHost extends TypertRemoteService {
   commitReplacement(request: unknown): Promise<unknown>
   restoreReplacement(request: unknown): Promise<unknown>
   undoReplacement(request: unknown): Promise<unknown>
+  listCondensationModels(request: unknown): Promise<unknown>
+  previewCondensation(request: unknown): Promise<unknown>
+  prepareCondensation(request: unknown): Promise<unknown>
+  generateCondensation(request: unknown): Promise<unknown>
+  cancelCondensation(request: unknown): Promise<unknown>
+  commitCondensation(request: unknown): Promise<unknown>
+  restoreCondensation(request: unknown): Promise<unknown>
+  undoCondensation(request: unknown): Promise<unknown>
 }
 
-export declare const inject: readonly ['storageDomain', 'sessionPersistence', 'sessions', 'agents']
+export declare const inject: readonly ['storageDomain', 'sessionPersistence', 'sessions', 'agents', 'llm']
 export declare const contextEditorDomainSpec: unknown
 export declare function apply(ctx: unknown): Promise<void>

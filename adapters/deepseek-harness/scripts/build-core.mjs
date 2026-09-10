@@ -13,6 +13,7 @@ const canonicalSources = [
   'packages/context-editor-core/src/records.ts',
   'packages/context-editor-core/src/search.ts',
   'packages/context-editor-core/src/protocol.ts',
+  'packages/context-editor-core/src/condensation.ts',
 ].map((file) => resolve(repositoryRoot, file))
 
 const hash = createHash('sha256')

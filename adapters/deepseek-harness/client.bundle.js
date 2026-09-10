@@ -2054,6 +2054,32 @@ window.__ModuleLoader__.load({
     	const kind = (value) => zh ? value === "ai" ? "AI" : value === "tool" ? "工具" : "用户" : value === "ai" ? "AI" : value === "tool" ? "Tool" : "User";
     	const unitKind = (value) => zh ? value === "reasoning" ? "思考" : value === "answer" ? "回答" : value === "tool" ? "工具" : "用户" : value === "reasoning" ? "Reasoning" : value === "answer" ? "Answer" : value === "tool" ? "Tool" : "User";
     	return {
+    		condensationExpandRelated: zh ? "同步精简 AI 思考和工具输出" : "Also condense AI reasoning and tool outputs",
+    		generateCondensation: zh ? "生成精简" : "Generate summary",
+    		condensationModelPicker: zh ? "精简模型" : "Condensation model",
+    		condenseSelected: (count) => zh ? `AI \u7cbe\u7b80${count ? `\uff08${count}\uff09` : ""}` : `AI condense${count ? ` (${count})` : ""}`,
+    		condensationGenerating: zh ? "正在生成精简摘要…" : "Generating condensation...",
+    		cancelCondensation: zh ? "取消精简" : "Cancel condensation",
+    		regenerateCondensation: zh ? "重新生成" : "Regenerate",
+    		condensationTitle: zh ? "AI 精简上下文" : "AI condense context",
+    		condensationSummary: zh ? "精简摘要" : "Condensation summary",
+    		condensationOriginal: zh ? "展开原文范围" : "Show original selected range",
+    		applyCondensation: zh ? "应用精简" : "Apply condensation",
+    		restoreCondensation: zh ? "恢复精简前内容" : "Restore before condensation",
+    		activeCondensation: zh ? "已应用精简" : "Applied condensation",
+    		activeCondensations: zh ? "已应用的精简摘要" : "Applied condensations",
+    		condensationSource: (count, expanded) => zh ? `\u539f\u6587\u8303\u56f4\uff1a${count} \u4e2a\u5355\u5143${expanded ? `（\u81ea\u52a8\u6269\u5c55 ${expanded} \u4e2a）` : ""}` : `Source range: ${count} units${expanded ? ` (${expanded} auto-expanded)` : ""}`,
+    		condensationFirstChange: (value) => zh ? `\u9996\u6b21\u53d8\u5316\u4f4d\u7f6e\uff1a${value}` : `First changed root: ${value}`,
+    		condensationModel: (provider, model) => `${provider ?? ""} / ${model ?? ""}`,
+    		condensationBefore: (value) => zh ? `\u539f\u6587\u4f30\u7b97 token\uff1a${Number(value) || 0}` : `Original estimate: ${Number(value) || 0} tokens`,
+    		condensationPrefix: (value) => zh ? `\u672a\u6539\u53d8\u524d\u7f00\u4f30\u7b97 token\uff1a${Number(value) || 0}` : `Unchanged prefix estimate: ${Number(value) || 0} tokens`,
+    		condensationPrefixNotReused: zh ? "已切换精简模型，本次生成未复用会话前缀" : "The selected model differs; this generation did not reuse the session prefix.",
+    		condensationAfter: (value) => zh ? `\u6458\u8981\u4f30\u7b97 token\uff1a${Number(value) || 0}` : `Summary estimate: ${Number(value) || 0} tokens`,
+    		condensationSaved: (saved, ratio) => zh ? `\u9884\u8ba1\u8282\u7701\uff1a${Number(saved) || 0} token\uff08${Math.round((Number(ratio) || 0) * 100)}%\uff09` : `Estimated savings: ${Number(saved) || 0} tokens (${Math.round((Number(ratio) || 0) * 100)}%)`,
+    		condensationLowSaving: zh ? "本次精简收益较小：缩短不足 40% 或节省不足 500 个估算 token，可重新生成或手动删减。" : "Small reduction: under 40% or fewer than 500 estimated tokens saved. Consider regenerating or editing.",
+    		condensationRisks: (risks) => zh ? `\u98ce\u9669\u63d0\u793a\uff1a${risks}` : `Risks: ${risks}`,
+    		condensationHint: zh ? "可手动调整摘要；Ctrl/Cmd+Enter 应用，Esc 取消。生成或应用期间主会话保持不变。" : "You can edit the summary. Ctrl/Cmd+Enter applies it; Esc cancels. The main session stays unchanged while generating.",
+    		condensationFailed: (error) => zh ? `\u7cbe\u7b80\u5931\u8d25\uff1a${error}` : `Condensation failed: ${error}`,
     		locale,
     		kind,
     		unitKind,
@@ -2118,7 +2144,8 @@ window.__ModuleLoader__.load({
     				"projection-unavailable": zh ? "Provider 投影暂不可用" : "provider projection is unavailable",
     				"unsupported-unit-kind": zh ? "该单元类型不支持编辑" : "this unit type does not support editing",
     				"invalid-target": zh ? "原文已变化，无法安全编辑" : "the canonical text changed and cannot be edited safely",
-    				"associated-reasoning-unavailable": zh ? "关联的本轮思考或工具链无法安全投影" : "the associated reasoning or tool chain cannot be projected safely"
+    				"associated-reasoning-unavailable": zh ? "关联的本轮思考或工具链无法安全投影" : "the associated reasoning or tool chain cannot be projected safely",
+    				"condensation-active": zh ? "摘要已生效，请先恢复精简前内容" : "condensation is active; restore it before editing"
     			};
     			return zh ? `不可编辑：${labels[reason] ?? "内容类型不支持"}` : `Not editable: ${labels[reason] ?? "this content is not supported"}`;
     		},
@@ -2200,7 +2227,7 @@ window.__ModuleLoader__.load({
     //#endregion
     //#region \0context-editor-client-css
     const style = document.createElement("style");
-    style.textContent = ".context-editor {\n  display: flex;\n  flex-direction: column;\n  gap: 0.65rem;\n  height: 100%;\n  min-height: 0;\n  padding: 0.85rem 1rem 1.25rem;\n  color: var(--dsh-fg, var(--foreground, inherit));\n}\n\n.context-editor__controls {\n  position: sticky;\n  top: 0;\n  z-index: 10;\n  display: grid;\n  gap: 0.55rem;\n  padding: 0.15rem 0 0.65rem;\n  background: var(--dsh-panel-bg, var(--background, var(--dsh-card-bg, #fff)));\n  border-bottom: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  box-shadow: 0 0.35rem 0.75rem color-mix(in srgb, var(--dsh-shadow, #172033) 12%, transparent);\n}\n\n.context-editor__toolbar,\n.context-editor__searchbar,\n.context-editor__actions {\n  display: flex;\n  align-items: center;\n  gap: 0.45rem;\n  flex-wrap: wrap;\n}\n\n.context-editor__filters { display: flex; align-items: flex-start; gap: 0.35rem; flex-wrap: wrap; }\n.context-editor__filter-group { display: inline-flex; align-items: flex-start; gap: 0.25rem; }\n.context-editor__subfilters { display: inline-flex; gap: 0.25rem; padding-top: 0.1rem; }\n.context-editor__filter,\n.context-editor__actions button,\n.context-editor__searchbar button,\n.context-editor__row button {\n  border: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  border-radius: 0.45rem;\n  background: var(--dsh-control-bg, var(--background, transparent));\n  color: inherit;\n  padding: 0.28rem 0.55rem;\n  cursor: pointer;\n}\n.context-editor__filter.is-active,\n.context-editor__filter.is-mixed { background: var(--dsh-accent-soft, #e8efff); border-color: var(--dsh-accent, #7190e8); }\n.context-editor__filter.is-mixed { background: linear-gradient(90deg, var(--dsh-accent-soft, #e8efff) 50%, var(--dsh-control-bg, var(--background, transparent)) 50%); }\n.context-editor button:disabled { cursor: not-allowed; opacity: 0.45; }\n.context-editor__toggle { display: inline-flex; align-items: center; gap: 0.3rem; margin-left: auto; }\n.context-editor__searchbar input { flex: 1 1 20rem; min-width: 12rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.38rem 0.55rem; background: var(--dsh-input-bg, transparent); color: inherit; }\n.context-editor__search-summary { color: var(--dsh-muted, #687386); font-size: 0.82rem; }\n.context-editor__actions { padding-bottom: 0.15rem; }\n.context-editor__running { color: var(--dsh-muted, #687386); font-size: 0.82rem; }\n.context-editor__error { color: var(--dsh-danger, #b42318); font-size: 0.82rem; }\n.context-editor__list { overflow: visible; min-height: 0; display: flex; flex-direction: column; gap: 0.5rem; padding-right: 0.2rem; }\n.context-editor__row { display: flex; align-items: flex-start; gap: 0.6rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.55rem; padding: 0.65rem; background: var(--dsh-card-bg, transparent); }\n.context-editor__row.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }\n.context-editor__row.is-hidden { opacity: 0.82; }\n.context-editor__row--placeholder { align-items: center; min-height: 2.4rem; border-style: dashed; }\n.context-editor__row--placeholder input { margin-top: 0.2rem; }\n.context-editor__placeholder-text { flex: 1; color: var(--dsh-muted, #687386); font-size: 0.9rem; }\n.context-editor__row-content { flex: 1; min-width: 0; }\n.context-editor__row-meta { display: flex; align-items: center; gap: 0.45rem; color: var(--dsh-muted, #687386); font-size: 0.75rem; margin-bottom: 0.35rem; }\n.context-editor__kind { font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }\n.context-editor__hidden-badge { color: var(--dsh-warning, #996b00); }\n.context-editor__context-badge { color: var(--dsh-accent, #4568c4); font-weight: 600; }\n.context-editor__context-badge.is-unavailable { color: var(--dsh-muted, #687386); }\n.context-editor__replacement-badge { color: var(--dsh-accent, #4568c4); font-weight: 600; }\n.context-editor__replacement-reason { color: var(--dsh-muted, #687386); font-size: 0.75rem; }\n.context-editor__replacement-actions { display: inline-flex; align-items: center; gap: 0.3rem; flex-wrap: wrap; }\n.context-editor__unit.is-context-excluded { border-color: color-mix(in srgb, var(--dsh-accent, #7190e8) 55%, var(--dsh-border, #d7dbe2)); }\n.context-editor__context-toggle { margin-left: auto; }\n.context-editor__units { display: grid; gap: 0.45rem; }\n.context-editor__unit { border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.45rem 0.55rem; }\n.context-editor__unit.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }\n.context-editor__unit.is-hidden { opacity: 0.82; }\n.context-editor__unit-header { display: flex; align-items: center; gap: 0.45rem; min-height: 1.65rem; color: var(--dsh-muted, #687386); font-size: 0.78rem; }\n.context-editor__unit-select { display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer; }\n.context-editor__unit-kind { font-weight: 600; }\n.context-editor__unit-header button { margin-left: auto; }\n.context-editor__unit-header .context-editor__replacement-actions button { margin-left: 0; }\n.context-editor__unit-body { min-width: 0; }\n.context-editor__unit-placeholder { color: var(--dsh-muted, #687386); padding: 0.35rem 0; font-size: 0.9rem; }\n.context-editor__record-body { display: grid; gap: 0.25rem; }\n.context-editor__atom { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }\n.context-editor__atom--reasoning { color: var(--dsh-muted, #687386); }\n.context-editor__tool-name { font-weight: 600; }\n.context-editor__hit { border-radius: 0.18rem; background: var(--dsh-highlight, #ffe28a); color: inherit; padding: 0 0.08rem; }\n.context-editor__state { color: var(--dsh-muted, #687386); padding: 2rem 0; text-align: center; }\n.context-editor__empty { color: var(--dsh-muted, #687386); }\n.context-editor__notice { color: var(--dsh-warning, #996b00); font-size: 0.82rem; }\n.context-editor__dialog-backdrop {\n  position: fixed;\n  inset: 0;\n  z-index: 100;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  padding: 1rem;\n  background: color-mix(in srgb, #0b1220 48%, transparent);\n}\n.context-editor__dialog {\n  width: min(48rem, 100%);\n  max-height: min(42rem, 100%);\n  display: grid;\n  gap: 0.75rem;\n  padding: 1rem;\n  border: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  border-radius: 0.7rem;\n  background: var(--dsh-panel-bg, var(--background, #fff));\n  color: var(--dsh-fg, var(--foreground, inherit));\n  box-shadow: 0 1rem 3rem color-mix(in srgb, #172033 35%, transparent);\n}\n.context-editor__dialog-header { display: flex; align-items: center; gap: 0.5rem; }\n.context-editor__dialog-header h2 { flex: 1; margin: 0; font-size: 1rem; }\n.context-editor__dialog-close { margin-left: auto; border: 0; background: transparent; color: inherit; font-size: 1.35rem; cursor: pointer; }\n.context-editor__dialog-input {\n  width: 100%;\n  min-height: 14rem;\n  resize: vertical;\n  box-sizing: border-box;\n  border: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  border-radius: 0.45rem;\n  padding: 0.65rem;\n  background: var(--dsh-input-bg, transparent);\n  color: inherit;\n  font: inherit;\n  line-height: 1.45;\n}\n.context-editor__dialog-hint { color: var(--dsh-muted, #687386); font-size: 0.75rem; }\n.context-editor__dialog-error { color: var(--dsh-danger, #b42318); font-size: 0.82rem; }\n.context-editor__dialog-actions { display: flex; justify-content: flex-end; gap: 0.45rem; }\n.context-editor__dialog-actions button { border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; background: var(--dsh-control-bg, var(--background, transparent)); color: inherit; padding: 0.35rem 0.7rem; cursor: pointer; }\r\n\n@media (max-width: 42rem) {\n  .context-editor__searchbar input { flex-basis: 100%; min-width: 0; }\n  .context-editor__toggle { margin-left: 0; }\n  .context-editor__search-summary { flex: 1 1 100%; }\n}\n\r\n.context-editor__replacement-link { display: flex; align-items: flex-start; gap: 0.45rem; font-size: 0.85rem; }\r\n.context-editor__replacement-link-hint { color: var(--dsh-muted, #687386); font-size: 0.75rem; }\r\n.context-editor__replacement-impact { display: grid; gap: 0.3rem; padding: 0.6rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; font-size: 0.82rem; }\r\n.context-editor__replacement-impact.is-error { border-color: var(--dsh-danger, #b42318); }\r\n";
+    style.textContent = ".context-editor {\n  display: flex;\n  flex-direction: column;\n  gap: 0.65rem;\n  height: 100%;\n  min-height: 0;\n  padding: 0.85rem 1rem 1.25rem;\n  color: var(--dsh-fg, var(--foreground, inherit));\n}\n\n.context-editor__controls {\n  position: sticky;\n  top: 0;\n  z-index: 10;\n  display: grid;\n  gap: 0.55rem;\n  padding: 0.15rem 0 0.65rem;\n  background: var(--dsh-panel-bg, var(--background, var(--dsh-card-bg, #fff)));\n  border-bottom: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  box-shadow: 0 0.35rem 0.75rem color-mix(in srgb, var(--dsh-shadow, #172033) 12%, transparent);\n}\n\n.context-editor__toolbar,\n.context-editor__searchbar,\n.context-editor__actions {\n  display: flex;\n  align-items: center;\n  gap: 0.45rem;\n  flex-wrap: wrap;\n}\n\n.context-editor__filters { display: flex; align-items: flex-start; gap: 0.35rem; flex-wrap: wrap; }\n.context-editor__filter-group { display: inline-flex; align-items: flex-start; gap: 0.25rem; }\n.context-editor__subfilters { display: inline-flex; gap: 0.25rem; padding-top: 0.1rem; }\n.context-editor__filter,\n.context-editor__actions button,\n.context-editor__searchbar button,\n.context-editor__row button {\n  border: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  border-radius: 0.45rem;\n  background: var(--dsh-control-bg, var(--background, transparent));\n  color: inherit;\n  padding: 0.28rem 0.55rem;\n  cursor: pointer;\n}\n.context-editor__filter.is-active,\n.context-editor__filter.is-mixed { background: var(--dsh-accent-soft, #e8efff); border-color: var(--dsh-accent, #7190e8); }\n.context-editor__filter.is-mixed { background: linear-gradient(90deg, var(--dsh-accent-soft, #e8efff) 50%, var(--dsh-control-bg, var(--background, transparent)) 50%); }\n.context-editor button:disabled { cursor: not-allowed; opacity: 0.45; }\n.context-editor__toggle { display: inline-flex; align-items: center; gap: 0.3rem; margin-left: auto; }\n.context-editor__searchbar input { flex: 1 1 20rem; min-width: 12rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.38rem 0.55rem; background: var(--dsh-input-bg, transparent); color: inherit; }\n.context-editor__search-summary { color: var(--dsh-muted, #687386); font-size: 0.82rem; }\n.context-editor__actions { padding-bottom: 0.15rem; }\n.context-editor__running { color: var(--dsh-muted, #687386); font-size: 0.82rem; }\n.context-editor__error { color: var(--dsh-danger, #b42318); font-size: 0.82rem; }\n.context-editor__list { overflow: visible; min-height: 0; display: flex; flex-direction: column; gap: 0.5rem; padding-right: 0.2rem; }\n.context-editor__row { display: flex; align-items: flex-start; gap: 0.6rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.55rem; padding: 0.65rem; background: var(--dsh-card-bg, transparent); }\n.context-editor__row.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }\n.context-editor__row.is-hidden { opacity: 0.82; }\n.context-editor__row--placeholder { align-items: center; min-height: 2.4rem; border-style: dashed; }\n.context-editor__row--placeholder input { margin-top: 0.2rem; }\n.context-editor__placeholder-text { flex: 1; color: var(--dsh-muted, #687386); font-size: 0.9rem; }\n.context-editor__row-content { flex: 1; min-width: 0; }\n.context-editor__row-meta { display: flex; align-items: center; gap: 0.45rem; color: var(--dsh-muted, #687386); font-size: 0.75rem; margin-bottom: 0.35rem; }\n.context-editor__kind { font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }\n.context-editor__hidden-badge { color: var(--dsh-warning, #996b00); }\n.context-editor__context-badge { color: var(--dsh-accent, #4568c4); font-weight: 600; }\n.context-editor__context-badge.is-unavailable { color: var(--dsh-muted, #687386); }\n.context-editor__replacement-badge { color: var(--dsh-accent, #4568c4); font-weight: 600; }\n.context-editor__replacement-reason { color: var(--dsh-muted, #687386); font-size: 0.75rem; }\n.context-editor__replacement-actions { display: inline-flex; align-items: center; gap: 0.3rem; flex-wrap: wrap; }\n.context-editor__unit.is-context-excluded { border-color: color-mix(in srgb, var(--dsh-accent, #7190e8) 55%, var(--dsh-border, #d7dbe2)); }\n.context-editor__context-toggle { margin-left: auto; }\n.context-editor__units { display: grid; gap: 0.45rem; }\n.context-editor__unit { border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.45rem 0.55rem; }\n.context-editor__unit.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }\n.context-editor__unit.is-hidden { opacity: 0.82; }\n.context-editor__unit-header { display: flex; align-items: center; gap: 0.45rem; min-height: 1.65rem; color: var(--dsh-muted, #687386); font-size: 0.78rem; }\n.context-editor__unit-select { display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer; }\n.context-editor__unit-kind { font-weight: 600; }\n.context-editor__unit-header button { margin-left: auto; }\n.context-editor__unit-header .context-editor__replacement-actions button { margin-left: 0; }\n.context-editor__unit-body { min-width: 0; }\n.context-editor__unit-placeholder { color: var(--dsh-muted, #687386); padding: 0.35rem 0; font-size: 0.9rem; }\n.context-editor__record-body { display: grid; gap: 0.25rem; }\n.context-editor__atom { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }\n.context-editor__atom--reasoning { color: var(--dsh-muted, #687386); }\n.context-editor__tool-name { font-weight: 600; }\n.context-editor__hit { border-radius: 0.18rem; background: var(--dsh-highlight, #ffe28a); color: inherit; padding: 0 0.08rem; }\n.context-editor__state { color: var(--dsh-muted, #687386); padding: 2rem 0; text-align: center; }\n.context-editor__empty { color: var(--dsh-muted, #687386); }\n.context-editor__notice { color: var(--dsh-warning, #996b00); font-size: 0.82rem; }\n.context-editor__dialog-backdrop {\n  position: fixed;\n  inset: 0;\n  z-index: 100;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  padding: 1rem;\n  background: color-mix(in srgb, #0b1220 48%, transparent);\n}\n.context-editor__dialog {\n  width: min(48rem, 100%);\n  max-height: min(42rem, 100%);\n  display: grid;\n  gap: 0.75rem;\n  padding: 1rem;\n  border: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  border-radius: 0.7rem;\n  background: var(--dsh-panel-bg, var(--background, #fff));\n  color: var(--dsh-fg, var(--foreground, inherit));\n  box-shadow: 0 1rem 3rem color-mix(in srgb, #172033 35%, transparent);\n}\n.context-editor__dialog-header { display: flex; align-items: center; gap: 0.5rem; }\n.context-editor__dialog-header h2 { flex: 1; margin: 0; font-size: 1rem; }\n.context-editor__dialog-close { margin-left: auto; border: 0; background: transparent; color: inherit; font-size: 1.35rem; cursor: pointer; }\n.context-editor__dialog-input {\n  width: 100%;\n  min-height: 14rem;\n  resize: vertical;\n  box-sizing: border-box;\n  border: 1px solid var(--dsh-border, var(--border, #d7dbe2));\n  border-radius: 0.45rem;\n  padding: 0.65rem;\n  background: var(--dsh-input-bg, transparent);\n  color: inherit;\n  font: inherit;\n  line-height: 1.45;\n}\n.context-editor__dialog-hint { color: var(--dsh-muted, #687386); font-size: 0.75rem; }\n.context-editor__dialog-error { color: var(--dsh-danger, #b42318); font-size: 0.82rem; }\n.context-editor__dialog-actions { display: flex; justify-content: flex-end; gap: 0.45rem; }\n.context-editor__dialog-actions button { border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; background: var(--dsh-control-bg, var(--background, transparent)); color: inherit; padding: 0.35rem 0.7rem; cursor: pointer; }\n.context-editor__condensation-action { border-color: var(--dsh-accent, #7190e8) !important; }\n.context-editor__condensation-model { display: inline-flex; align-items: center; gap: 0.3rem; color: var(--dsh-muted, #687386); font-size: 0.78rem; }\n.context-editor__condensation-model select { max-width: 14rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.4rem; background: var(--dsh-control-bg, var(--background, transparent)); color: inherit; padding: 0.25rem 0.4rem; }\n.context-editor__condensation-list { display: grid; gap: 0.5rem; }\n.context-editor__condensation-card { display: grid; gap: 0.45rem; padding: 0.65rem; border: 1px solid var(--dsh-accent, #7190e8); border-radius: 0.55rem; background: var(--dsh-accent-soft, #e8efff); }\n.context-editor__condensation-card-header { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; font-size: 0.82rem; }\n.context-editor__condensation-card-header span { color: var(--dsh-muted, #687386); }\n.context-editor__condensation-card-header button { margin-left: auto; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; background: var(--dsh-control-bg, var(--background, transparent)); color: inherit; padding: 0.25rem 0.5rem; cursor: pointer; }\n.context-editor__condensation-summary { margin: 0; max-height: 10rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.4; }\n.context-editor__condensation-card-metrics,\n.context-editor__condensation-meta,\n.context-editor__condensation-metrics,\n.context-editor__condensation-risks { display: flex; gap: 0.65rem; flex-wrap: wrap; color: var(--dsh-muted, #687386); font-size: 0.8rem; }\n.context-editor__condensation-risks { color: var(--dsh-warning, #996b00); }\n.context-editor__condensation-source { border-top: 1px solid var(--dsh-border, var(--border, #d7dbe2)); padding-top: 0.4rem; }\n.context-editor__condensation-source article { margin-top: 0.45rem; }\n.context-editor__condensation-source pre { margin: 0.25rem 0 0; max-height: 8rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }\n\n@media (max-width: 42rem) {\n  .context-editor__searchbar input { flex-basis: 100%; min-width: 0; }\n  .context-editor__toggle { margin-left: 0; }\n  .context-editor__search-summary { flex: 1 1 100%; }\n}\n\r\n.context-editor__replacement-link { display: flex; align-items: flex-start; gap: 0.45rem; font-size: 0.85rem; }\r\n.context-editor__replacement-link-hint { color: var(--dsh-muted, #687386); font-size: 0.75rem; }\r\n.context-editor__replacement-impact { display: grid; gap: 0.3rem; padding: 0.6rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; font-size: 0.82rem; }\r\n.context-editor__replacement-impact.is-error { border-color: var(--dsh-danger, #b42318); }\r\n";
     document.head.appendChild(style);
     //#endregion
     //#region adapters/deepseek-harness/client.js
@@ -2216,6 +2243,7 @@ window.__ModuleLoader__.load({
     const h = react.default.createElement;
     const ALL_KINDS = CLIENT_KINDS;
     const ALL_UNIT_KINDS = CLIENT_UNIT_KINDS;
+    const condensationModelKey = (model) => `${model?.provider ?? ""}:${model?.id ?? ""}`;
     const PREFS_KEY_V1 = "dsh-context-editor:prefs:v1";
     const PREFS_KEY_V2 = "dsh-context-editor:prefs:v2";
     function unwrap(value) {
@@ -2438,19 +2466,58 @@ window.__ModuleLoader__.load({
     	async undo(baseRevision) {
     		return this.call("undoView", { baseRevision });
     	}
-    	async previewContext(action, expectedRevision, unitIds) {
+    	async previewContext(action, expectedRevision, unitIds, options = {}) {
     		return this.call("previewContext", {
     			action,
     			expectedRevision,
-    			...unitIds === void 0 ? {} : { unitIds }
+    			...unitIds === void 0 ? {} : { unitIds },
+    			...options.condensationOperationId ? { condensationOperationId: options.condensationOperationId } : {}
     		});
     	}
-    	async commitContext(operationId, action, expectedRevision, unitIds) {
+    	async commitContext(operationId, action, expectedRevision, unitIds, options = {}) {
     		return this.call("commitContext", {
     			operationId,
     			action,
     			expectedRevision,
-    			...unitIds === void 0 ? {} : { unitIds }
+    			...unitIds === void 0 ? {} : { unitIds },
+    			...options.condensationOperationId ? { condensationOperationId: options.condensationOperationId } : {}
+    		});
+    	}
+    	async listCondensationModels() {
+    		return this.call("previewContext", { action: "condense-models" });
+    	}
+    	async generateCondensation(unitIds, baseRevision, options = {}) {
+    		return this.call("previewContext", {
+    			action: "condense",
+    			unitIds,
+    			baseRevision,
+    			...options.operationId ? { operationId: options.operationId } : {},
+    			...options.provider ? { provider: options.provider } : {},
+    			...options.model ? { model: options.model } : {},
+    			expandRelated: options.expandRelated === true,
+    			...options.maxTokens ? { maxTokens: options.maxTokens } : {}
+    		});
+    	}
+    	async cancelCondensation(operationId) {
+    		return this.call("previewContext", {
+    			action: "cancel-condense",
+    			operationId
+    		});
+    	}
+    	async commitCondensation(proposal, summary) {
+    		return this.call("commitContext", {
+    			action: "condense",
+    			operationId: proposal.operationId,
+    			baseRevision: proposal.baseRevision,
+    			unitIds: proposal.requestedUnitIds,
+    			summary
+    		});
+    	}
+    	async restoreCondensation(operationId, baseRevision) {
+    		return this.call("commitContext", {
+    			action: "restore-condensation",
+    			operationId,
+    			baseRevision
     		});
     	}
     	replacementOperationId(action, unitId) {
@@ -2627,6 +2694,91 @@ window.__ModuleLoader__.load({
     		onClick: () => void submit(impact?.effectiveUnitIds)
     	}, saving ? text.loading : impact?.requiresConfirmation ? text.replacementImpactConfirm : text.save))));
     }
+    function CondensationDialog({ proposal, text, onCancel, onRegenerate, onApply, saving, error }) {
+    	const [value, setValue] = (0, react.useState)(String(proposal?.summary ?? ""));
+    	const [expandRelated, setExpandRelated] = (0, react.useState)(proposal?.expandRelated === true);
+    	const scopeChanged = expandRelated !== (proposal?.expandRelated === true);
+    	const needsGeneration = proposal?.draft === true || scopeChanged;
+    	const textarea = (0, react.useRef)(null);
+    	(0, react.useEffect)(() => {
+    		setValue(String(proposal?.summary ?? ""));
+    		setExpandRelated(proposal?.expandRelated === true);
+    		const timer = globalThis.setTimeout?.(() => textarea.current?.focus?.(), 0);
+    		return () => {
+    			if (timer !== void 0) globalThis.clearTimeout?.(timer);
+    		};
+    	}, [proposal?.operationId]);
+    	const metrics = proposal?.metrics ?? {};
+    	const risks = Array.isArray(proposal?.risks) ? proposal.risks : [];
+    	const warnings = Array.isArray(proposal?.warnings) ? proposal.warnings : [];
+    	const editedAfter = Math.ceil(`<condensed-context>\n${value.trim()}\n</condensed-context>`.length / 4);
+    	const editedSaved = (Number(metrics.beforeTokens) || 0) - editedAfter;
+    	const editedRatio = Number(metrics.beforeTokens) > 0 ? editedSaved / Number(metrics.beforeTokens) : 0;
+    	const editedRisks = Array.from(/* @__PURE__ */ new Set([
+    		...risks,
+    		...editedRatio < .4 ? ["savings-below-40-percent"] : [],
+    		...editedSaved < 500 ? ["savings-below-500-tokens"] : []
+    	]));
+    	const submit = () => {
+    		if (saving || needsGeneration || !value.trim()) return;
+    		onApply(value);
+    	};
+    	const onKeyDown = (event) => {
+    		if (event.key === "Escape" && !saving) {
+    			event.preventDefault();
+    			onCancel();
+    			return;
+    		}
+    		if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+    			event.preventDefault();
+    			submit();
+    		}
+    	};
+    	return h("div", { className: "context-editor__dialog-backdrop" }, h("div", {
+    		className: "context-editor__dialog context-editor__condensation-dialog",
+    		role: "dialog",
+    		"aria-modal": "true",
+    		"aria-label": text.condensationTitle,
+    		onKeyDown
+    	}, h("div", { className: "context-editor__dialog-header" }, h("h2", null, text.condensationTitle), h("button", {
+    		type: "button",
+    		className: "context-editor__dialog-close",
+    		disabled: saving,
+    		onClick: onCancel,
+    		"aria-label": text.cancel
+    	}, "×")), h("label", { className: "context-editor__replacement-link-option" }, h("input", {
+    		type: "checkbox",
+    		checked: expandRelated,
+    		disabled: saving || proposal?.canExpandRelated !== true,
+    		onChange: (event) => setExpandRelated(event.target.checked)
+    	}), h("span", { style: proposal?.canExpandRelated === true ? void 0 : { opacity: .45 } }, text.condensationExpandRelated)), !needsGeneration ? h("div", { className: "context-editor__condensation-meta" }, h("span", null, text.condensationSource(proposal?.effectiveUnitIds?.length ?? 0, 0)), h("span", null, text.condensationFirstChange(proposal?.sourceRootSeqs?.[0] ?? "—")), h("span", null, text.condensationModel(proposal?.provider, proposal?.model))) : null, !needsGeneration ? h("div", {
+    		className: "context-editor__condensation-metrics",
+    		role: "status"
+    	}, h("span", null, text.condensationBefore(metrics.beforeTokens)), h("span", null, text.condensationAfter(editedAfter)), h("span", null, text.condensationPrefix(proposal?.prefixTokens)), h("strong", null, text.condensationSaved(editedSaved, editedRatio))) : null, !needsGeneration && (editedRatio < .4 || editedSaved < 500) ? h("div", { className: "context-editor__condensation-risks" }, text.condensationLowSaving) : null, !needsGeneration && warnings.includes("prefix-not-reused") ? h("div", { className: "context-editor__condensation-risks" }, text.condensationPrefixNotReused) : null, !needsGeneration && editedRisks.length ? h("div", { className: "context-editor__condensation-risks" }, text.condensationRisks(editedRisks.join(", "))) : null, !needsGeneration ? h("details", { className: "context-editor__condensation-source" }, h("summary", null, text.condensationOriginal), h("div", null, (proposal?.sourceUnits ?? []).filter((source) => source.included).map((source) => h("article", { key: source.id }, h("strong", null, `${source.kind} · ${source.id}`), h("pre", null, source.text))))) : null, !needsGeneration ? h("textarea", {
+    		ref: textarea,
+    		className: "context-editor__dialog-input",
+    		value,
+    		onChange: (event) => setValue(event.target.value),
+    		spellCheck: false,
+    		disabled: saving,
+    		"aria-label": text.condensationSummary
+    	}) : null, h("div", { className: "context-editor__dialog-hint" }, text.condensationHint), error ? h("div", {
+    		className: "context-editor__dialog-error",
+    		role: "alert"
+    	}, error) : null, h("div", { className: "context-editor__dialog-actions" }, h("button", {
+    		type: "button",
+    		disabled: saving,
+    		onClick: onCancel
+    	}, text.cancel), h("button", {
+    		type: "button",
+    		disabled: saving,
+    		onClick: () => onRegenerate(expandRelated)
+    	}, needsGeneration ? text.generateCondensation : text.regenerateCondensation), h("button", {
+    		type: "button",
+    		disabled: saving || needsGeneration || !value.trim(),
+    		onClick: submit
+    	}, saving ? text.loading : text.applyCondensation))));
+    }
     function UnitSection({ unit, selected, onSelect, focused, showHidden, showOriginal, match, disabled, onRestore, onContextToggle, onEdit, onRestoreReplacement, onUndoReplacement, onCompareOriginal, replacementAvailable, registerNode, text }) {
     	const hidden = unit.viewState === "hide" || unit.viewState === "mixed";
     	const mixed = unit.viewState === "mixed";
@@ -2686,7 +2838,7 @@ window.__ModuleLoader__.load({
     		onClick: onContextToggle
     	}, contextExcluded ? text.restoreContext : text.excludeContext)), h("div", { className: "context-editor__unit-body" }, body));
     }
-    function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, showOriginalUnitId, match, disabled, onRestore, onContextToggle, onEdit, onRestoreReplacement, onUndoReplacement, onCompareOriginal, replacementAvailable, registerNode, text }) {
+    function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, showOriginalUnitId, match, disabled, disabledUnitIds, onRestore, onContextToggle, onEdit, onRestoreReplacement, onUndoReplacement, onCompareOriginal, replacementAvailable, registerNode, text }) {
     	const units = unitsForRecord(record);
     	const focused = units.some((unit) => unit.id === focusedUnitId);
     	return h("article", {
@@ -2701,7 +2853,7 @@ window.__ModuleLoader__.load({
     		showHidden,
     		showOriginal: showOriginalUnitId === unit.id,
     		match: focusedUnitId === unit.id ? match : null,
-    		disabled,
+    		disabled: disabled || disabledUnitIds?.has(unit.id),
     		onRestore: () => onRestore(unit.id),
     		onContextToggle: () => onContextToggle(unit),
     		onEdit: () => onEdit(unit),
@@ -2735,6 +2887,12 @@ window.__ModuleLoader__.load({
     	const [contextMutating, setContextMutating] = (0, react.useState)(false);
     	const [editing, setEditing] = (0, react.useState)(null);
     	const [comparisonUnitId, setComparisonUnitId] = (0, react.useState)(null);
+    	const [condensation, setCondensation] = (0, react.useState)(null);
+    	const [condensationLoading, setCondensationLoading] = (0, react.useState)(false);
+    	const [condensationError, setCondensationError] = (0, react.useState)("");
+    	const [condensationModels, setCondensationModels] = (0, react.useState)([]);
+    	const [condensationModel, setCondensationModel] = (0, react.useState)("");
+    	const [condensationOperationId, setCondensationOperationId] = (0, react.useState)("");
     	const [notice, setNotice] = (0, react.useState)("");
     	const lastSelectedIndex = (0, react.useRef)(null);
     	const loadSequence = (0, react.useRef)(0);
@@ -2754,6 +2912,12 @@ window.__ModuleLoader__.load({
     		setSearchIndex(0);
     		setEditing(null);
     		setComparisonUnitId(null);
+    		setCondensation(null);
+    		setCondensationLoading(false);
+    		setCondensationError("");
+    		setCondensationModels([]);
+    		setCondensationModel("");
+    		setCondensationOperationId("");
     		setNotice("");
     	}, [sessionId]);
     	const registerUnitNode = (0, react.useCallback)((unitId, node) => {
@@ -2763,27 +2927,45 @@ window.__ModuleLoader__.load({
     	const enabledRecordKinds = (0, react.useMemo)(() => enabledRecordKindsForUnits(prefs.enabledUnitKinds), [prefs.enabledUnitKinds]);
     	const visibleRecords = (0, react.useMemo)(() => {
     		const records = [];
+    		const summaries = loaded.snapshot?.condensations ?? [];
+    		const covered = new Set(summaries.flatMap((item) => item.effectiveUnitIds ?? []));
+    		const inserted = /* @__PURE__ */ new Set();
     		for (const record of loaded.records) {
-    			if (!enabledRecordKinds.includes(record.kind)) continue;
     			const units = unitsForRecord(record);
-    			const visibleUnitsForRecord = record.kind === "ai" ? units.filter((unit) => prefs.enabledUnitKinds.includes(unit.kind)) : units;
-    			if (visibleUnitsForRecord.length === 0) continue;
-    			records.push(visibleUnitsForRecord.length === units.length ? record : {
+    			for (const item of summaries) if (!inserted.has(item.operationId) && units.some((unit) => item.effectiveUnitIds?.includes(unit.id))) {
+    				records.push({
+    					id: "condensation-" + item.operationId,
+    					condensation: item,
+    					units: []
+    				});
+    				inserted.add(item.operationId);
+    			}
+    			if (!enabledRecordKinds.includes(record.kind)) continue;
+    			const remaining = units.filter((unit) => !covered.has(unit.id) && (record.kind !== "ai" || prefs.enabledUnitKinds.includes(unit.kind)));
+    			if (remaining.length) records.push(remaining.length === units.length ? record : {
     				...record,
-    				units: visibleUnitsForRecord
+    				units: remaining
     			});
     		}
+    		for (const item of summaries) if (!inserted.has(item.operationId)) records.push({
+    			id: "condensation-" + item.operationId,
+    			condensation: item,
+    			units: []
+    		});
     		return records;
     	}, [
     		enabledRecordKinds,
     		loaded.records,
+    		loaded.snapshot?.condensations,
     		prefs.enabledUnitKinds
     	]);
-    	const visibleUnits = (0, react.useMemo)(() => visibleRecords.flatMap((record) => unitsForRecord(record)), [visibleRecords]);
+    	const visibleUnits = (0, react.useMemo)(() => visibleRecords.filter((record) => !record.condensation).flatMap((record) => unitsForRecord(record)), [visibleRecords]);
     	const selectedCount = selected.size;
-    	const readOnly = running || loaded.status === "loading" || loaded.status === "refreshing" || contextMutating;
+    	const readOnly = running || loaded.status === "loading" || loaded.status === "refreshing" || contextMutating || condensationLoading;
     	const contextAvailable = loaded.snapshot?.capabilities?.contextExclusion === true;
     	const replacementAvailable = loaded.snapshot?.capabilities?.contextReplacement === true;
+    	const condensationAvailable = loaded.snapshot?.capabilities?.contextCondensation === true;
+    	const condensedUnitIds = (0, react.useMemo)(() => new Set((loaded.snapshot?.condensations ?? []).flatMap((item) => item.effectiveUnitIds ?? [])), [loaded.snapshot?.condensations]);
     	const refresh = (0, react.useCallback)(async (preserveSelection = false) => {
     		const ticket = ++loadSequence.current;
     		setLoaded((current) => ({
@@ -2817,6 +2999,25 @@ window.__ModuleLoader__.load({
     	(0, react.useEffect)(() => {
     		if (!running) refresh();
     	}, [running, refresh]);
+    	(0, react.useEffect)(() => {
+    		if (!condensationAvailable) return void 0;
+    		let cancelled = false;
+    		controller.listCondensationModels().then((value) => {
+    			if (cancelled) return;
+    			const models = Array.isArray(value?.models) ? value.models : [];
+    			setCondensationModels(models);
+    			setCondensationModel((current) => current || condensationModelKey(models[0]));
+    		}).catch(() => {
+    			if (!cancelled) setCondensationModels([]);
+    		});
+    		return () => {
+    			cancelled = true;
+    		};
+    	}, [
+    		controller,
+    		condensationAvailable,
+    		sessionId
+    	]);
     	(0, react.useEffect)(() => {
     		const visibleIds = new Set(visibleUnits.map((unit) => unit.id));
     		setSelected((current) => {
@@ -3006,11 +3207,11 @@ window.__ModuleLoader__.load({
     			}));
     		}
     	};
-    	const mutateContext = async (action, unitIds) => {
+    	const mutateContext = async (action, unitIds, options = {}) => {
     		if (readOnly || !contextAvailable || loaded.snapshot === null) return;
     		setContextMutating(true);
     		try {
-    			const preview = await controller.previewContext(action, loaded.snapshot.revision, unitIds);
+    			const preview = await controller.previewContext(action, loaded.snapshot.revision, unitIds, options);
     			if (preview?.conflict) {
     				await refresh();
     				return;
@@ -3025,7 +3226,7 @@ window.__ModuleLoader__.load({
     				confirmed = true;
     			}
     			if (!confirmed) return;
-    			if ((await controller.commitContext(preview.operationId, action, preview.expectedRevision ?? loaded.snapshot.revision, unitIds))?.conflict) {
+    			if ((await controller.commitContext(preview.operationId, action, preview.expectedRevision ?? loaded.snapshot.revision, unitIds, options))?.conflict) {
     				await refresh();
     				return;
     			}
@@ -3039,6 +3240,116 @@ window.__ModuleLoader__.load({
     		} finally {
     			setContextMutating(false);
     		}
+    	};
+    	const openCondensation = () => {
+    		const unit = selectedCount === 1 ? visibleUnits.find((item) => selected.has(item.id)) : void 0;
+    		setCondensationError("");
+    		setCondensation({
+    			draft: true,
+    			operationId: "draft-" + Date.now(),
+    			canExpandRelated: unit?.kind === "answer",
+    			expandRelated: false,
+    			summary: ""
+    		});
+    	};
+    	const startCondensation = async (expandRelated = false) => {
+    		if (readOnly || !condensationAvailable || selectedCount === 0 || loaded.snapshot === null) return;
+    		setCondensationLoading(true);
+    		setCondensationError("");
+    		const operationId = `condensation-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    		setCondensationOperationId(operationId);
+    		try {
+    			const selectedModel = condensationModels.find((value) => condensationModelKey(value) === condensationModel);
+    			const proposal = await controller.generateCondensation([...selected], loaded.snapshot.revision, {
+    				operationId,
+    				expandRelated,
+    				...selectedModel?.provider ? { provider: selectedModel.provider } : {},
+    				...selectedModel?.id ? { model: selectedModel.id } : {}
+    			});
+    			if (proposal?.conflict) {
+    				setCondensationOperationId("");
+    				await refresh(true);
+    				return;
+    			}
+    			setCondensation(proposal);
+    			setCondensationOperationId(String(proposal?.operationId ?? operationId));
+    		} catch (error) {
+    			setCondensationOperationId("");
+    			if (!String(error?.message ?? error).includes("CANCELLED")) setCondensationError(text.condensationFailed(errorText(error)));
+    		} finally {
+    			setCondensationLoading(false);
+    		}
+    	};
+    	const cancelCondensation = async () => {
+    		if (!condensationOperationId) return;
+    		try {
+    			await controller.cancelCondensation(condensationOperationId);
+    		} catch {}
+    	};
+    	const applyCondensation = async (summary) => {
+    		if (!condensation || loaded.snapshot === null) return;
+    		setCondensationLoading(true);
+    		setCondensationError("");
+    		try {
+    			if ((await controller.commitCondensation(condensation, summary))?.conflict) {
+    				setCondensation(null);
+    				setCondensationOperationId("");
+    				await refresh(true);
+    				return;
+    			}
+    			setCondensation(null);
+    			setCondensationOperationId("");
+    			setSelected(/* @__PURE__ */ new Set());
+    			await refresh();
+    		} catch (error) {
+    			setCondensationError(text.condensationFailed(errorText(error)));
+    		} finally {
+    			setCondensationLoading(false);
+    		}
+    	};
+    	const discardCondensation = async () => {
+    		const operationId = condensationOperationId || condensation?.operationId;
+    		if (operationId) try {
+    			await controller.cancelCondensation(operationId);
+    		} catch {}
+    		setCondensation(null);
+    		setCondensationOperationId("");
+    		setCondensationError("");
+    	};
+    	const regenerateCondensation = async (expandRelated = false) => {
+    		const old = condensationOperationId;
+    		if (old) try {
+    			await controller.cancelCondensation(old);
+    		} catch {}
+    		setCondensation((current) => ({
+    			...current,
+    			draft: true,
+    			expandRelated
+    		}));
+    		await startCondensation(expandRelated);
+    	};
+    	const restoreCondensation = async (operationId) => {
+    		if (readOnly || loaded.snapshot === null) return;
+    		setContextMutating(true);
+    		setCondensationError("");
+    		try {
+    			if ((await controller.restoreCondensation(operationId, loaded.snapshot.revision))?.conflict) {
+    				await refresh(true);
+    				return;
+    			}
+    			await refresh(true);
+    		} catch (error) {
+    			setCondensationError(text.condensationFailed(errorText(error)));
+    		} finally {
+    			setContextMutating(false);
+    		}
+    	};
+    	const toggleCondensationContext = async (item) => {
+    		if (readOnly || loaded.snapshot === null) return;
+    		const summaryUnitId = (item.sourceUnits ?? []).find((source) => source.included !== false)?.id;
+    		if (!summaryUnitId) return;
+    		const action = item.contextExcluded === true ? "restore" : "exclude";
+    		await mutateContext(action, [summaryUnitId], { condensationOperationId: item.operationId });
     	};
     	const closeReplacementDialog = () => {
     		const target = editFocus.current;
@@ -3166,6 +3477,19 @@ window.__ModuleLoader__.load({
     	};
     	const matchUnitId = match?.unitId;
     	const aiState = aiFilterState(prefs.enabledUnitKinds);
+    	const renderCondensation = (item) => h("article", {
+    		key: item.operationId,
+    		className: "context-editor__condensation-card",
+    		"data-condensation-operation-id": item.operationId
+    	}, h("div", { className: "context-editor__condensation-card-header" }, h("strong", null, text.activeCondensation), h("span", null, text.condensationModel(item.provider, item.model)), h("button", {
+    		type: "button",
+    		disabled: readOnly,
+    		onClick: () => void toggleCondensationContext(item)
+    	}, item.contextExcluded === true ? text.restoreContext : text.excludeContext), h("button", {
+    		type: "button",
+    		disabled: readOnly,
+    		onClick: () => void restoreCondensation(item.operationId)
+    	}, text.restoreCondensation)), h("pre", { className: "context-editor__condensation-summary" }, item.summary), h("div", { className: "context-editor__condensation-card-metrics" }, h("span", null, text.condensationBefore(item.metrics?.beforeTokens)), " → ", h("span", null, text.condensationAfter(item.metrics?.afterTokens)), h("strong", null, " · " + text.condensationSaved(item.metrics?.savedTokens, item.metrics?.savingsRatio))), item.metrics?.belowRecommendedThreshold ? h("div", { className: "context-editor__condensation-risks" }, text.condensationLowSaving) : null, h("details", { className: "context-editor__condensation-source" }, h("summary", null, text.condensationOriginal), h("div", null, (item.sourceUnits ?? []).filter((source) => source.included).map((source) => h("article", { key: source.id }, h("strong", null, `${source.kind} · ${source.id}`), h("pre", null, source.text))))));
     	return h("section", {
     		className: "context-editor",
     		"aria-label": "Context Editor"
@@ -3246,14 +3570,33 @@ window.__ModuleLoader__.load({
     		type: "button",
     		disabled: readOnly || !contextAvailable || selectedCount === 0,
     		onClick: () => void mutateContext("restore", [...selected])
-    	}, text.restoreContextSelected), h("button", {
+    	}, text.restoreContextSelected), condensationModels.length > 0 ? h("label", { className: "context-editor__condensation-model" }, h("span", null, text.condensationModelPicker), h("select", {
+    		value: condensationModel,
+    		disabled: readOnly,
+    		onChange: (event) => setCondensationModel(event.target.value),
+    		"aria-label": text.condensationModelPicker
+    	}, condensationModels.map((model) => h("option", {
+    		key: condensationModelKey(model),
+    		value: condensationModelKey(model)
+    	}, `${model.name ?? model.id}`)))) : null, h("button", {
+    		type: "button",
+    		className: "context-editor__condensation-action",
+    		disabled: readOnly || !condensationAvailable || selectedCount === 0,
+    		onClick: openCondensation
+    	}, condensationLoading ? text.condensationGenerating : text.condenseSelected(selectedCount)), condensationLoading && condensationOperationId ? h("button", {
+    		type: "button",
+    		onClick: () => void cancelCondensation()
+    	}, text.cancelCondensation) : null, h("button", {
     		type: "button",
     		disabled: readOnly || !loaded.snapshot?.canUndo,
     		onClick: () => void undo()
     	}, text.undo), running ? h("span", { className: "context-editor__running" }, text.running) : null, loaded.status === "error" ? h("span", { className: "context-editor__error" }, errorText(loaded.error)) : null, notice ? h("span", {
     		className: "context-editor__notice",
     		role: "status"
-    	}, notice) : null)), h("div", { className: "context-editor__list" }, visibleRecords.map((record) => h(RecordRow, {
+    	}, notice) : null, condensationError ? h("span", {
+    		className: "context-editor__error",
+    		role: "alert"
+    	}, condensationError) : null)), h("div", { className: "context-editor__list" }, visibleRecords.map((record) => record.condensation ? renderCondensation(record.condensation) : h(RecordRow, {
     		key: record.id,
     		record,
     		selected,
@@ -3263,6 +3606,7 @@ window.__ModuleLoader__.load({
     		showOriginalUnitId: comparisonUnitId,
     		match: matchUnitId === match?.unitId ? match : null,
     		disabled: readOnly,
+    		disabledUnitIds: condensedUnitIds,
     		onRestore: (unitId) => void mutate("restore", [unitId]),
     		onContextToggle: (unit) => void mutateContext(unit.projectionState === "exclude" || unit.projectionState === "mixed" ? "restore" : "exclude", [unit.id]),
     		onEdit: openReplacementEdit,
@@ -3278,6 +3622,18 @@ window.__ModuleLoader__.load({
     		text,
     		onCancel: closeReplacementDialog,
     		onSave: saveReplacement
+    	}) : null, condensation ? h(CondensationDialog, {
+    		proposal: condensation,
+    		text,
+    		saving: condensationLoading,
+    		error: condensationError,
+    		onCancel: () => {
+    			if (!condensationLoading) discardCondensation();
+    		},
+    		onRegenerate: (expandRelated) => {
+    			if (!condensationLoading) regenerateCondensation(expandRelated);
+    		},
+    		onApply: applyCondensation
     	}) : null);
     }
     async function apply(ctx) {

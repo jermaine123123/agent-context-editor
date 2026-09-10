@@ -1,4 +1,4 @@
-import type { AtomKind, ViewState } from "./types.js";
+﻿import type { AtomKind, ViewState } from "./types.js";
 
 type PiSearchScope = "dialogue" | "all";
 
@@ -103,6 +103,34 @@ export interface PiText {
   replacementRestoreTitle(): string;
   replacementRestoreMessage(): string;
   replacementEmpty(): string;
+  condensationBusy(): string;
+  condensationNoSelection(): string;
+  condensationSetupTitle(): string;
+  condensationSetup(count: number, canExpand: boolean, enabled: boolean): string;
+  condensationExpandRelated(enabled: boolean): string;
+  condensationExpandDisabled(): string;
+  condensationSetupHint(): string;
+  condensationCancelHint(): string;
+  condensationGenerating(): string;
+  condensationGenerationFailed(error: string): string;
+  condensationReviewTitle(): string;
+  condensationReviewHint(): string;
+  condensationSource(units: number, entries: number): string;
+  condensationModel(provider: string, model: string): string;
+  condensationMetrics(before: number, after: number, saved: number, ratio: number): string;
+  condensationRisks(risks: readonly string[]): string;
+  condensationWarnings(warnings: readonly string[]): string;
+  condensationSummaryTitle(): string;
+  condensationBlocked(reason: string): string;
+  condensationApplied(): string;
+  condensationRestored(): string;
+  condensationCardTitle(operationId: string, state: string): string;
+  condensationCardActive(): string;
+  condensationCardExcluded(): string;
+  condensationCardMetrics(saved: number, ratio: number): string;
+  condensationCovered(index: number): string;
+  condensationSourceList(index: number, count: number): string;
+  condensationCardSources(ids: readonly string[]): string;
 }
 
 function format(template: string, values: Record<string, string | number>): string {
@@ -223,13 +251,15 @@ export function createPiText(locale: PiLocale): PiText {
       if (mode === "search") return zh ? "\u8f93\u5165\u5173\u952e\u8bcd · Enter \u8df3\u8f6c · Esc \u7ed3\u675f\u641c\u7d22" : "Type a query · Enter jump · Esc finish search";
       if (mode === "results") return zh ? "n \u4e0b\u4e00\u4e2a\u547d\u4e2d，N \u4e0a\u4e00\u4e2a\u547d\u4e2d · s \u5207\u6362\u8303\u56f4 · / \u4fee\u6539\u641c\u7d22 · ? \u5e2e\u52a9 · q \u5173\u95ed" : "n next / N previous occurrence · s toggle scope · / edit search · ? help · q close";
       if (mode === "help") return zh ? "? Esc \u8fd4\u56de\u7f16\u8f91\u5668" : "? / Esc return to editor";
-      return zh ? "j/k · Enter 查看/收起 · e 编辑 · E 恢复原文 · z 撤销编辑 · o 对照原文 · h 隐藏 · r 恢复 · x 排除/恢复模型上下文 · / 搜索 · ? 帮助 · q 关闭" : "j/k move · Enter view/collapse · e edit · E restore original · z undo edit · o compare original · h hide · r restore · x exclude/restore model context · / search · ? help · q close";
+      return zh ? "Space 勾选/取消 · Shift+↑/↓ 连选 · c 精简 · ? 帮助 · j/k · Enter 查看/收起 · C 摘要排除/恢复 · D 恢复精简前内容 · O 展开来源 · e 编辑 · E 恢复原文 · z 撤销编辑 · o 对照原文 · h 隐藏 · r 恢复 · x 排除/恢复模型上下文 · / 搜索 · ? 帮助 · q 关闭" : "Space select/unselect · Shift+↑/↓ range · c condense · ? help · j/k move · Enter view/collapse · C exclude/restore summary · D restore pre-condensation · O expand sources · e edit · E restore original · z undo edit · o compare original · h hide · r restore · x exclude/restore model context · / search · ? help · q close";
     },
     tuiHelpTitle: () => zh ? "Context Editor \u5feb\u6377\u952e" : "Context Editor help",
     tuiHelpLines: () => zh
       ? [
         "Enter  \u4e34\u65f6\u5c55\u5f00/\u6536\u8d77\uff0c\u4e0d\u4fdd\u5b58",
-"e      编辑当前用户/回答单元（提交到 sidecar）",
+
+        "c      AI 精简选中内容；设置页 Space 选择关联思考/工具，Enter 生成；C/D/O 操作已应用摘要",
+        "e      编辑当前用户/回答单元（提交到 sidecar）",
 "E      确认恢复原文；z 撤销最近一次编辑；o 对照原文",
 "x      排除/恢复模型上下文；Enter/y 确认，Esc/n 取消，不修改 Session JSONL",
         "h      \u6301\u4e45\u9690\u85cf\uff1br      \u6062\u590d\u9690\u85cf\u5355\u5143",
@@ -243,7 +273,8 @@ export function createPiText(locale: PiLocale): PiText {
       ]
       : [
         "Enter  temporarily expand/collapse; does not persist",
-"e      edit the current User/Answer unit (sidecar only)",
+"c      AI condense the selection; Space enables related reasoning/tools for one Answer; C/D/O act on applied cards",
+        "e      edit the current User/Answer unit (sidecar only)",
 "E      restore canonical text; z undo the latest edit; o compare original",
 "x      exclude/restore model context; Enter/y confirm, Esc/n cancel; Session JSONL stays unchanged",
         "h      persistently hide; r      restore hidden",
@@ -280,5 +311,39 @@ export function createPiText(locale: PiLocale): PiText {
     replacementRestoreTitle: () => zh ? "恢复 Answer 原文？" : "Restore Answer canonical text?",
     replacementRestoreMessage: () => zh ? "仅恢复 Answer 原文；本轮 Reasoning 的排除状态会保留。" : "Only the Answer text is restored; Reasoning exclusion for this turn remains.",
     replacementEmpty: () => zh ? "替换文本不能为空白。" : "Replacement text cannot be blank.",
+    condensationBusy: () => zh ? "Agent 正在运行，暂时不能生成精简。" : "The Agent is running; condensation is temporarily unavailable.",
+    condensationNoSelection: () => zh ? "请先选择一个连续的上下文单元。" : "Select a contiguous context range first.",
+    condensationSetupTitle: () => zh ? "AI 精简设置" : "AI condensation settings",
+    condensationSetup: (count, canExpand, enabled) => zh
+      ? `已选择 ${count} 个单元。默认使用当前会话模型；${canExpand ? "可选同步关联的思考和工具输出。" : "当前选区不支持同步扩展。"}`
+      : `${count} unit(s) selected. The current session model will be used; ${canExpand ? "related reasoning and tool output can be included." : "related expansion is disabled for this selection."}`,
+    condensationExpandRelated: (enabled) => zh ? `同步精简 AI 思考和工具输出：[${enabled ? "x" : " "}]` : `Also condense related reasoning and tool output: [${enabled ? "x" : " "}]`,
+    condensationExpandDisabled: () => zh ? "同步精简选项：置灰（仅单条 Answer 可用）" : "Related condensation: disabled (only available for one Answer)",
+    condensationSetupHint: () => zh ? "Space 切换扩展 · Enter 生成/重试 · Esc 返回" : "Space toggle expansion · Enter generate/retry · Esc back",
+    condensationCancelHint: () => zh ? "正在生成；Esc 取消并丢弃迟到结果" : "Generating; Esc cancels and discards late results",
+    condensationGenerating: () => zh ? "正在生成精简候选…" : "Generating condensation candidate…",
+    condensationGenerationFailed: (error) => error.includes("CONTEXT_EDITOR_CONDENSATION_OVERLAP:")
+      ? (zh ? "选区已有生效的精简摘要。请按 Esc 返回列表，再按 D 恢复精简前内容后重试；C 仅排除摘要，不会解除精简。" : "This selection already has an active summary. Press Esc, then D to restore pre-condensation content before retrying. C only excludes the summary.")
+      : zh ? `精简生成失败：${error}` : `Condensation generation failed: ${error}`,
+    condensationReviewTitle: () => zh ? "预览 AI 精简" : "Preview AI condensation",
+    condensationReviewHint: () => zh ? "j/k、PgUp/PgDn 滚动 · e 编辑摘要 · r 重新生成 · Enter 应用 · Esc 取消" : "j/k, PgUp/PgDn scroll · e edit summary · r regenerate · Enter apply · Esc cancel",
+    condensationSource: (units, entries) => zh ? `来源：${units} 个单元，${entries} 条 Pi entry` : `Source: ${units} unit(s), ${entries} Pi entr(y/ies)`,
+    condensationModel: (provider, model) => zh ? `模型：${provider}/${model}` : `Model: ${provider}/${model}`,
+    condensationMetrics: (before, after, saved, ratio) => zh ? `估算 Token：${before} → ${after}，节省 ${saved}（${Math.round(ratio * 100)}%）` : `Estimated tokens: ${before} -> ${after}; saved ${saved} (${Math.round(ratio * 100)}%)`,
+    condensationRisks: (risks) => zh ? `风险：${risks.join("、")}` : `Risks: ${risks.join(", ")}`,
+    condensationWarnings: (warnings) => zh ? `提示：${warnings.join("、")}` : `Warnings: ${warnings.join(", ")}`,
+    condensationSummaryTitle: () => zh ? "摘要正文（应用前可编辑）" : "Summary (editable before apply)",
+    condensationBlocked: (reason) => zh ? `当前摘要不可应用：${reason}` : `This summary cannot be applied: ${reason}`,
+    condensationApplied: () => zh ? "已应用 AI 精简；原始 Session 未修改。" : "AI condensation applied; the original Session was unchanged.",
+    condensationRestored: () => zh ? "已恢复精简前内容。" : "Condensed content was restored.",
+    condensationCardTitle: (operationId, state) => zh ? `AI 精简 ${state} · ${operationId}` : `AI condensation ${state} · ${operationId}`,
+    condensationCardActive: () => zh ? "生效" : "active",
+    condensationCardExcluded: () => zh ? "摘要已排除" : "summary excluded",
+    condensationCardMetrics: (saved, ratio) => zh ? `预计节省 ${saved} tokens（${Math.round(ratio * 100)}%）· C 排除/恢复摘要 · D 恢复精简前内容 · O 展开来源` : `Estimated saving ${saved} tokens (${Math.round(ratio * 100)}%) · C exclude/restore summary · D restore pre-condensation content · O expand sources`,
+    condensationCovered: (index) => zh ? `已由摘要 #${index} 替换` : `Replaced by summary #${index}`,
+    condensationSourceList: (index, count) => zh ? `摘要 #${index} 来源 ${count} 条 · O 展开/收起原文 · PgUp/PgDn 滚动` : `Summary #${index}: ${count} sources · O expand/collapse originals · PgUp/PgDn scroll`,
+    condensationCardSources: (ids) => zh ? `来源单元：${ids.length ? ids.join("、") : "无"}` : `Source units: ${ids.length ? ids.join(", ") : "none"}`,
+
+
   };
 }

@@ -1,6 +1,6 @@
 /*
  * GENERATED FILE - do not edit directly.
- * Canonical Core source digest: c5eea2828a07537c783172568092103d8f5ae0c63b201a70877fc088b651bb65
+ * Canonical Core source digest: 58a42b438e4197afdf2a1d5c43f68f572bcb98c24756115875d1de10304079ca
  * Rebuild with: npm run build:deepseek
  */
 //#region packages/context-editor-core/src/projection.ts
@@ -30,6 +30,7 @@ function reduceProjectionStates(atoms, events) {
 		ownerByAtom.set(atom.id, owner);
 	};
 	for (const event of events) {
+		if ("type" in event && event.type === "condensation") continue;
 		if (isReplacementEvent(event)) {
 			if (event.action === "undo") {
 				const changes = linkedByEvent.get(event.undoOf);
@@ -512,4 +513,212 @@ function searchRecords(records, query, enabledKinds, scope = "dialogue", enabled
 	});
 }
 //#endregion
-export { atomMatchesSearchScope, projectRecords, reduceProjectionStates, reduceReplacementStates, searchRecords, selectAssociatedReasoningTargets, selectProjectionTargets };
+//#region packages/context-editor-core/src/fingerprint.ts
+/** Deterministic identity check; this is not intended as a security hash. */
+function stableFingerprint(parts) {
+	let hash = 2166136261;
+	for (const part of parts) {
+		for (let index = 0; index < part.length; index += 1) {
+			hash ^= part.charCodeAt(index);
+			hash = Math.imul(hash, 16777619);
+		}
+		hash ^= 124;
+		hash = Math.imul(hash, 16777619);
+	}
+	return (hash >>> 0).toString(16).padStart(8, "0");
+}
+//#endregion
+//#region packages/context-editor-core/src/condensation.ts
+function textOfAtom(atom) {
+	return [atom.toolName ?? "", atom.text].filter(Boolean).join(": ");
+}
+function estimateTextTokens(text) {
+	return Math.max(0, Math.ceil(String(text ?? "").length / 4));
+}
+/** Return the effective text that should be supplied to the summary model. */
+function condensationUnitText(unit, projectionStates) {
+	if (unit.projectionState === "exclude") return "";
+	const atoms = (unit.atoms ?? []).filter((atom) => {
+		const state = projectionStates?.get(atom.id);
+		return state !== "exclude" && state !== "unavailable";
+	});
+	if ((unit.kind === "user" || unit.kind === "answer") && atoms.length === (unit.atoms ?? []).length) return String(unit.effectiveText ?? "");
+	return atoms.map(textOfAtom).filter(Boolean).join("\n");
+}
+function atomRoot(atom) {
+	const root = Number(atom.sourceRef?.entryId);
+	return Number.isSafeInteger(root) ? root : void 0;
+}
+function atomEntryId(atom) {
+	const value = String(atom.sourceRef?.entryId ?? "");
+	return value ? value : void 0;
+}
+function sourceInfo(unit, projectionStates) {
+	const atoms = unit.atoms ?? [];
+	const entryIds = Array.from(new Set(atoms.map(atomEntryId).filter((value) => value !== void 0)));
+	const roots = Array.from(new Set(atoms.map(atomRoot).filter((value) => value !== void 0))).sort((a, b) => a - b);
+	const includedAtoms = atoms.filter((atom) => projectionStates?.get(atom.id) !== "exclude" && projectionStates?.get(atom.id) !== "unavailable");
+	const text = condensationUnitText(unit, projectionStates);
+	const toolNames = Array.from(new Set(includedAtoms.map((atom) => atom.toolName).filter((value) => Boolean(value))));
+	const approxTokens = includedAtoms.reduce((sum, atom) => sum + (Number(atom.approxTokens) || estimateTextTokens(atom.text)), 0);
+	return {
+		id: unit.id,
+		recordId: unit.recordId,
+		kind: unit.kind,
+		atomIds: atoms.map((atom) => atom.id),
+		...entryIds.length ? { sourceEntryIds: entryIds } : {},
+		sourceRootSeqs: roots,
+		text,
+		approxTokens: text ? Math.max(approxTokens, estimateTextTokens(text)) : 0,
+		included: unit.projectionState !== "exclude" && unit.projectionState !== "unavailable" && includedAtoms.length > 0,
+		...toolNames.length ? { toolNames } : {},
+		...includedAtoms.some((atom) => atom.isError) ? { isError: true } : {},
+		...includedAtoms.some((atom) => atom.hasSignature) ? { hasSignature: true } : {},
+		...includedAtoms.some((atom) => atom.structured) ? { structured: true } : {}
+	};
+}
+function risksFor(source, unit) {
+	const risks = /* @__PURE__ */ new Set();
+	if (source.kind === "tool") risks.add("tool-output");
+	if (source.kind === "reasoning") risks.add("reasoning");
+	if (source.structured) risks.add("structured-content");
+	if (source.included === false || unit.projectionState === "mixed") risks.add("already-excluded");
+	return risks;
+}
+/** Expand a contiguous editor selection to complete records/turns. */
+function selectCondensationRange(records, requestedUnitIds, projectionStates, options = {}) {
+	const requested = Array.from(new Set((requestedUnitIds ?? []).map(String).filter(Boolean)));
+	const positions = /* @__PURE__ */ new Map();
+	records.forEach((record, index) => (record.units ?? []).forEach((unit) => positions.set(unit.id, index)));
+	const unavailableUnitIds = requested.filter((id) => !positions.has(id));
+	const selectedPositions = requested.map((id) => positions.get(id)).filter((value) => value !== void 0);
+	if (selectedPositions.length === 0) return {
+		requestedUnitIds: requested,
+		effectiveUnitIds: [],
+		autoExpandedUnitIds: [],
+		recordIds: [],
+		sourceRootSeqs: [],
+		sourceUnits: [],
+		shadowedTokenCount: 0,
+		unavailableUnitIds,
+		risks: [],
+		sourceFingerprint: stableFingerprint([])
+	};
+	let first = Math.min(...selectedPositions);
+	let last = Math.max(...selectedPositions);
+	const related = /* @__PURE__ */ new Set();
+	for (const index of selectedPositions) for (const atom of records[index]?.atoms ?? []) {
+		if (atom.turnId) related.add(`turn:${atom.turnId}`);
+		if (atom.toolCallId) related.add(`call:${atom.toolCallId}`);
+	}
+	const recordRelated = (index) => (records[index]?.atoms ?? []).some((atom) => atom.turnId && related.has(`turn:${atom.turnId}`) || atom.toolCallId && related.has(`call:${atom.toolCallId}`));
+	let changed = true;
+	while (changed && options.expandRelated === true) {
+		changed = false;
+		if (first > 0 && recordRelated(first - 1)) {
+			first -= 1;
+			changed = true;
+		}
+		if (last + 1 < records.length && recordRelated(last + 1)) {
+			last += 1;
+			changed = true;
+		}
+	}
+	const effectiveUnits = [];
+	for (let index = first; index <= last; index += 1) {
+		const record = records[index];
+		if (!record) continue;
+		for (const unit of record.units ?? []) if (options.expandRelated === true || requested.includes(unit.id)) effectiveUnits.push({
+			record,
+			unit
+		});
+	}
+	const effectiveUnitIds = effectiveUnits.map(({ unit }) => unit.id);
+	const requestedSet = new Set(requested);
+	const autoExpandedUnitIds = effectiveUnitIds.filter((id) => !requestedSet.has(id));
+	const sourceUnits = effectiveUnits.map(({ unit }) => sourceInfo(unit, projectionStates));
+	const sourceEntryIds = Array.from(new Set(sourceUnits.flatMap((unit) => unit.sourceEntryIds ?? [])));
+	const sourceRootSeqs = Array.from(new Set(sourceUnits.flatMap((unit) => unit.sourceRootSeqs))).sort((a, b) => a - b);
+	const risks = /* @__PURE__ */ new Set();
+	sourceUnits.forEach((source, index) => {
+		const item = effectiveUnits[index];
+		if (item) risksFor(source, item.unit).forEach((risk) => risks.add(risk));
+	});
+	const unavailable = effectiveUnits.filter(({ unit, record }) => unit.projectionState === "unavailable" || !unit.mutable || !record.mutable).map(({ unit }) => unit.id);
+	unavailableUnitIds.push(...unavailable.filter((id) => !unavailableUnitIds.includes(id)));
+	const shadowedTokenCount = sourceUnits.filter((source) => !source.included).reduce((sum, source) => sum + source.approxTokens, 0);
+	const sourceFingerprint = stableFingerprint(sourceUnits.flatMap((source) => [
+		source.id,
+		source.atomIds.join(","),
+		(source.sourceEntryIds ?? []).join(","),
+		source.text,
+		source.included ? "include" : "exclude"
+	]));
+	return {
+		requestedUnitIds: requested,
+		effectiveUnitIds,
+		autoExpandedUnitIds,
+		recordIds: Array.from(new Set(effectiveUnits.map(({ record }) => record.id))),
+		...sourceEntryIds.length ? { sourceEntryIds } : {},
+		sourceRootSeqs,
+		sourceUnits,
+		shadowedTokenCount,
+		unavailableUnitIds,
+		risks: Array.from(risks),
+		sourceFingerprint
+	};
+}
+/** Validate model or user edited output against the real framed replacement. */
+function validateCondensationSummary(summary, beforeTokens, options = {}) {
+	const value = String(summary ?? "").trim();
+	const before = Math.max(0, Number(beforeTokens) || 0);
+	const after = Math.max(0, Number(options.summaryTokens) || estimateTextTokens(frameCondensationSummary(value)));
+	const saved = before - after;
+	const ratio = before > 0 ? Math.max(0, saved / before) : 0;
+	const metrics = {
+		beforeTokens: before,
+		afterTokens: after,
+		savedTokens: saved,
+		savingsRatio: ratio,
+		belowRecommendedThreshold: ratio < .4 || saved < 500
+	};
+	if (!value) return {
+		ok: false,
+		summary: value,
+		metrics,
+		warnings: [],
+		error: "empty-summary"
+	};
+	if (options.truncated) return {
+		ok: false,
+		summary: value,
+		metrics,
+		warnings: [],
+		error: "truncated-summary"
+	};
+	if (after >= before) return {
+		ok: false,
+		summary: value,
+		metrics,
+		warnings: [],
+		error: "not-smaller"
+	};
+	const warnings = [];
+	if (ratio < .4) warnings.push("savings-below-40-percent");
+	if (saved < 500) warnings.push("savings-below-500-tokens");
+	return {
+		ok: true,
+		summary: value,
+		metrics,
+		warnings
+	};
+}
+/** Stable wrapper persisted in the model-facing message. */
+function frameCondensationSummary(summary) {
+	return `<condensed-context>\n${String(summary ?? "").trim()}\n</condensed-context>`;
+}
+function estimateCondensationTokens(value) {
+	return estimateTextTokens(value);
+}
+//#endregion
+export { atomMatchesSearchScope, estimateCondensationTokens, frameCondensationSummary, projectRecords, reduceProjectionStates, reduceReplacementStates, searchRecords, selectAssociatedReasoningTargets, selectCondensationRange, selectProjectionTargets, validateCondensationSummary };

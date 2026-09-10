@@ -1,6 +1,6 @@
 /*
  * GENERATED FILE - do not edit directly.
- * Canonical Core source digest: c5eea2828a07537c783172568092103d8f5ae0c63b201a70877fc088b651bb65
+ * Canonical Core source digest: 58a42b438e4197afdf2a1d5c43f68f572bcb98c24756115875d1de10304079ca
  * Rebuild with: npm run build:deepseek
  */
 import {
@@ -10,6 +10,8 @@ import {
   selectAssociatedReasoningTargets,
   searchRecords as searchSharedRecords,
 } from './core-runtime.js'
+
+export { selectCondensationRange, validateCondensationSummary, frameCondensationSummary, estimateCondensationTokens } from './core-runtime.js'
 
 export { reduceReplacementStates, selectAssociatedReasoningTargets, selectProjectionTargets } from './core-runtime.js'
 
@@ -122,6 +124,7 @@ function atom(identity, event, blockIndex, kind, text, options = {}) {
     ...(options.toolName === undefined ? {} : { toolName: String(options.toolName) }),
     ...(options.isError === undefined ? {} : { isError: Boolean(options.isError) }),
     ...(options.hasSignature === undefined ? {} : { hasSignature: Boolean(options.hasSignature) }),
+    ...(options.structured === undefined ? {} : { structured: Boolean(options.structured) }),
     mutable: true,
   }
 }

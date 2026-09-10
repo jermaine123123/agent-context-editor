@@ -1,5 +1,5 @@
 /* GENERATED FILE - rebuild with npm run build:pi. */
-/* Canonical Core source digest: ce8b3d794443b6b76592ad9832b45ef64ea483f4e4b1ab3f8fe911c717b6740f */
+/* Canonical Core source digest: 8585d42b2e93310a425514e7b4a92722812c6ca361de06668c5fd5490bf977b3 */
 import { decodeKittyPrintable, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -69,6 +69,7 @@ function reduceProjectionStates(atoms, events) {
 		ownerByAtom.set(atom.id, owner);
 	};
 	for (const event of events) {
+		if ("type" in event && event.type === "condensation") continue;
 		if (isReplacementEvent(event)) {
 			if (event.action === "undo") {
 				const changes = linkedByEvent.get(event.undoOf);
@@ -768,7 +769,7 @@ function currentState(adapter) {
 	const projectionEvents = current.projectionEvents ?? [];
 	const seenProjection = /* @__PURE__ */ new Set();
 	const projectionEventsUnique = projectionEvents.filter((event) => {
-		const id = "type" in event && event.type === "replacement" ? event.eventId : event.transactionId;
+		const id = "type" in event ? event.eventId : event.transactionId;
 		if (seenProjection.has(id)) return false;
 		seenProjection.add(id);
 		return true;
@@ -1373,6 +1374,199 @@ function contextEditorBranchRevisionParts(entries) {
 	});
 }
 //#endregion
+//#region adapters/pi-extension/src/shared-core/condensation.ts
+function textOfAtom(atom) {
+	return [atom.toolName ?? "", atom.text].filter(Boolean).join(": ");
+}
+function estimateTextTokens(text) {
+	return Math.max(0, Math.ceil(String(text ?? "").length / 4));
+}
+/** Return the effective text that should be supplied to the summary model. */
+function condensationUnitText(unit, projectionStates) {
+	if (unit.projectionState === "exclude") return "";
+	const atoms = (unit.atoms ?? []).filter((atom) => {
+		const state = projectionStates?.get(atom.id);
+		return state !== "exclude" && state !== "unavailable";
+	});
+	if ((unit.kind === "user" || unit.kind === "answer") && atoms.length === (unit.atoms ?? []).length) return String(unit.effectiveText ?? "");
+	return atoms.map(textOfAtom).filter(Boolean).join("\n");
+}
+function atomRoot(atom) {
+	const root = Number(atom.sourceRef?.entryId);
+	return Number.isSafeInteger(root) ? root : void 0;
+}
+function atomEntryId(atom) {
+	const value = String(atom.sourceRef?.entryId ?? "");
+	return value ? value : void 0;
+}
+function sourceInfo(unit, projectionStates) {
+	const atoms = unit.atoms ?? [];
+	const entryIds = Array.from(new Set(atoms.map(atomEntryId).filter((value) => value !== void 0)));
+	const roots = Array.from(new Set(atoms.map(atomRoot).filter((value) => value !== void 0))).sort((a, b) => a - b);
+	const includedAtoms = atoms.filter((atom) => projectionStates?.get(atom.id) !== "exclude" && projectionStates?.get(atom.id) !== "unavailable");
+	const text = condensationUnitText(unit, projectionStates);
+	const toolNames = Array.from(new Set(includedAtoms.map((atom) => atom.toolName).filter((value) => Boolean(value))));
+	const approxTokens = includedAtoms.reduce((sum, atom) => sum + (Number(atom.approxTokens) || estimateTextTokens(atom.text)), 0);
+	return {
+		id: unit.id,
+		recordId: unit.recordId,
+		kind: unit.kind,
+		atomIds: atoms.map((atom) => atom.id),
+		...entryIds.length ? { sourceEntryIds: entryIds } : {},
+		sourceRootSeqs: roots,
+		text,
+		approxTokens: text ? Math.max(approxTokens, estimateTextTokens(text)) : 0,
+		included: unit.projectionState !== "exclude" && unit.projectionState !== "unavailable" && includedAtoms.length > 0,
+		...toolNames.length ? { toolNames } : {},
+		...includedAtoms.some((atom) => atom.isError) ? { isError: true } : {},
+		...includedAtoms.some((atom) => atom.hasSignature) ? { hasSignature: true } : {},
+		...includedAtoms.some((atom) => atom.structured) ? { structured: true } : {}
+	};
+}
+function risksFor(source, unit) {
+	const risks = /* @__PURE__ */ new Set();
+	if (source.kind === "tool") risks.add("tool-output");
+	if (source.kind === "reasoning") risks.add("reasoning");
+	if (source.structured) risks.add("structured-content");
+	if (source.included === false || unit.projectionState === "mixed") risks.add("already-excluded");
+	return risks;
+}
+/** Expand a contiguous editor selection to complete records/turns. */
+function selectCondensationRange(records, requestedUnitIds, projectionStates, options = {}) {
+	const requested = Array.from(new Set((requestedUnitIds ?? []).map(String).filter(Boolean)));
+	const positions = /* @__PURE__ */ new Map();
+	records.forEach((record, index) => (record.units ?? []).forEach((unit) => positions.set(unit.id, index)));
+	const unavailableUnitIds = requested.filter((id) => !positions.has(id));
+	const selectedPositions = requested.map((id) => positions.get(id)).filter((value) => value !== void 0);
+	if (selectedPositions.length === 0) return {
+		requestedUnitIds: requested,
+		effectiveUnitIds: [],
+		autoExpandedUnitIds: [],
+		recordIds: [],
+		sourceRootSeqs: [],
+		sourceUnits: [],
+		shadowedTokenCount: 0,
+		unavailableUnitIds,
+		risks: [],
+		sourceFingerprint: stableFingerprint([])
+	};
+	let first = Math.min(...selectedPositions);
+	let last = Math.max(...selectedPositions);
+	const related = /* @__PURE__ */ new Set();
+	for (const index of selectedPositions) for (const atom of records[index]?.atoms ?? []) {
+		if (atom.turnId) related.add(`turn:${atom.turnId}`);
+		if (atom.toolCallId) related.add(`call:${atom.toolCallId}`);
+	}
+	const recordRelated = (index) => (records[index]?.atoms ?? []).some((atom) => atom.turnId && related.has(`turn:${atom.turnId}`) || atom.toolCallId && related.has(`call:${atom.toolCallId}`));
+	let changed = true;
+	while (changed && options.expandRelated === true) {
+		changed = false;
+		if (first > 0 && recordRelated(first - 1)) {
+			first -= 1;
+			changed = true;
+		}
+		if (last + 1 < records.length && recordRelated(last + 1)) {
+			last += 1;
+			changed = true;
+		}
+	}
+	const effectiveUnits = [];
+	for (let index = first; index <= last; index += 1) {
+		const record = records[index];
+		if (!record) continue;
+		for (const unit of record.units ?? []) if (options.expandRelated === true || requested.includes(unit.id)) effectiveUnits.push({
+			record,
+			unit
+		});
+	}
+	const effectiveUnitIds = effectiveUnits.map(({ unit }) => unit.id);
+	const requestedSet = new Set(requested);
+	const autoExpandedUnitIds = effectiveUnitIds.filter((id) => !requestedSet.has(id));
+	const sourceUnits = effectiveUnits.map(({ unit }) => sourceInfo(unit, projectionStates));
+	const sourceEntryIds = Array.from(new Set(sourceUnits.flatMap((unit) => unit.sourceEntryIds ?? [])));
+	const sourceRootSeqs = Array.from(new Set(sourceUnits.flatMap((unit) => unit.sourceRootSeqs))).sort((a, b) => a - b);
+	const risks = /* @__PURE__ */ new Set();
+	sourceUnits.forEach((source, index) => {
+		const item = effectiveUnits[index];
+		if (item) risksFor(source, item.unit).forEach((risk) => risks.add(risk));
+	});
+	const unavailable = effectiveUnits.filter(({ unit, record }) => unit.projectionState === "unavailable" || !unit.mutable || !record.mutable).map(({ unit }) => unit.id);
+	unavailableUnitIds.push(...unavailable.filter((id) => !unavailableUnitIds.includes(id)));
+	const shadowedTokenCount = sourceUnits.filter((source) => !source.included).reduce((sum, source) => sum + source.approxTokens, 0);
+	const sourceFingerprint = stableFingerprint(sourceUnits.flatMap((source) => [
+		source.id,
+		source.atomIds.join(","),
+		(source.sourceEntryIds ?? []).join(","),
+		source.text,
+		source.included ? "include" : "exclude"
+	]));
+	return {
+		requestedUnitIds: requested,
+		effectiveUnitIds,
+		autoExpandedUnitIds,
+		recordIds: Array.from(new Set(effectiveUnits.map(({ record }) => record.id))),
+		...sourceEntryIds.length ? { sourceEntryIds } : {},
+		sourceRootSeqs,
+		sourceUnits,
+		shadowedTokenCount,
+		unavailableUnitIds,
+		risks: Array.from(risks),
+		sourceFingerprint
+	};
+}
+/** Validate model or user edited output against the real framed replacement. */
+function validateCondensationSummary(summary, beforeTokens, options = {}) {
+	const value = String(summary ?? "").trim();
+	const before = Math.max(0, Number(beforeTokens) || 0);
+	const after = Math.max(0, Number(options.summaryTokens) || estimateTextTokens(frameCondensationSummary(value)));
+	const saved = before - after;
+	const ratio = before > 0 ? Math.max(0, saved / before) : 0;
+	const metrics = {
+		beforeTokens: before,
+		afterTokens: after,
+		savedTokens: saved,
+		savingsRatio: ratio,
+		belowRecommendedThreshold: ratio < .4 || saved < 500
+	};
+	if (!value) return {
+		ok: false,
+		summary: value,
+		metrics,
+		warnings: [],
+		error: "empty-summary"
+	};
+	if (options.truncated) return {
+		ok: false,
+		summary: value,
+		metrics,
+		warnings: [],
+		error: "truncated-summary"
+	};
+	if (after >= before) return {
+		ok: false,
+		summary: value,
+		metrics,
+		warnings: [],
+		error: "not-smaller"
+	};
+	const warnings = [];
+	if (ratio < .4) warnings.push("savings-below-40-percent");
+	if (saved < 500) warnings.push("savings-below-500-tokens");
+	return {
+		ok: true,
+		summary: value,
+		metrics,
+		warnings
+	};
+}
+/** Stable wrapper persisted in the model-facing message. */
+function frameCondensationSummary(summary) {
+	return `<condensed-context>\n${String(summary ?? "").trim()}\n</condensed-context>`;
+}
+function estimateCondensationTokens(value) {
+	return estimateTextTokens(value);
+}
+//#endregion
 //#region adapters/pi-extension/src/normalize.ts
 function timestampOf(entry) {
 	const raw = entry.message?.timestamp ?? entry.timestamp ?? 0;
@@ -1492,7 +1686,11 @@ function normalizeSessionEntries(entries) {
 			const value = part;
 			if (value.type === "text" && typeof value.text === "string") addAtom(atoms, entry, turnId, blockIndex, "assistant_text", value.text, { hasSignature: typeof value.textSignature === "string" });
 			else if (value.type === "thinking" && typeof value.thinking === "string") addAtom(atoms, entry, turnId, blockIndex, "reasoning", value.thinking, {
-				hasSignature: typeof value.thinkingSignature === "string",
+				hasSignature: typeof value.thinkingSignature === "string" && value.thinkingSignature.length > 0 && !((message.api === "openai-completions" || message.provider === "deepseek") && [
+					"reasoning_content",
+					"reasoning",
+					"reasoning_text"
+				].includes(value.thinkingSignature)),
 				redacted: value.redacted === true
 			});
 			else if (value.type === "toolCall") {
@@ -1765,11 +1963,12 @@ function createPiText(locale) {
 			if (mode === "search") return zh ? "输入关键词 · Enter 跳转 · Esc 结束搜索" : "Type a query · Enter jump · Esc finish search";
 			if (mode === "results") return zh ? "n 下一个命中，N 上一个命中 · s 切换范围 · / 修改搜索 · ? 帮助 · q 关闭" : "n next / N previous occurrence · s toggle scope · / edit search · ? help · q close";
 			if (mode === "help") return zh ? "? Esc 返回编辑器" : "? / Esc return to editor";
-			return zh ? "j/k · Enter 查看/收起 · e 编辑 · E 恢复原文 · z 撤销编辑 · o 对照原文 · h 隐藏 · r 恢复 · x 排除/恢复模型上下文 · / 搜索 · ? 帮助 · q 关闭" : "j/k move · Enter view/collapse · e edit · E restore original · z undo edit · o compare original · h hide · r restore · x exclude/restore model context · / search · ? help · q close";
+			return zh ? "Space 勾选/取消 · Shift+↑/↓ 连选 · c 精简 · ? 帮助 · j/k · Enter 查看/收起 · C 摘要排除/恢复 · D 恢复精简前内容 · O 展开来源 · e 编辑 · E 恢复原文 · z 撤销编辑 · o 对照原文 · h 隐藏 · r 恢复 · x 排除/恢复模型上下文 · / 搜索 · ? 帮助 · q 关闭" : "Space select/unselect · Shift+↑/↓ range · c condense · ? help · j/k move · Enter view/collapse · C exclude/restore summary · D restore pre-condensation · O expand sources · e edit · E restore original · z undo edit · o compare original · h hide · r restore · x exclude/restore model context · / search · ? help · q close";
 		},
 		tuiHelpTitle: () => zh ? "Context Editor 快捷键" : "Context Editor help",
 		tuiHelpLines: () => zh ? [
 			"Enter  临时展开/收起，不保存",
+			"c      AI 精简选中内容；设置页 Space 选择关联思考/工具，Enter 生成；C/D/O 操作已应用摘要",
 			"e      编辑当前用户/回答单元（提交到 sidecar）",
 			"E      确认恢复原文；z 撤销最近一次编辑；o 对照原文",
 			"x      排除/恢复模型上下文；Enter/y 确认，Esc/n 取消，不修改 Session JSONL",
@@ -1783,6 +1982,7 @@ function createPiText(locale) {
 			"R  恢复全部隐藏单元（兼容键）"
 		] : [
 			"Enter  temporarily expand/collapse; does not persist",
+			"c      AI condense the selection; Space enables related reasoning/tools for one Answer; C/D/O act on applied cards",
 			"e      edit the current User/Answer unit (sidecar only)",
 			"E      restore canonical text; z undo the latest edit; o compare original",
 			"x      exclude/restore model context; Enter/y confirm, Esc/n cancel; Session JSONL stays unchanged",
@@ -1828,7 +2028,35 @@ function createPiText(locale) {
 		replacementReviewNoop: () => zh ? "文本和联动范围都没有变化，未追加事件。" : "No text or linked-scope changes; no event was appended.",
 		replacementRestoreTitle: () => zh ? "恢复 Answer 原文？" : "Restore Answer canonical text?",
 		replacementRestoreMessage: () => zh ? "仅恢复 Answer 原文；本轮 Reasoning 的排除状态会保留。" : "Only the Answer text is restored; Reasoning exclusion for this turn remains.",
-		replacementEmpty: () => zh ? "替换文本不能为空白。" : "Replacement text cannot be blank."
+		replacementEmpty: () => zh ? "替换文本不能为空白。" : "Replacement text cannot be blank.",
+		condensationBusy: () => zh ? "Agent 正在运行，暂时不能生成精简。" : "The Agent is running; condensation is temporarily unavailable.",
+		condensationNoSelection: () => zh ? "请先选择一个连续的上下文单元。" : "Select a contiguous context range first.",
+		condensationSetupTitle: () => zh ? "AI 精简设置" : "AI condensation settings",
+		condensationSetup: (count, canExpand, enabled) => zh ? `已选择 ${count} 个单元。默认使用当前会话模型；${canExpand ? "可选同步关联的思考和工具输出。" : "当前选区不支持同步扩展。"}` : `${count} unit(s) selected. The current session model will be used; ${canExpand ? "related reasoning and tool output can be included." : "related expansion is disabled for this selection."}`,
+		condensationExpandRelated: (enabled) => zh ? `同步精简 AI 思考和工具输出：[${enabled ? "x" : " "}]` : `Also condense related reasoning and tool output: [${enabled ? "x" : " "}]`,
+		condensationExpandDisabled: () => zh ? "同步精简选项：置灰（仅单条 Answer 可用）" : "Related condensation: disabled (only available for one Answer)",
+		condensationSetupHint: () => zh ? "Space 切换扩展 · Enter 生成/重试 · Esc 返回" : "Space toggle expansion · Enter generate/retry · Esc back",
+		condensationCancelHint: () => zh ? "正在生成；Esc 取消并丢弃迟到结果" : "Generating; Esc cancels and discards late results",
+		condensationGenerating: () => zh ? "正在生成精简候选…" : "Generating condensation candidate…",
+		condensationGenerationFailed: (error) => error.includes("CONTEXT_EDITOR_CONDENSATION_OVERLAP:") ? zh ? "选区已有生效的精简摘要。请按 Esc 返回列表，再按 D 恢复精简前内容后重试；C 仅排除摘要，不会解除精简。" : "This selection already has an active summary. Press Esc, then D to restore pre-condensation content before retrying. C only excludes the summary." : zh ? `精简生成失败：${error}` : `Condensation generation failed: ${error}`,
+		condensationReviewTitle: () => zh ? "预览 AI 精简" : "Preview AI condensation",
+		condensationReviewHint: () => zh ? "j/k、PgUp/PgDn 滚动 · e 编辑摘要 · r 重新生成 · Enter 应用 · Esc 取消" : "j/k, PgUp/PgDn scroll · e edit summary · r regenerate · Enter apply · Esc cancel",
+		condensationSource: (units, entries) => zh ? `来源：${units} 个单元，${entries} 条 Pi entry` : `Source: ${units} unit(s), ${entries} Pi entr(y/ies)`,
+		condensationModel: (provider, model) => zh ? `模型：${provider}/${model}` : `Model: ${provider}/${model}`,
+		condensationMetrics: (before, after, saved, ratio) => zh ? `估算 Token：${before} → ${after}，节省 ${saved}（${Math.round(ratio * 100)}%）` : `Estimated tokens: ${before} -> ${after}; saved ${saved} (${Math.round(ratio * 100)}%)`,
+		condensationRisks: (risks) => zh ? `风险：${risks.join("、")}` : `Risks: ${risks.join(", ")}`,
+		condensationWarnings: (warnings) => zh ? `提示：${warnings.join("、")}` : `Warnings: ${warnings.join(", ")}`,
+		condensationSummaryTitle: () => zh ? "摘要正文（应用前可编辑）" : "Summary (editable before apply)",
+		condensationBlocked: (reason) => zh ? `当前摘要不可应用：${reason}` : `This summary cannot be applied: ${reason}`,
+		condensationApplied: () => zh ? "已应用 AI 精简；原始 Session 未修改。" : "AI condensation applied; the original Session was unchanged.",
+		condensationRestored: () => zh ? "已恢复精简前内容。" : "Condensed content was restored.",
+		condensationCardTitle: (operationId, state) => zh ? `AI 精简 ${state} · ${operationId}` : `AI condensation ${state} · ${operationId}`,
+		condensationCardActive: () => zh ? "生效" : "active",
+		condensationCardExcluded: () => zh ? "摘要已排除" : "summary excluded",
+		condensationCardMetrics: (saved, ratio) => zh ? `预计节省 ${saved} tokens（${Math.round(ratio * 100)}%）· C 排除/恢复摘要 · D 恢复精简前内容 · O 展开来源` : `Estimated saving ${saved} tokens (${Math.round(ratio * 100)}%) · C exclude/restore summary · D restore pre-condensation content · O expand sources`,
+		condensationCovered: (index) => zh ? `已由摘要 #${index} 替换` : `Replaced by summary #${index}`,
+		condensationSourceList: (index, count) => zh ? `摘要 #${index} 来源 ${count} 条 · O 展开/收起原文 · PgUp/PgDn 滚动` : `Summary #${index}: ${count} sources · O expand/collapse originals · PgUp/PgDn scroll`,
+		condensationCardSources: (ids) => zh ? `来源单元：${ids.length ? ids.join("、") : "无"}` : `Source units: ${ids.length ? ids.join(", ") : "none"}`
 	};
 }
 //#endregion
@@ -2090,6 +2318,10 @@ var ContextEditorComponent = class {
 	previewReplacement;
 	restoreReplacement;
 	undoReplacement;
+	generateCondensation;
+	cancelCondensation;
+	commitCondensation;
+	restoreCondensation;
 	projectionAvailable;
 	text;
 	records;
@@ -2114,6 +2346,14 @@ var ContextEditorComponent = class {
 	pendingConfirmation = null;
 	replacementReview = null;
 	replacementReviewScrollOffset = 0;
+	condensationError = null;
+	condensationSetup = null;
+	condensationReview = null;
+	condensationReviewScrollOffset = 0;
+	condensationAbortController = null;
+	condensationGenerationNonce = 0;
+	condensations = [];
+	condensationCardExpanded = false;
 	operationInFlight = false;
 	bodyCache = /* @__PURE__ */ new Map();
 	constructor(tui, theme, records, snapshot, prefs, deps, done) {
@@ -2128,6 +2368,11 @@ var ContextEditorComponent = class {
 		this.previewReplacement = deps.previewReplacement;
 		this.restoreReplacement = deps.restoreReplacement;
 		this.undoReplacement = deps.undoReplacement;
+		this.generateCondensation = deps.generateCondensation;
+		this.cancelCondensation = deps.cancelCondensation;
+		this.commitCondensation = deps.commitCondensation;
+		this.restoreCondensation = deps.restoreCondensation;
+		this.condensations = [...snapshot.condensations ?? []];
 		this.projectionAvailable = snapshot.projectionAvailable !== false && !!deps.previewContext && !!deps.commitContext;
 		this.prefs = {
 			...prefs,
@@ -2145,6 +2390,8 @@ var ContextEditorComponent = class {
 		this.isIdle = deps.isIdle;
 		this.done = done;
 		this.text = createPiText(deps.locale ?? detectPiLocale());
+		const validIds = new Set(records.flatMap((record) => record.units.map((unit) => unit.id)));
+		for (const id of deps.initialUiState?.checkedUnitIds ?? []) if (validIds.has(id)) this.selected.add(id);
 		const selectedUnitId = deps.initialUiState?.selectedUnitId;
 		if (selectedUnitId) {
 			const index = this.flatUnits().findIndex(({ unit }) => unit.id === selectedUnitId);
@@ -2152,6 +2399,7 @@ var ContextEditorComponent = class {
 		}
 		this.matches = this.query.trim() ? this.searchOccurrencesForPrefs() : [];
 		this.replacementReview = deps.initialReplacementReview ?? null;
+		this.condensationReview = deps.initialCondensationReview ?? null;
 	}
 	flatUnits() {
 		const enabled = new Set(this.prefs.enabledUnitKinds);
@@ -2220,7 +2468,10 @@ var ContextEditorComponent = class {
 		const hidden = this.unitIsHidden(unit);
 		const state = hidden ? unit.viewState === "mixed" ? "partial" : "hidden" : "shown";
 		const modelState = unit.projectionState ?? "include";
-		const base = `${cursor} ${checkbox} ${this.text.unitKind(unit.kind)} · ${this.text.recordKind(record.kind)} · ${this.text.unitState(state)} · ${this.text.contextState(modelState)} · ${unit.atoms.reduce((sum, atom) => sum + atom.approxTokens, 0)} tok`;
+		const sourceIndex = this.records.flatMap((r) => r.units).findIndex((u) => u.id === unit.id) + 1;
+		const covering = this.condensations.findIndex((c) => c.sourceUnits.some((u) => u.id === unit.id));
+		const label = covering >= 0 ? this.text.condensationCovered(covering + 1) : this.text.contextState(modelState);
+		const base = `${cursor} ${checkbox} #${sourceIndex} ${this.text.unitKind(unit.kind)} · ${this.text.recordKind(record.kind)} · ${this.text.unitState(state)} · ${label} · ${unit.atoms.reduce((sum, atom) => sum + atom.approxTokens, 0)} tok`;
 		if (hidden && !this.prefs.showHidden) return base;
 		const tool = this.toolNameForUnit(unit);
 		if (!tool) return base;
@@ -2258,7 +2509,7 @@ var ContextEditorComponent = class {
 		return Math.max(5, this.tui.terminal.rows - 7);
 	}
 	totalLineCount(width) {
-		return this.flatUnits().reduce((sum, item) => sum + this.unitLineCount(item, width), 0);
+		return this.condensationCardLines(width).length + this.flatUnits().reduce((sum, item) => sum + this.unitLineCount(item, width), 0);
 	}
 	clampScroll(width = this.tui.terminal.columns) {
 		const viewport = this.availableRows();
@@ -2282,11 +2533,13 @@ var ContextEditorComponent = class {
 		const selectedLine = this.unitStartOffset(this.selectedIndex, width);
 		const viewport = this.availableRows();
 		if (selectedLine < this.scrollOffset) this.scrollOffset = selectedLine;
-		if (selectedLine >= this.scrollOffset + viewport) this.scrollOffset = selectedLine - viewport + 1;
+		const item = this.currentUnit();
+		const visibleHeight = item ? Math.min(viewport, this.unitLineCount(item, width)) : 1;
+		if (selectedLine + visibleHeight > this.scrollOffset + viewport) this.scrollOffset = selectedLine + visibleHeight - viewport;
 		this.scrollOffset = Math.max(0, this.scrollOffset);
 	}
 	unitStartOffset(index, width) {
-		return this.flatUnits().slice(0, index).reduce((sum, item) => sum + this.unitLineCount(item, width), 0);
+		return this.condensationCardLines(width).length + this.flatUnits().slice(0, index).reduce((sum, item) => sum + this.unitLineCount(item, width), 0);
 	}
 	bodyLineIndexForHit(unit, hit, width) {
 		if (hit.field === "tool_name") return 0;
@@ -2324,7 +2577,7 @@ var ContextEditorComponent = class {
 	renderWindow(width, start, end) {
 		const units = this.flatUnits();
 		const output = [];
-		let lineOffset = 0;
+		let lineOffset = this.condensationCardLines(width).length;
 		for (let index = 0; index < units.length; index += 1) {
 			const item = units[index];
 			if (!item) continue;
@@ -2359,6 +2612,7 @@ var ContextEditorComponent = class {
 		this.records = this.loadRecords();
 		this.revision = snapshot.revision;
 		this.canUndo = snapshot.canUndo;
+		this.condensations = [...snapshot.condensations ?? []];
 		this.projectionAvailable = snapshot.projectionAvailable !== false && !!this.previewContext && !!this.commitContext;
 		const focusedIndex = focusId ? this.flatUnits().findIndex(({ unit }) => unit.id === focusId) : -1;
 		this.selectedIndex = focusedIndex >= 0 ? focusedIndex : Math.min(this.selectedIndex, Math.max(0, this.flatUnits().length - 1));
@@ -2376,6 +2630,7 @@ var ContextEditorComponent = class {
 		this.records = this.loadRecords();
 		this.revision = snapshot.revision;
 		this.canUndo = snapshot.canUndo;
+		this.condensations = [...snapshot.condensations ?? []];
 		this.projectionAvailable = snapshot.projectionAvailable !== false && !!this.previewContext && !!this.commitContext;
 		const focusedIndex = focusId ? this.flatUnits().findIndex(({ unit }) => unit.id === focusId) : -1;
 		this.selectedIndex = focusedIndex >= 0 ? focusedIndex : Math.min(this.selectedIndex, Math.max(0, this.flatUnits().length - 1));
@@ -2387,11 +2642,18 @@ var ContextEditorComponent = class {
 		this.pendingConfirmation = null;
 		this.replacementReview = null;
 		this.replacementReviewScrollOffset = 0;
+		this.condensationGenerationNonce += 1;
+		this.condensationAbortController?.abort();
+		this.condensationAbortController = null;
+		this.condensationSetup = null;
+		this.condensationReview = null;
+		this.condensationReviewScrollOffset = 0;
 		this.notify(this.text.sessionChanged(), "info");
 		return true;
 	}
 	uiState() {
 		return {
+			checkedUnitIds: [...this.selected],
 			query: this.query,
 			searchScope: this.searchScope,
 			selectedUnitId: this.currentUnit()?.unit.id,
@@ -2433,6 +2695,213 @@ var ContextEditorComponent = class {
 				selectedUnitId: item.unit.id
 			}
 		});
+	}
+	beginCondensation() {
+		if (this.isIdle && !this.isIdle()) {
+			this.notify(this.text.condensationBusy(), "warning");
+			return;
+		}
+		if (!this.generateCondensation) {
+			this.notify(this.text.contextUnavailableAction(), "warning");
+			return;
+		}
+		const selected = this.selectedUnitIds();
+		const unitIds = selected.length > 0 ? selected : [this.currentUnit()?.unit.id].filter((id) => !!id);
+		const items = this.flatUnits().filter(({ unit }) => unitIds.includes(unit.id));
+		if (!unitIds.length || items.length !== unitIds.length) {
+			this.notify(this.text.condensationNoSelection(), "warning");
+			return;
+		}
+		const canExpandRelated = unitIds.length === 1 && items[0]?.unit.kind === "answer";
+		this.condensationError = null;
+		this.condensationSetup = {
+			unitIds: [...unitIds],
+			baseRevision: this.revision,
+			canExpandRelated,
+			expandRelated: false,
+			uiState: {
+				...this.uiState(),
+				selectedUnitId: unitIds[0]
+			}
+		};
+		this.condensationReview = null;
+		this.condensationReviewScrollOffset = 0;
+		this.tui.requestRender();
+	}
+	condensationSetupLines(width) {
+		const setup = this.condensationSetup;
+		if (!setup) return [];
+		const wrap = (value) => wrapTextWithAnsi(value, Math.max(8, width - 4)).map((line) => this.theme.fg("dim", "  " + line));
+		if (this.operationInFlight) return [
+			this.theme.fg("warning", "[AI] " + this.text.condensationGenerating()),
+			...wrap(this.text.condensationSetup(setup.unitIds.length, setup.canExpandRelated, setup.expandRelated)),
+			this.theme.fg("accent", this.text.condensationCancelHint())
+		];
+		return [
+			this.theme.fg("warning", "[AI] " + this.text.condensationSetupTitle()),
+			...wrap(this.text.condensationSetup(setup.unitIds.length, setup.canExpandRelated, setup.expandRelated)),
+			...setup.canExpandRelated ? [this.theme.fg("accent", this.text.condensationExpandRelated(setup.expandRelated))] : [this.theme.fg("dim", this.text.condensationExpandDisabled())],
+			...this.condensationError ? wrap(this.condensationError) : [],
+			this.theme.fg("accent", this.text.condensationSetupHint())
+		];
+	}
+	async startCondensationGeneration() {
+		const setup = this.condensationSetup;
+		if (!setup || !this.generateCondensation || this.operationInFlight) return;
+		this.operationInFlight = true;
+		this.condensationError = null;
+		const controller = new AbortController();
+		const nonce = ++this.condensationGenerationNonce;
+		this.condensationAbortController = controller;
+		this.tui.requestRender();
+		try {
+			const preview = await this.generateCondensation({
+				baseRevision: setup.baseRevision,
+				unitIds: setup.unitIds,
+				expandRelated: setup.expandRelated,
+				signal: controller.signal
+			});
+			if (nonce !== this.condensationGenerationNonce || controller.signal.aborted) return;
+			this.condensationReview = {
+				draft: {
+					unitIds: [...setup.unitIds],
+					baseRevision: setup.baseRevision,
+					operationId: preview.operationId,
+					expandRelated: setup.expandRelated,
+					uiState: setup.uiState
+				},
+				preview
+			};
+			this.condensationSetup = null;
+			this.condensationReviewScrollOffset = 0;
+		} catch (error) {
+			if (nonce !== this.condensationGenerationNonce) return;
+			const message = error instanceof Error ? error.message : String(error);
+			if (!controller.signal.aborted) {
+				this.condensationError = this.text.condensationGenerationFailed(message);
+				this.notify(this.condensationError, "warning");
+			}
+			this.condensationReview = null;
+		} finally {
+			if (nonce === this.condensationGenerationNonce) {
+				this.condensationAbortController = null;
+				this.operationInFlight = false;
+				this.tui.requestRender();
+			}
+		}
+	}
+	cancelCondensationGeneration() {
+		this.condensationGenerationNonce += 1;
+		this.condensationAbortController?.abort();
+		this.condensationAbortController = null;
+		this.operationInFlight = false;
+		this.condensationSetup = null;
+		this.tui.requestRender();
+	}
+	condensationReviewLines(width) {
+		const review = this.condensationReview;
+		if (!review) return [];
+		const preview = review.preview;
+		const wrap = (value) => wrapTextWithAnsi(value, Math.max(8, width - 4)).map((line) => this.theme.fg("dim", "  " + line));
+		const metrics = preview.metrics;
+		const lines = [this.theme.fg("warning", "[AI] " + this.text.condensationReviewTitle())];
+		lines.push(...wrap(this.text.condensationSource(preview.effectiveUnitIds.length, (preview.sourceEntryIds ?? []).length)));
+		lines.push(...wrap(this.text.condensationModel(preview.provider, preview.model)));
+		lines.push(...wrap(this.text.condensationMetrics(metrics.beforeTokens, metrics.afterTokens, metrics.savedTokens, metrics.savingsRatio)));
+		if (preview.risks.length) lines.push(...wrap(this.text.condensationRisks(preview.risks)));
+		if (preview.warnings?.length) lines.push(...wrap(this.text.condensationWarnings(preview.warnings)));
+		lines.push(this.theme.fg("accent", this.text.condensationSummaryTitle()));
+		lines.push(...wrap(preview.summary));
+		lines.push(this.theme.fg("accent", this.text.condensationReviewHint()));
+		return lines;
+	}
+	scrollCondensationReview(delta) {
+		const lines = this.condensationReviewLines(Math.max(24, this.tui.terminal.columns));
+		const maxOffset = Math.max(0, lines.length - this.availableRows());
+		this.condensationReviewScrollOffset = Math.max(0, Math.min(maxOffset, this.condensationReviewScrollOffset + delta));
+		this.tui.requestRender();
+	}
+	async regenerateCondensation() {
+		const review = this.condensationReview;
+		if (!review || !this.cancelCondensation || this.operationInFlight) return;
+		try {
+			await this.cancelCondensation(review.draft.operationId);
+		} catch {}
+		this.condensationReview = null;
+		this.condensationSetup = {
+			unitIds: [...review.draft.unitIds],
+			baseRevision: review.draft.baseRevision,
+			canExpandRelated: review.draft.unitIds.length === 1 && this.flatUnits().find(({ unit }) => unit.id === review.draft.unitIds[0])?.unit.kind === "answer",
+			expandRelated: review.draft.expandRelated,
+			uiState: review.draft.uiState
+		};
+		this.startCondensationGeneration();
+	}
+	handleCondensationSetupInput(data) {
+		const setup = this.condensationSetup;
+		if (!setup) return;
+		if (this.operationInFlight) {
+			if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data === "q" || data === "Q") this.cancelCondensationGeneration();
+			return;
+		}
+		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data === "q" || data === "Q") {
+			this.condensationSetup = null;
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, "space") && setup.canExpandRelated) {
+			setup.expandRelated = !setup.expandRelated;
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, "enter")) this.startCondensationGeneration();
+	}
+	handleCondensationReviewInput(data) {
+		const review = this.condensationReview;
+		if (!review) return;
+		if (this.operationInFlight) return;
+		if (matchesKey(data, "pageDown") || matchesKey(data, "down") || data === "j") {
+			this.scrollCondensationReview(matchesKey(data, "pageDown") ? this.availableRows() : 1);
+			return;
+		}
+		if (matchesKey(data, "pageUp") || matchesKey(data, "up") || data === "k") {
+			this.scrollCondensationReview(matchesKey(data, "pageUp") ? -this.availableRows() : -1);
+			return;
+		}
+		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data === "q" || data === "Q") {
+			this.condensationReview = null;
+			this.done({
+				kind: "condensation-cancel",
+				operationId: review.draft.operationId,
+				uiState: review.draft.uiState
+			});
+			return;
+		}
+		if (data === "e") {
+			this.condensationReview = null;
+			this.done({
+				kind: "condensation-edit",
+				review,
+				uiState: review.draft.uiState
+			});
+			return;
+		}
+		if (data === "r") {
+			this.regenerateCondensation();
+			return;
+		}
+		if (matchesKey(data, "enter")) {
+			if (review.preview.validation && !review.preview.validation.ok) {
+				this.notify(this.text.condensationBlocked(review.preview.validation.error ?? "invalid-summary"), "warning");
+				return;
+			}
+			this.condensationReview = null;
+			this.done({
+				kind: "condensation-commit",
+				review,
+				uiState: review.draft.uiState
+			});
+		}
 	}
 	replacementReviewLines(width) {
 		const review = this.replacementReview;
@@ -2621,6 +3090,80 @@ var ContextEditorComponent = class {
 			this.tui.requestRender();
 		}
 	}
+	condensationCardLines(width) {
+		if (this.condensations.length === 0) return [];
+		const wrap = (value) => wrapTextWithAnsi(value, Math.max(8, width - 4)).map((line) => this.theme.fg("dim", "  " + line));
+		const lines = [];
+		for (const [cardIndex, condensation] of this.condensations.entries()) {
+			const state = condensation.contextExcluded ? this.text.condensationCardExcluded() : this.text.condensationCardActive();
+			lines.push(this.theme.fg("accent", this.text.condensationCardTitle(condensation.operationId, state)));
+			lines.push(...wrap(this.condensationCardExpanded ? condensation.summary : condensation.summary.split(/\r?\n/)[0].slice(0, 100)));
+			lines.push(...wrap(this.text.condensationSourceList(cardIndex + 1, condensation.sourceUnits.length)));
+			lines.push(...wrap(this.text.condensationCardMetrics(condensation.metrics.savedTokens, condensation.metrics.savingsRatio)));
+			const allUnits = this.records.flatMap((record) => record.units);
+			for (const source of condensation.sourceUnits) {
+				const title = "#" + (allUnits.findIndex((unit) => unit.id === source.id) + 1 || "?") + " " + this.text.unitKind(source.kind) + " · " + source.id;
+				lines.push(...wrap(title));
+				const content = source.text || this.text.contextState("exclude");
+				lines.push(...wrap(this.condensationCardExpanded ? content : content.replace(/\s+/g, " ").slice(0, 100)));
+			}
+		}
+		return lines;
+	}
+	async toggleCondensationSurface() {
+		const condensation = this.condensations[0];
+		if (!condensation || this.operationInFlight || !this.previewContext || !this.commitContext) return;
+		this.operationInFlight = true;
+		const action = condensation.contextExcluded ? "restore" : "exclude";
+		try {
+			const preview = await this.previewContext({
+				baseRevision: this.revision,
+				action,
+				condensationOperationId: condensation.operationId
+			});
+			const result = await this.commitContext({
+				baseRevision: preview.baseRevision,
+				action,
+				condensationOperationId: condensation.operationId
+			});
+			if (!result.ok || result.conflict) {
+				this.notify(this.text.sidecarChanged(), "warning");
+				this.refreshData();
+			} else this.refreshData();
+		} catch (error) {
+			this.notify(this.text.operationFailed(error instanceof Error ? error.message : String(error)), "warning");
+		} finally {
+			this.operationInFlight = false;
+			this.tui.requestRender();
+		}
+	}
+	async restoreActiveCondensation() {
+		const condensation = this.condensations[0];
+		if (!condensation || this.operationInFlight || !this.restoreCondensation) return;
+		if (this.isIdle && !this.isIdle()) {
+			this.notify(this.text.condensationBusy(), "warning");
+			return;
+		}
+		this.operationInFlight = true;
+		try {
+			const result = await this.restoreCondensation({
+				baseRevision: this.revision,
+				operationId: condensation.operationId
+			});
+			if (!result.ok || result.conflict) {
+				this.notify(this.text.sidecarChanged(), "warning");
+				this.refreshData();
+			} else {
+				this.refreshData();
+				this.notify(this.text.condensationRestored(), "info");
+			}
+		} catch (error) {
+			this.notify(this.text.operationFailed(error instanceof Error ? error.message : String(error)), "warning");
+		} finally {
+			this.operationInFlight = false;
+			this.tui.requestRender();
+		}
+	}
 	async beginContextProjection() {
 		if (this.operationInFlight || this.pendingConfirmation) return;
 		if (!this.projectionAvailable || !this.previewContext || !this.commitContext) {
@@ -2741,7 +3284,7 @@ var ContextEditorComponent = class {
 			const lo = Math.min(this.rangeAnchor, this.selectedIndex);
 			const hi = Math.max(this.rangeAnchor, this.selectedIndex);
 			this.selected = new Set(this.flatUnits().slice(lo, hi + 1).map(({ unit }) => unit.id));
-		} else if (!extend) this.resetSelection();
+		} else if (!extend) this.rangeAnchor = null;
 		this.matchIndex = -1;
 		this.manualScroll = false;
 		this.ensureSelectionVisible();
@@ -2844,6 +3387,14 @@ var ContextEditorComponent = class {
 	}
 	handleInput(data) {
 		if (this.syncExternalState()) return;
+		if (this.condensationSetup) {
+			this.handleCondensationSetupInput(data);
+			return;
+		}
+		if (this.condensationReview) {
+			this.handleCondensationReviewInput(data);
+			return;
+		}
 		if (this.replacementReview) {
 			if (this.operationInFlight) return;
 			this.handleReplacementReviewInput(data);
@@ -2989,6 +3540,25 @@ var ContextEditorComponent = class {
 			this.tui.requestRender();
 			return;
 		}
+		if (data === "c") {
+			this.beginCondensation();
+			return;
+		}
+		if (data === "C") {
+			this.toggleCondensationSurface();
+			return;
+		}
+		if (data === "D") {
+			this.restoreActiveCondensation();
+			return;
+		}
+		if (data === "O") {
+			this.condensationCardExpanded = !this.condensationCardExpanded;
+			this.scrollOffset = 0;
+			this.manualScroll = true;
+			this.tui.requestRender();
+			return;
+		}
 		if (data === "e") {
 			this.requestEdit();
 			return;
@@ -3037,7 +3607,13 @@ var ContextEditorComponent = class {
 		const safeWidth = Math.max(24, width);
 		const viewport = this.availableRows();
 		let visible;
-		if (this.replacementReview) {
+		if (this.condensationReview) {
+			const reviewLines = this.condensationReviewLines(safeWidth);
+			const maxOffset = Math.max(0, reviewLines.length - viewport);
+			this.condensationReviewScrollOffset = Math.max(0, Math.min(this.condensationReviewScrollOffset, maxOffset));
+			visible = reviewLines.slice(this.condensationReviewScrollOffset, this.condensationReviewScrollOffset + viewport);
+		} else if (this.condensationSetup) visible = this.condensationSetupLines(safeWidth).slice(0, viewport);
+		else if (this.replacementReview) {
 			const reviewLines = this.replacementReviewLines(safeWidth);
 			const maxOffset = Math.max(0, reviewLines.length - viewport);
 			this.replacementReviewScrollOffset = Math.max(0, Math.min(this.replacementReviewScrollOffset, maxOffset));
@@ -3051,7 +3627,9 @@ var ContextEditorComponent = class {
 			const totalLines = this.totalLineCount(safeWidth);
 			const maxOffset = Math.max(0, totalLines - viewport);
 			this.scrollOffset = Math.min(this.scrollOffset, maxOffset);
-			visible = this.renderWindow(safeWidth, this.scrollOffset, this.scrollOffset + viewport);
+			const card = this.condensationCardLines(safeWidth);
+			const end = this.scrollOffset + viewport;
+			visible = [...card.slice(this.scrollOffset, end), ...this.renderWindow(safeWidth, this.scrollOffset, end)];
 		}
 		this.lastRenderWidth = safeWidth;
 		this.lastRenderRows = this.tui.terminal.rows;
@@ -3062,10 +3640,10 @@ var ContextEditorComponent = class {
 		const aiState = reasoningEnabled && answerEnabled ? "on" : reasoningEnabled || answerEnabled ? "mixed" : "off";
 		const aiLabel = this.theme.fg(aiState === "on" ? "accent" : aiState === "mixed" ? "warning" : "dim", `${this.text.recordKind("ai")}${aiState === "mixed" ? " ±" : ""}`);
 		const title = this.helpMode ? this.theme.fg("accent", this.text.tuiHelpTitle()) : this.theme.fg("accent", "Pi Context Editor") + this.theme.fg("dim", `  ${this.text.unitCount(this.flatUnits().length)}`);
-		const mode = this.replacementReview ? this.theme.fg("warning", this.text.contextAwaiting()) : this.pendingConfirmation ? this.theme.fg("warning", this.text.contextAwaiting()) : this.helpMode ? this.theme.fg("dim", "") : this.searchMode ? this.theme.fg("warning", this.text.tuiSearch(this.query, this.matches.length, this.matchIndex, this.searchScope)) : this.theme.fg("dim", this.text.tuiSearchIdle(this.query, this.matches.length, this.matchIndex, this.searchScope));
-		const filterLine = this.helpMode || this.pendingConfirmation || this.replacementReview ? "" : `${enabled("user")} [1]  ${aiLabel} [2] (${enabled("reasoning")} [4]  ${enabled("answer")} [5])  ${enabled("tool")} [3]`;
+		const mode = this.condensationReview || this.condensationSetup ? this.theme.fg("warning", this.text.contextAwaiting()) : this.replacementReview ? this.theme.fg("warning", this.text.contextAwaiting()) : this.pendingConfirmation ? this.theme.fg("warning", this.text.contextAwaiting()) : this.helpMode ? this.theme.fg("dim", "") : this.searchMode ? this.theme.fg("warning", this.text.tuiSearch(this.query, this.matches.length, this.matchIndex, this.searchScope)) : this.theme.fg("dim", this.text.tuiSearchIdle(this.query, this.matches.length, this.matchIndex, this.searchScope));
+		const filterLine = this.helpMode || this.pendingConfirmation || this.replacementReview || this.condensationSetup || this.condensationReview ? "" : `${enabled("user")} [1]  ${aiLabel} [2] (${enabled("reasoning")} [4]  ${enabled("answer")} [5])  ${enabled("tool")} [3]`;
 		const statusMode = this.helpMode ? "help" : this.searchMode ? "search" : this.matches.length > 0 ? "results" : "normal";
-		const status = this.replacementReview ? this.theme.fg("dim", this.text.replacementReviewHint()) : this.pendingConfirmation ? this.theme.fg("dim", this.text.contextConfirmHint()) : this.theme.fg("dim", this.text.tuiStatus(statusMode, this.searchScope));
+		const status = this.condensationReview ? this.theme.fg("dim", this.text.condensationReviewHint()) : this.condensationSetup ? this.theme.fg("dim", this.operationInFlight ? this.text.condensationCancelHint() : this.text.condensationSetupHint()) : this.replacementReview ? this.theme.fg("dim", this.text.replacementReviewHint()) : this.pendingConfirmation ? this.theme.fg("dim", this.text.contextConfirmHint()) : this.theme.fg("dim", this.text.tuiStatus(statusMode, this.searchScope));
 		return [
 			visiblePad(title, safeWidth),
 			visiblePad(filterLine, safeWidth),
@@ -3105,9 +3683,37 @@ function isLinkedExclusion(value, eventId) {
 	}
 	return true;
 }
+function isCondensationEvent$1(value) {
+	if (!value || typeof value !== "object") return false;
+	const row = value;
+	if (row.type !== "condensation" || row.schemaVersion !== 1) return false;
+	if (![
+		"apply",
+		"restore",
+		"exclude-summary",
+		"restore-summary"
+	].includes(String(row.action))) return false;
+	if (typeof row.eventId !== "string" || !row.eventId || typeof row.operationId !== "string" || !row.operationId || typeof row.sessionId !== "string" || !row.sessionId || typeof row.baseRevision !== "string" && typeof row.baseRevision !== "number" || typeof row.summary !== "string" || typeof row.provider !== "string" || typeof row.model !== "string" || typeof row.createdAt !== "string") return false;
+	if (row.sourceFingerprint !== void 0 && typeof row.sourceFingerprint !== "string") return false;
+	if (!Array.isArray(row.requestedUnitIds) || !row.requestedUnitIds.every((id) => typeof id === "string")) return false;
+	if (!Array.isArray(row.effectiveUnitIds) || !row.effectiveUnitIds.every((id) => typeof id === "string")) return false;
+	if (!Array.isArray(row.sourceEntryIds) || !row.sourceEntryIds.every((id) => typeof id === "string" && id.length > 0)) return false;
+	if (!Array.isArray(row.sourceRootSeqs) || !row.sourceRootSeqs.every((id) => Number.isSafeInteger(id))) return false;
+	if (!Array.isArray(row.sourceUnits) || !row.sourceUnits.every((unit) => {
+		if (!unit || typeof unit !== "object") return false;
+		const item = unit;
+		return typeof item.id === "string" && typeof item.recordId === "string" && typeof item.kind === "string" && Array.isArray(item.atomIds) && item.atomIds.every((id) => typeof id === "string") && Array.isArray(item.sourceRootSeqs) && item.sourceRootSeqs.every((id) => Number.isSafeInteger(id)) && (item.sourceEntryIds === void 0 || Array.isArray(item.sourceEntryIds) && item.sourceEntryIds.every((id) => typeof id === "string")) && typeof item.text === "string" && typeof item.included === "boolean" && Number.isFinite(Number(item.approxTokens));
+	})) return false;
+	const metrics = row.metrics;
+	if (!metrics || typeof metrics !== "object") return false;
+	if (!Array.isArray(row.beforeMessages) || !row.beforeMessages.every((item) => item && typeof item === "object" && typeof item.entryId === "string" && "message" in item)) return false;
+	if (!Array.isArray(row.afterMessages) || !row.afterMessages.every((item) => item && typeof item === "object" && typeof item.entryId === "string" && "message" in item)) return false;
+	return true;
+}
 function isProjectionEvent(value) {
 	if (!value || typeof value !== "object") return false;
 	const row = value;
+	if (row.type === "condensation") return isCondensationEvent$1(value);
 	if ("type" in row && row.type !== "replacement") return false;
 	if (row.type === "replacement") {
 		if (row.schemaVersion !== 1 || typeof row.eventId !== "string" || row.eventId.length === 0 || typeof row.unitId !== "string" || row.unitId.length === 0 || typeof row.createdAt !== "string" || typeof row.baseRevision !== "string" && typeof row.baseRevision !== "number") return false;
@@ -3306,7 +3912,7 @@ function appendProjectionSidecarEvent(sessionFile, sessionId, anchorEntryId, eve
 			}]
 		};
 		writeDocument$1(path, next);
-		return "type" in event && event.type === "replacement" ? event.eventId : event.transactionId;
+		return "type" in event ? event.eventId : event.transactionId;
 	});
 }
 function defaultDocument(sessionId) {
@@ -3449,6 +4055,201 @@ function writeSidecarPrefs(sessionFile, sessionId, prefs) {
 	});
 }
 //#endregion
+//#region adapters/pi-extension/src/condensation-host.ts
+function sourceEntryIds(range) {
+	return Array.from(new Set([...range.sourceEntryIds ?? [], ...range.sourceUnits.flatMap((unit) => unit.sourceEntryIds ?? [])].filter(Boolean)));
+}
+function stableRangeFingerprint(range) {
+	return range.sourceFingerprint || stableFingerprint([...sourceEntryIds(range), ...range.sourceUnits.flatMap((unit) => [
+		unit.id,
+		unit.text,
+		unit.included ? "include" : "exclude"
+	])]);
+}
+function selectedBlockIndices(range, atoms) {
+	const selected = new Set(range.sourceUnits.flatMap((unit) => unit.atomIds));
+	const result = /* @__PURE__ */ new Map();
+	for (const atom of atoms) {
+		if (!selected.has(atom.id)) continue;
+		const set = result.get(atom.sourceRef.entryId) ?? /* @__PURE__ */ new Set();
+		set.add(atom.sourceRef.blockIndex);
+		result.set(atom.sourceRef.entryId, set);
+	}
+	return result;
+}
+function cloneMessage(message, content) {
+	return {
+		...message,
+		content
+	};
+}
+function contentOf(message) {
+	return message.content;
+}
+function condensationInput(range) {
+	return range.sourceUnits.filter((source) => source.included && source.text.trim()).map((source) => {
+		return [
+			"[" + source.kind + "] " + source.id,
+			source.toolNames?.length ? "tools=" + source.toolNames.join(",") : "",
+			source.isError ? "status=error" : "",
+			source.hasSignature ? "signed-or-opaque-block=true" : ""
+		].filter(Boolean).join(" ") + "\n" + source.text;
+	}).join("\n\n");
+}
+function condensationInstruction(range) {
+	const originalTokens = range.sourceUnits.filter((source) => source.included).reduce((sum, source) => sum + source.approxTokens, 0);
+	const targetTokens = Math.max(1, Math.floor(originalTokens * .5));
+	return [
+		"Only condense the selected context below. Return summary text only; do not add a preamble or markdown fence.",
+		"Write the summary in the same natural language as the selected conversation. If the conversation is Chinese, write in Chinese. Keep identifiers, paths and commands verbatim.",
+		"Merge repeated facts and remove filler. Preserve the user goal, constraints, conclusions, evidence, unfinished work, file paths, commands, parameters, results, errors, modifications and artifact locations.",
+		"Keep reasoning and tool facts needed to continue safely. Do not invent facts or silently drop essential information.",
+		"Aim to reduce the selected content by at least 40%, preferably around 50–70%. Approximate original size: " + originalTokens + " tokens; aim for about " + targetTokens + " tokens.",
+		"<selected-context>",
+		condensationInput(range),
+		"</selected-context>"
+	].join("\n");
+}
+function entryMessages(entries) {
+	const result = /* @__PURE__ */ new Map();
+	for (const raw of entries) {
+		const id = String(raw.id ?? "");
+		if (!id) continue;
+		const message = sessionEntryToContextMessages(raw)[0];
+		if (message) result.set(id, message);
+	}
+	return result;
+}
+function buildPiCondensationMessages(entries, atoms, range, summary, excludedAtomIds = /* @__PURE__ */ new Set()) {
+	const byEntry = entryMessages(entries);
+	const entryIds = sourceEntryIds(range);
+	const selected = selectedBlockIndices(range, atoms);
+	const atomIdsByBlock = /* @__PURE__ */ new Map();
+	for (const atom of atoms) {
+		const key = atom.sourceRef.entryId + ":" + atom.sourceRef.blockIndex;
+		const set = atomIdsByBlock.get(key) ?? /* @__PURE__ */ new Set();
+		set.add(atom.id);
+		atomIdsByBlock.set(key, set);
+	}
+	const first = entryIds.find((id) => selected.has(id)) ?? entryIds[0];
+	const summaryBlock = {
+		type: "text",
+		text: frameCondensationSummary(summary)
+	};
+	const beforeMessages = [];
+	const afterMessages = [];
+	let inserted = false;
+	for (const entryId of entryIds) {
+		const original = byEntry.get(entryId);
+		if (!original) continue;
+		const blocks = selected.get(entryId) ?? /* @__PURE__ */ new Set();
+		const originalContent = contentOf(original);
+		const effectiveContent = Array.isArray(originalContent) ? originalContent.filter((_block, index) => {
+			if (blocks.has(index)) return true;
+			return ![...atomIdsByBlock.get(entryId + ":" + index) ?? /* @__PURE__ */ new Set()].some((atomId) => excludedAtomIds.has(atomId));
+		}) : originalContent;
+		const effective = Array.isArray(originalContent) ? cloneMessage(original, effectiveContent) : original;
+		const before = structuredClone(effective);
+		beforeMessages.push({
+			entryId,
+			message: before
+		});
+		const role = String(effective.role ?? "");
+		const content = contentOf(effective);
+		let next = structuredClone(effective);
+		if (Array.isArray(effectiveContent) && effectiveContent.length === 0 && blocks.size === 0) next = null;
+		if (role === "user") {
+			if (blocks.size > 0) {
+				next = entryId === first && !inserted ? cloneMessage(effective, [summaryBlock]) : null;
+				inserted ||= entryId === first;
+			}
+		} else if (role === "assistant" && Array.isArray(content)) {
+			const output = [];
+			for (let index = 0; index < content.length; index += 1) {
+				if (blocks.has(index)) {
+					if (entryId === first && !inserted) {
+						output.push(summaryBlock);
+						inserted = true;
+					}
+					continue;
+				}
+				output.push(content[index]);
+			}
+			if (entryId === first && !inserted) {
+				output.unshift(summaryBlock);
+				inserted = true;
+			}
+			next = output.length ? cloneMessage(effective, output) : null;
+		} else if (role === "toolResult" && blocks.size > 0) {
+			next = entryId === first && !inserted ? cloneMessage(effective, [summaryBlock]) : null;
+			inserted ||= entryId === first;
+		} else if (blocks.size > 0 && entryId === first && !inserted) {
+			next = cloneMessage(effective, [summaryBlock]);
+			inserted = true;
+		} else if (blocks.size > 0) next = null;
+		afterMessages.push({
+			entryId,
+			message: next
+		});
+	}
+	if (!inserted && first) {
+		const original = byEntry.get(first);
+		if (original) {
+			const item = afterMessages.find((candidate) => candidate.entryId === first);
+			if (item) item.message = cloneMessage(original, [summaryBlock]);
+		}
+	}
+	return {
+		beforeMessages,
+		afterMessages
+	};
+}
+function buildPiCondensationEvent(input, atoms) {
+	const messages = buildPiCondensationMessages(input.entries, atoms, input.range, input.summary, input.excludedAtomIds);
+	return {
+		schemaVersion: 1,
+		type: "condensation",
+		action: "apply",
+		eventId: input.operationId,
+		operationId: input.operationId,
+		sessionId: input.sessionId,
+		baseRevision: input.baseRevision,
+		requestedUnitIds: input.range.requestedUnitIds,
+		effectiveUnitIds: input.range.effectiveUnitIds,
+		autoExpandedUnitIds: input.range.autoExpandedUnitIds,
+		recordIds: input.range.recordIds,
+		sourceEntryIds: sourceEntryIds(input.range),
+		sourceRootSeqs: input.range.sourceRootSeqs,
+		sourceFingerprint: stableRangeFingerprint(input.range),
+		sourceUnits: input.range.sourceUnits,
+		summary: input.summary,
+		provider: input.provider,
+		model: input.model,
+		metrics: {
+			beforeTokens: input.range.sourceUnits.filter((source) => source.included).reduce((sum, source) => sum + source.approxTokens, 0),
+			afterTokens: estimateCondensationTokens(frameCondensationSummary(input.summary)),
+			savedTokens: 0,
+			savingsRatio: 0,
+			belowRecommendedThreshold: false
+		},
+		prefixTokens: input.prefixTokens ?? 0,
+		...input.prefixReused === void 0 ? {} : { prefixReused: input.prefixReused },
+		summaryTokens: estimateCondensationTokens(frameCondensationSummary(input.summary)),
+		createdAt: input.createdAt ?? (/* @__PURE__ */ new Date()).toISOString(),
+		beforeMessages: messages.beforeMessages,
+		afterMessages: messages.afterMessages
+	};
+}
+function activePiCondensationEvents(events) {
+	const result = /* @__PURE__ */ new Map();
+	for (const event of events) {
+		if (!("type" in event) || event.type !== "condensation") continue;
+		if (event.action === "apply") result.set(event.operationId, event);
+		else if (event.action === "restore") result.delete(event.operationId);
+	}
+	return [...result.values()];
+}
+//#endregion
 //#region adapters/pi-extension/src/host.ts
 const service = new ContextEditorService();
 function asLocator(value, sessionId) {
@@ -3463,8 +4264,11 @@ var PiContextEditorHost = class {
 		undo: true,
 		persistence: true,
 		contextExclusion: true,
-		contextReplacement: true
+		contextReplacement: true,
+		contextCondensation: true
 	};
+	condensationOperations = /* @__PURE__ */ new Map();
+	condensationControllers = /* @__PURE__ */ new Map();
 	constructor(ctx) {
 		this.ctx = ctx;
 	}
@@ -3584,7 +4388,43 @@ var PiContextEditorHost = class {
 		return service.getRecords(this);
 	}
 	snapshot() {
-		return service.getSnapshot(this);
+		const snapshot = service.getSnapshot(this);
+		const projectionEvents = this.read().projectionEvents ?? [];
+		const byOperation = /* @__PURE__ */ new Map();
+		for (const event of projectionEvents) {
+			if (!("type" in event) || event.type !== "condensation") continue;
+			if (event.action === "apply") byOperation.set(event.operationId, {
+				event,
+				contextExcluded: false
+			});
+			else if (event.action === "restore") byOperation.delete(event.operationId);
+			else {
+				const current = byOperation.get(event.operationId);
+				if (current) current.contextExcluded = event.action === "exclude-summary";
+			}
+		}
+		const condensations = [...byOperation.values()].map(({ event, contextExcluded }) => ({
+			operationId: event.operationId,
+			status: "applied",
+			contextExcluded,
+			summary: event.summary,
+			requestedUnitIds: event.requestedUnitIds,
+			effectiveUnitIds: event.effectiveUnitIds,
+			autoExpandedUnitIds: event.autoExpandedUnitIds ?? [],
+			recordIds: event.recordIds ?? [],
+			sourceRootSeqs: event.sourceRootSeqs,
+			...event.sourceFingerprint ? { sourceFingerprint: event.sourceFingerprint } : {},
+			sourceUnits: event.sourceUnits,
+			metrics: event.metrics,
+			provider: event.provider,
+			model: event.model,
+			createdAt: event.createdAt
+		}));
+		return {
+			...snapshot,
+			capabilities: this.capabilities,
+			...condensations.length ? { condensations } : {}
+		};
 	}
 	search(query, enabledKinds, scope, enabledUnitKinds) {
 		return service.searchContextRecords(this, {
@@ -3620,6 +4460,264 @@ var PiContextEditorHost = class {
 			};
 			throw error;
 		}
+	}
+	currentCondensation(operationId) {
+		let active;
+		for (const event of this.read().projectionEvents ?? []) {
+			if (!("type" in event) || event.type !== "condensation" || event.operationId !== operationId) continue;
+			if (event.action === "apply") active = event;
+			else if (event.action === "restore") active = void 0;
+		}
+		return active;
+	}
+	condensationRange(request) {
+		const current = this.read();
+		if (current.projectionAvailable === false) throw new Error(current.projectionError || "CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
+		const records = this.records();
+		const requested = Array.from(new Set(request.unitIds.map(String).filter(Boolean)));
+		if (!requested.length) throw new Error("CONTEXT_EDITOR_CONDENSATION_RANGE_EMPTY");
+		const positions = /* @__PURE__ */ new Map();
+		let flatPosition = 0;
+		for (const record of records) for (const unit of record.units) positions.set(unit.id, flatPosition++);
+		const selectedPositions = requested.map((id) => positions.get(id)).filter((value) => value !== void 0).sort((a, b) => a - b);
+		if (selectedPositions.length !== requested.length) throw new Error("CONTEXT_EDITOR_CONDENSATION_UNAVAILABLE");
+		const target = records.flatMap((record) => record.units).find((unit) => unit.id === requested[0]);
+		const expandRelated = request.expandRelated === true && requested.length === 1 && target?.kind === "answer";
+		for (let index = 1; index < selectedPositions.length; index += 1) if (selectedPositions[index] !== selectedPositions[index - 1] && selectedPositions[index] !== selectedPositions[index - 1] + 1) throw new Error("CONTEXT_EDITOR_CONDENSATION_NON_CONTIGUOUS");
+		const range = selectCondensationRange(records, requested, reduceProjectionStates(current.atoms, current.projectionEvents ?? []), { expandRelated });
+		if (!range.effectiveUnitIds.length) throw new Error("CONTEXT_EDITOR_CONDENSATION_RANGE_EMPTY");
+		if (range.unavailableUnitIds.length) throw new Error("CONTEXT_EDITOR_CONDENSATION_UNAVAILABLE:" + range.unavailableUnitIds.join(","));
+		const opaque = range.sourceUnits.find((source) => source.hasSignature || source.structured);
+		if (opaque) throw new Error("CONTEXT_EDITOR_CONDENSATION_OPAQUE_CONTENT:" + opaque.id);
+		const entryIds = new Set(range.sourceEntryIds ?? range.sourceUnits.flatMap((unit) => unit.sourceEntryIds ?? []));
+		for (const event of activePiCondensationEvents(current.projectionEvents ?? [])) if ([...entryIds].some((id) => (event.sourceEntryIds ?? []).includes(id))) throw new Error("CONTEXT_EDITOR_CONDENSATION_OVERLAP:" + event.operationId);
+		return {
+			current,
+			records,
+			range,
+			expandRelated
+		};
+	}
+	async condensationModel(provider, modelId) {
+		if (provider && modelId) {
+			const found = this.ctx.modelRegistry.find(provider, modelId);
+			if (found) return found;
+		}
+		if (this.ctx.model) return this.ctx.model;
+		const found = (await this.ctx.modelRegistry.getAvailable())[0];
+		if (!found) throw new Error("CONTEXT_EDITOR_CONDENSATION_MODEL_REQUIRED");
+		return found;
+	}
+	async prepareCondensation(request) {
+		return this.generateCondensation(request);
+	}
+	async generateCondensation(request) {
+		if (!this.ctx.isIdle()) throw new Error("CONTEXT_EDITOR_BUSY");
+		const prepared = this.condensationRange(request);
+		const model = await this.condensationModel(request.provider, request.model);
+		const operationId = "condensation-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 9);
+		const controller = new AbortController();
+		if (request.signal?.aborted) throw new Error("CONTEXT_EDITOR_CONDENSATION_CANCELLED");
+		const abort = () => controller.abort();
+		request.signal?.addEventListener("abort", abort, { once: true });
+		this.condensationControllers.set(operationId, controller);
+		const beforeTokens = prepared.range.sourceUnits.filter((unit) => unit.included).reduce((sum, unit) => sum + unit.approxTokens, 0);
+		try {
+			const instruction = condensationInstruction(prepared.range);
+			const response = await this.ctx.modelRegistry.complete(model, { messages: [{
+				role: "user",
+				content: [{
+					type: "text",
+					text: instruction
+				}],
+				timestamp: Date.now()
+			}] }, {
+				maxTokens: request.maxTokens ?? 4096,
+				signal: controller.signal
+			});
+			if (response.stopReason === "aborted") throw new Error("CONTEXT_EDITOR_CONDENSATION_CANCELLED");
+			if (response.stopReason === "error") throw new Error("CONTEXT_EDITOR_CONDENSATION_MODEL_ERROR: " + String(response.errorMessage ?? "unknown error"));
+			const summary = response.content.filter((block) => block.type === "text").map((block) => block.text).join("").trim();
+			const summaryTokens = estimateCondensationTokens(frameCondensationSummary(summary));
+			const validation = validateCondensationSummary(summary, beforeTokens, { summaryTokens });
+			if (!validation.ok) {
+				const error = validation.error === "empty-summary" ? "CONTEXT_EDITOR_CONDENSATION_EMPTY" : validation.error === "not-smaller" ? "CONTEXT_EDITOR_CONDENSATION_NOT_SHORTER" : "CONTEXT_EDITOR_CONDENSATION_TRUNCATED";
+				throw new Error(error);
+			}
+			const operation = operationId;
+			const proposal = {
+				schemaVersion: 1,
+				operationId: operation,
+				sessionId: this.sessionId,
+				baseRevision: prepared.current.revision,
+				requestedUnitIds: prepared.range.requestedUnitIds,
+				effectiveUnitIds: prepared.range.effectiveUnitIds,
+				autoExpandedUnitIds: prepared.range.autoExpandedUnitIds,
+				recordIds: prepared.range.recordIds,
+				...prepared.range.sourceEntryIds?.length ? { sourceEntryIds: prepared.range.sourceEntryIds } : {},
+				sourceRootSeqs: prepared.range.sourceRootSeqs,
+				sourceUnits: prepared.range.sourceUnits,
+				summary,
+				provider: model.provider,
+				model: model.id,
+				metrics: validation.metrics,
+				prefixTokens: 0,
+				prefixReused: false,
+				summaryTokens,
+				risks: prepared.range.risks,
+				createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+				warnings: validation.warnings.concat("prefix-not-reused"),
+				sourceFingerprint: prepared.range.sourceFingerprint
+			};
+			const event = buildPiCondensationEvent({
+				sessionId: this.sessionId,
+				baseRevision: prepared.current.revision,
+				operationId: operation,
+				range: prepared.range,
+				summary,
+				provider: model.provider,
+				model: model.id,
+				prefixTokens: 0,
+				prefixReused: false,
+				createdAt: proposal.createdAt,
+				entries: prepared.current.entries,
+				excludedAtomIds: new Set([...reduceProjectionStates(prepared.current.atoms, prepared.current.projectionEvents ?? []).entries()].filter(([, state]) => state === "exclude" || state === "unavailable").map(([id]) => id))
+			}, prepared.current.atoms);
+			event.metrics = validation.metrics;
+			this.condensationOperations.set(operation, {
+				proposal,
+				event
+			});
+			return {
+				ok: true,
+				...proposal,
+				range: prepared.range,
+				validation,
+				snapshot: this.snapshot()
+			};
+		} finally {
+			request.signal?.removeEventListener("abort", abort);
+			this.condensationControllers.delete(operationId);
+		}
+	}
+	async cancelCondensation(request) {
+		asLocator(request.locator, this.sessionId);
+		const controller = this.condensationControllers.get(request.operationId);
+		if (controller) controller.abort();
+		const cancelled = this.condensationOperations.delete(request.operationId) || !!controller;
+		return {
+			ok: true,
+			operationId: request.operationId,
+			cancelled
+		};
+	}
+	async commitCondensation(request) {
+		asLocator(request.locator, this.sessionId);
+		if (!this.ctx.isIdle()) throw new Error("CONTEXT_EDITOR_BUSY");
+		const pending = this.condensationOperations.get(request.operationId);
+		const active = this.currentCondensation(request.operationId);
+		if (active) {
+			if (request.summary.trim() !== active.summary.trim()) throw new Error("CONTEXT_EDITOR_CONDENSATION_OPERATION_REUSED");
+			return {
+				ok: true,
+				operationId: request.operationId,
+				eventId: active.eventId,
+				snapshot: this.snapshot()
+			};
+		}
+		if (!pending) throw new Error("CONTEXT_EDITOR_CONDENSATION_PROPOSAL_NOT_FOUND");
+		const current = this.read();
+		if (String(request.baseRevision) !== String(current.revision)) return {
+			ok: false,
+			conflict: true,
+			operationId: request.operationId,
+			snapshot: this.snapshot()
+		};
+		const range = this.condensationRange({
+			locator: request.locator,
+			baseRevision: current.revision,
+			unitIds: request.unitIds ?? pending.proposal.requestedUnitIds,
+			expandRelated: pending.proposal.autoExpandedUnitIds.length > 0
+		});
+		if (range.range.sourceFingerprint !== pending.proposal.sourceFingerprint) throw new Error("CONTEXT_EDITOR_CONDENSATION_CONFLICT");
+		const beforeTokens = range.range.sourceUnits.filter((unit) => unit.included).reduce((sum, unit) => sum + unit.approxTokens, 0);
+		const summaryTokens = estimateCondensationTokens(frameCondensationSummary(request.summary));
+		const validation = validateCondensationSummary(request.summary, beforeTokens, { summaryTokens });
+		if (!validation.ok) throw new Error("CONTEXT_EDITOR_CONDENSATION_NOT_SHORTER");
+		const event = buildPiCondensationEvent({
+			sessionId: this.sessionId,
+			baseRevision: current.revision,
+			operationId: request.operationId,
+			range: range.range,
+			summary: request.summary.trim(),
+			provider: pending.proposal.provider,
+			model: pending.proposal.model,
+			entries: current.entries,
+			excludedAtomIds: new Set([...reduceProjectionStates(current.atoms, current.projectionEvents ?? []).entries()].filter(([, state]) => state === "exclude" || state === "unavailable").map(([id]) => id))
+		}, current.atoms);
+		event.metrics = validation.metrics;
+		const eventId = this.appendProjectionEvent(event);
+		this.condensationOperations.delete(request.operationId);
+		return {
+			ok: true,
+			operationId: request.operationId,
+			eventId,
+			snapshot: this.snapshot()
+		};
+	}
+	async restoreCondensation(request) {
+		asLocator(request.locator, this.sessionId);
+		const active = this.currentCondensation(request.operationId);
+		if (!active) return {
+			ok: true,
+			operationId: request.operationId,
+			snapshot: this.snapshot()
+		};
+		const current = this.read();
+		if (String(request.baseRevision) !== String(current.revision)) return {
+			ok: false,
+			conflict: true,
+			operationId: request.operationId,
+			snapshot: this.snapshot()
+		};
+		const event = {
+			...active,
+			action: "restore",
+			eventId: request.operationId + ":restore:" + Date.now(),
+			baseRevision: current.revision,
+			createdAt: (/* @__PURE__ */ new Date()).toISOString()
+		};
+		const eventId = this.appendProjectionEvent(event);
+		return {
+			ok: true,
+			operationId: request.operationId,
+			eventId,
+			snapshot: this.snapshot()
+		};
+	}
+	async undoCondensation(request) {
+		return this.restoreCondensation(request);
+	}
+	condensationSurfaceEvent(operationId) {
+		return this.currentCondensation(operationId);
+	}
+	condensationSurfaceResult(operationId, action) {
+		const active = this.condensationSurfaceEvent(operationId);
+		if (!active) throw new Error("CONTEXT_EDITOR_CONDENSATION_RESTORE_UNAVAILABLE");
+		const current = this.read();
+		const event = {
+			...active,
+			action: action === "exclude" ? "exclude-summary" : "restore-summary",
+			eventId: operationId + ":" + action + ":" + Date.now(),
+			baseRevision: current.revision,
+			createdAt: (/* @__PURE__ */ new Date()).toISOString()
+		};
+		return {
+			ok: true,
+			operationId,
+			eventId: this.appendProjectionEvent(event),
+			snapshot: this.snapshot()
+		};
 	}
 	async getSnapshot(locator) {
 		asLocator(locator, this.sessionId);
@@ -3680,10 +4778,28 @@ var PiContextEditorHost = class {
 	}
 	async previewContext(request) {
 		asLocator(request.locator, this.sessionId);
+		if (request.condensationOperationId) {
+			const active = this.condensationSurfaceEvent(request.condensationOperationId);
+			if (!active) throw new Error("CONTEXT_EDITOR_CONDENSATION_RESTORE_UNAVAILABLE");
+			const unit = active.sourceUnits[0];
+			return {
+				baseRevision: this.read().revision,
+				action: request.action,
+				requestedUnitIds: unit ? [unit.id] : [],
+				effectiveUnitIds: unit ? [unit.id] : [],
+				autoExpandedUnitIds: [],
+				requestedAtomIds: unit?.atomIds ?? [],
+				effectiveAtomIds: unit?.atomIds ?? [],
+				unavailableUnitIds: [],
+				touchesRecentTurn: false,
+				stateByUnitId: unit ? { [unit.id]: request.action === "exclude" ? "exclude" : "include" } : {}
+			};
+		}
 		return service.previewContextProjection(this, request);
 	}
 	async commitContext(request) {
 		asLocator(request.locator, this.sessionId);
+		if (request.condensationOperationId) return this.condensationSurfaceResult(request.condensationOperationId, request.action);
 		try {
 			return service.commitContextProjection(this, request);
 		} catch (error) {
@@ -3779,7 +4895,7 @@ function rowsForEntries(entries) {
 function uniqueProjectionEvents(events) {
 	const seen = /* @__PURE__ */ new Set();
 	return events.filter((event) => {
-		const id = "type" in event && event.type === "replacement" ? event.eventId : event.transactionId;
+		const id = "type" in event ? event.eventId : event.transactionId;
 		if (seen.has(id)) return false;
 		seen.add(id);
 		return true;
@@ -3940,6 +5056,44 @@ function replacementCompatible(baseline, current, rowAtoms, unitByAtom, historyU
 	if (rowHasHistory(rowAtoms, unitByAtom, historyUnitIds, historyAtomIds)) return restoreCompatible(baseline, current) || structurallyCompatible(baseline, current);
 	return structurallyCompatible(baseline, current) || isKindSubsequence(baseline, current);
 }
+function isCondensationEvent(event) {
+	return "type" in event && event.type === "condensation" && event.schemaVersion === 1;
+}
+function condensationMessages(events) {
+	const operations = /* @__PURE__ */ new Map();
+	for (const event of events) {
+		if (!isCondensationEvent(event)) continue;
+		const current = operations.get(event.operationId);
+		if (event.action === "apply") operations.set(event.operationId, {
+			event,
+			summaryExcluded: false
+		});
+		else if (event.action === "restore") operations.delete(event.operationId);
+		else if (current) operations.set(event.operationId, {
+			event: current.event,
+			summaryExcluded: event.action === "exclude-summary"
+		});
+	}
+	const result = /* @__PURE__ */ new Map();
+	for (const { event, summaryExcluded } of operations.values()) {
+		const summaryText = frameCondensationSummary(event.summary);
+		for (const item of event.afterMessages) {
+			let message = item.message;
+			if (message && summaryExcluded) {
+				const content = message.content;
+				if (Array.isArray(content)) {
+					const next = content.filter((part) => !(part && typeof part === "object" && part.type === "text" && String(part.text ?? "") === summaryText));
+					message = next.length ? {
+						...message,
+						content: next
+					} : null;
+				} else if (content === summaryText) message = null;
+			}
+			result.set(String(item.entryId), message ? structuredClone(message) : null);
+		}
+	}
+	return result;
+}
 function projectModelContext(input) {
 	const projectionEvents = uniqueProjectionEvents(input.projectionEvents);
 	if (projectionEvents.length === 0) return [...input.messages];
@@ -3947,10 +5101,33 @@ function projectModelContext(input) {
 	const { states, byEntry } = activeAtomsByEntry(input.atoms, projectionEvents);
 	const { byAtom: unitByAtom, historyUnitIds, historyAtomIds } = replacementUnits(input.atoms, states, projectionEvents);
 	const restoredIds = restoredAtomIds(input.atoms, projectionEvents, states);
+	const condensationByEntry = condensationMessages(projectionEvents);
 	const output = [];
 	let cursor = 0;
 	for (const row of rows) {
 		const rowAtoms = byEntry.get(row.entryId) ?? [];
+		if (condensationByEntry.has(row.entryId)) {
+			const condensed = condensationByEntry.get(row.entryId) ?? null;
+			let condensedMatch = -1;
+			for (let index = cursor; index < input.messages.length; index += 1) {
+				const candidate = input.messages[index];
+				if (candidate && (structurallyCompatible(row.baseline, candidate) || condensed !== null && roleOf(row.baseline) === roleOf(candidate))) {
+					condensedMatch = index;
+					break;
+				}
+			}
+			if (condensedMatch < 0) {
+				if (!condensed) continue;
+				throw new ProjectionAlignmentError("condensed message could not be aligned");
+			}
+			for (let index = cursor; index < condensedMatch; index += 1) {
+				const extra = input.messages[index];
+				if (extra) output.push(extra);
+			}
+			if (condensed) output.push(structuredClone(condensed));
+			cursor = condensedMatch + 1;
+			continue;
+		}
 		const projection = rowProjection(rowAtoms, unitByAtom);
 		const hasExcluded = rowAtoms.some((atom) => states.get(atom.id) === "exclude");
 		const hasRestored = rowAtoms.some((atom) => restoredIds.has(atom.id));
@@ -4136,19 +5313,20 @@ function contextEditorExtension(pi) {
 			}
 			let uiState;
 			let replacementReview;
+			let condensationReview;
 			const text = createPiText(locale);
+			const host = new PiContextEditorHost(ctx);
+			const locator = {
+				host: "pi",
+				sessionId: host.sessionId
+			};
 			while (true) {
-				const host = new PiContextEditorHost(ctx);
 				const records = host.records();
 				if (records.length === 0) {
 					ctx.ui.notify("There are no editable context records in the active branch.", "info");
 					break;
 				}
 				const snapshot = host.snapshot();
-				const locator = {
-					host: "pi",
-					sessionId: host.sessionId
-				};
 				const prefs = host.getPrefs();
 				let exit;
 				await ctx.ui.custom((tui, theme, _keybindings, done) => new ContextEditorComponent(tui, theme, records, snapshot, prefs, {
@@ -4165,6 +5343,22 @@ function contextEditorExtension(pi) {
 					}),
 					previewReplacement: (input) => host.previewReplacementMutation(input),
 					commitReplacement: (input) => host.commitReplacementMutation(input),
+					generateCondensation: (input) => host.generateCondensation({
+						locator,
+						...input
+					}),
+					cancelCondensation: (operationId) => host.cancelCondensation({
+						locator,
+						operationId
+					}),
+					commitCondensation: (input) => host.commitCondensation({
+						locator,
+						...input
+					}),
+					restoreCondensation: (input) => host.restoreCondensation({
+						locator,
+						...input
+					}),
 					restoreReplacement: (input) => host.restoreReplacementMutation(input),
 					undoReplacement: (input) => host.undoReplacementMutation(input),
 					undo: (baseRevision) => host.undo(baseRevision),
@@ -4173,6 +5367,7 @@ function contextEditorExtension(pi) {
 					isIdle: () => ctx.isIdle(),
 					initialUiState: uiState,
 					initialReplacementReview: replacementReview,
+					initialCondensationReview: condensationReview,
 					locale
 				}, (result) => {
 					exit = result;
@@ -4180,6 +5375,70 @@ function contextEditorExtension(pi) {
 				}));
 				if (!exit || exit.kind === "close") break;
 				uiState = exit.uiState;
+				if (exit.kind === "condensation-cancel") {
+					condensationReview = void 0;
+					if (exit.operationId) try {
+						await host.cancelCondensation({
+							locator,
+							operationId: exit.operationId
+						});
+					} catch {}
+					continue;
+				}
+				if (exit.kind === "condensation-commit") {
+					const review = exit.review;
+					condensationReview = void 0;
+					try {
+						const result = await host.commitCondensation({
+							locator,
+							baseRevision: review.draft.baseRevision,
+							operationId: review.draft.operationId,
+							summary: review.preview.summary,
+							unitIds: review.draft.unitIds
+						});
+						if (!result.ok || result.conflict) ctx.ui.notify(text.sidecarChanged(), "warning");
+						else ctx.ui.notify(text.condensationApplied(), "info");
+					} catch (error) {
+						const message = error instanceof Error ? error.message : String(error);
+						ctx.ui.notify(text.condensationBlocked(message), "warning");
+					}
+					continue;
+				}
+				if (exit.kind === "condensation-edit") {
+					const review = exit.review;
+					let value;
+					try {
+						value = await ctx.ui.editor(text.condensationSummaryTitle(), review.preview.summary);
+					} catch (error) {
+						ctx.ui.notify("Editor failed: " + (error instanceof Error ? error.message : String(error)), "warning");
+						condensationReview = review;
+						continue;
+					}
+					if (value === void 0) {
+						condensationReview = review;
+						continue;
+					}
+					const summary = value.trim();
+					const summaryTokens = estimateCondensationTokens(frameCondensationSummary(summary));
+					const validation = validateCondensationSummary(summary, review.preview.metrics.beforeTokens, { summaryTokens });
+					if (!validation.ok) {
+						ctx.ui.notify(text.condensationBlocked(validation.error ?? "invalid-summary"), "warning");
+						condensationReview = review;
+						continue;
+					}
+					condensationReview = {
+						...review,
+						preview: {
+							...review.preview,
+							summary,
+							summaryTokens,
+							metrics: validation.metrics,
+							validation,
+							warnings: validation.warnings
+						}
+					};
+					continue;
+				}
 				if (exit.kind === "cancel-edit") {
 					replacementReview = void 0;
 					continue;

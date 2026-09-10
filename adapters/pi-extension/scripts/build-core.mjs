@@ -17,6 +17,7 @@ const files = [
   'prefs.ts',
   'service.ts',
   'protocol.ts',
+  'condensation.ts',
   'index.ts',
 ]
 

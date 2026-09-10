@@ -11,7 +11,7 @@ import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { z } from 'zod'
 import { foldSurface } from '@deepseek-ai/dsh-session'
-import { reduceReplacementStates, selectAssociatedReasoningTargets, selectProjectionTargets } from './core-runtime.js'
+import { reduceReplacementStates, selectAssociatedReasoningTargets, selectProjectionTargets, selectCondensationRange, validateCondensationSummary, frameCondensationSummary, estimateCondensationTokens } from './core-runtime.js'
 import {
   buildProjection,
   buildViewEvent,
@@ -29,7 +29,7 @@ import {
 } from './core.js'
 import { PACKAGE_NAME } from './typert.js'
 
-export const inject = ['storageDomain', 'sessionPersistence', 'sessions', 'agents']
+export const inject = ['storageDomain', 'sessionPersistence', 'sessions', 'agents', 'llm']
 
 const viewStateSchema = z.enum(['show', 'collapse', 'hide'])
 function asObject(value) {
@@ -82,6 +82,48 @@ const replacementEventSchema = z.object({
   createdAt: z.string(),
   linkedExclusion: linkedExclusionSchema.optional(),
 }).passthrough()
+const condensationChangeSchema = z.object({
+  rootEventSeq: nonNegativeSafeInteger,
+  mode: z.enum(['clear', 'remove', 'replace']),
+  message: z.unknown().optional(),
+}).passthrough()
+const condensationSourceUnitSchema = z.object({
+  id: z.string().min(1),
+  recordId: z.string().min(1),
+  kind: z.enum(['reasoning', 'answer', 'user', 'tool']),
+  atomIds: z.array(z.string()),
+  sourceRootSeqs: z.array(nonNegativeSafeInteger),
+  text: z.string(),
+  approxTokens: z.number().nonnegative(),
+  included: z.boolean(),
+}).passthrough()
+const condensationEventSchema = z.object({
+  schemaVersion: z.literal(1),
+  type: z.literal('condensation'),
+  action: z.enum(['apply', 'restore']),
+  status: z.enum(['pending', 'applied', 'restored']).optional(),
+  operationId: z.string().min(1),
+  sessionId: z.string().min(1),
+  baseRevision: z.string(),
+  requestedUnitIds: z.array(z.string()),
+  effectiveUnitIds: z.array(z.string()),
+  recordIds: z.array(z.string()),
+  sourceRootSeqs: z.array(nonNegativeSafeInteger),
+  sourceFingerprint: z.string(),
+  sourceUnits: z.array(condensationSourceUnitSchema),
+  summary: z.string(),
+  provider: z.string(),
+  model: z.string(),
+  metrics: z.object({
+    beforeTokens: z.number(), afterTokens: z.number(), savedTokens: z.number(), savingsRatio: z.number(), belowRecommendedThreshold: z.boolean(),
+  }),
+  prefixTokens: z.number(),
+  summaryTokens: z.number(),
+  createdAt: z.string(),
+  beforeChanges: z.array(condensationChangeSchema),
+  afterChanges: z.array(condensationChangeSchema),
+  restoreEventSeq: nonNegativeSafeInteger.optional(),
+}).passthrough()
 const sidecarRowSchema = z.object({
   session: z.object({
     createdAt: nonNegativeSafeInteger,
@@ -91,6 +133,7 @@ const sidecarRowSchema = z.object({
   storageVersion: z.literal(1),
   events: z.array(viewEventSchema),
   replacementEvents: z.array(replacementEventSchema).optional(),
+  condensationEvents: z.array(condensationEventSchema).optional(),
 })
 
 export const contextEditorDomainSpec = defineDomain({
@@ -154,6 +197,387 @@ function messageForRoot(event) {
   if (value.type === 'tool/result') return data.message
   return undefined
 }
+
+function validCondensationChange(value) {
+  const raw = asObject(value)
+  const root = Number(raw.rootEventSeq)
+  return Number.isSafeInteger(root) && root >= 0
+    && ['clear', 'remove', 'replace'].includes(raw.mode)
+}
+
+function validCondensationEvent(value) {
+  const raw = asObject(value)
+  return raw.schemaVersion === 1
+    && raw.type === 'condensation'
+    && typeof raw.operationId === 'string' && raw.operationId.length > 0
+    && typeof raw.sessionId === 'string'
+    && ['apply', 'restore'].includes(raw.action)
+    && Array.isArray(raw.sourceRootSeqs)
+    && Array.isArray(raw.beforeChanges) && raw.beforeChanges.every(validCondensationChange)
+    && Array.isArray(raw.afterChanges) && raw.afterChanges.every(validCondensationChange)
+    && typeof raw.summary === 'string'
+}
+
+function normalizeCondensationEvents(events) {
+  return (Array.isArray(events) ? events : []).filter(validCondensationEvent).map(value => {
+    const raw = asObject(value)
+    const metrics = asObject(raw.metrics)
+    const sourceUnits = Array.isArray(raw.sourceUnits) ? raw.sourceUnits.map(value => {
+      const unit = asObject(value)
+      return {
+        ...unit,
+        id: String(unit.id ?? ''),
+        recordId: String(unit.recordId ?? ''),
+        kind: String(unit.kind ?? 'tool'),
+        atomIds: Array.isArray(unit.atomIds) ? unit.atomIds.map(String) : [],
+        sourceRootSeqs: Array.isArray(unit.sourceRootSeqs) ? unit.sourceRootSeqs.map(Number).filter(Number.isSafeInteger) : [],
+        text: String(unit.text ?? ''),
+        approxTokens: Number(unit.approxTokens) || 0,
+        included: unit.included !== false,
+      }
+    }) : []
+    return {
+      ...raw,
+      schemaVersion: 1,
+      type: 'condensation',
+      action: raw.action === 'restore' ? 'restore' : 'apply',
+      status: raw.status === 'pending' ? 'pending' : raw.status === 'restored' ? 'restored' : 'applied',
+      operationId: String(raw.operationId),
+      sessionId: String(raw.sessionId),
+      baseRevision: String(raw.baseRevision ?? ''),
+      requestedUnitIds: Array.isArray(raw.requestedUnitIds) ? raw.requestedUnitIds.map(String) : [],
+      effectiveUnitIds: Array.isArray(raw.effectiveUnitIds) ? raw.effectiveUnitIds.map(String) : [],
+      recordIds: Array.isArray(raw.recordIds) ? raw.recordIds.map(String) : [],
+      sourceRootSeqs: Array.isArray(raw.sourceRootSeqs) ? raw.sourceRootSeqs.map(Number).filter(Number.isSafeInteger) : [],
+      sourceFingerprint: String(raw.sourceFingerprint ?? ''),
+      sourceUnits,
+      summary: String(raw.summary),
+      provider: String(raw.provider ?? ''),
+      model: String(raw.model ?? ''),
+      metrics: {
+        beforeTokens: Number(metrics.beforeTokens) || 0,
+        afterTokens: Number(metrics.afterTokens) || 0,
+        savedTokens: Number(metrics.savedTokens) || 0,
+        savingsRatio: Number(metrics.savingsRatio) || 0,
+        belowRecommendedThreshold: Boolean(metrics.belowRecommendedThreshold),
+      },
+      prefixTokens: Number(raw.prefixTokens) || 0,
+      summaryTokens: Number(raw.summaryTokens) || 0,
+      createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : new Date(0).toISOString(),
+      beforeChanges: raw.beforeChanges.map(change => ({ ...change, rootEventSeq: Number(change.rootEventSeq) })),
+      afterChanges: raw.afterChanges.map(change => ({ ...change, rootEventSeq: Number(change.rootEventSeq) })),
+      ...(Number.isSafeInteger(raw.restoreEventSeq) ? { restoreEventSeq: Number(raw.restoreEventSeq) } : {}),
+    }
+  })
+}
+
+function nativeCondensationOperationId(event) {
+  const data = asObject(event?.data)
+  if (data.condensationOperationId !== undefined) return String(data.condensationOperationId)
+  if (data.condensation?.operationId !== undefined) return String(data.condensation.operationId)
+  return undefined
+}
+
+function activeCondensationEvents(rowEvents, sourceEvents) {
+  const applied = new Set()
+  const restored = new Set()
+  for (const event of Array.isArray(sourceEvents) ? sourceEvents : []) {
+    const id = nativeCondensationOperationId(event)
+    if (!id) continue
+    const action = asObject(event.data).condensationAction ?? asObject(event.data).condensation?.action
+    if (action === 'restore') restored.add(id)
+    else if (action === 'apply') applied.add(id)
+  }
+  return normalizeCondensationEvents(rowEvents).filter(event => event.status !== 'restored' && applied.has(event.operationId) && !restored.has(event.operationId))
+}
+
+function condensationSnapshot(event, projection) {
+  const firstRoot = Number(event.sourceRootSeqs?.[0])
+  const overlay = projection?.contextOverlays?.get(firstRoot)
+  const contextExcluded = overlay?.mode === 'remove' || !(overlay?.message?.content ?? []).some(block => block.type === 'text' && block.text === frameCondensationSummary(event.summary))
+  return {
+    operationId: event.operationId,
+    status: event.status === 'restored' ? 'restored' : 'applied',
+    summary: event.summary,
+    requestedUnitIds: event.requestedUnitIds,
+    effectiveUnitIds: event.effectiveUnitIds,
+    sourceRootSeqs: event.sourceRootSeqs,
+    sourceUnits: event.sourceUnits.map(unit => ({
+      id: unit.id,
+      recordId: unit.recordId,
+      kind: unit.kind,
+      atomIds: unit.atomIds,
+      sourceRootSeqs: unit.sourceRootSeqs,
+      text: unit.text,
+      included: unit.included,
+      approxTokens: unit.approxTokens,
+      ...(unit.toolNames?.length ? { toolNames: unit.toolNames } : {}),
+      ...(unit.isError ? { isError: true } : {}),
+      ...(unit.hasSignature ? { hasSignature: true } : {}),
+      ...(unit.structured ? { structured: true } : {}),
+    })),
+    metrics: event.metrics,
+    provider: event.provider,
+    model: event.model,
+    createdAt: event.createdAt,
+    contextExcluded,
+  }
+}
+
+function estimateMessageTokens(message) {
+  try { return estimateCondensationTokens(JSON.stringify(message ?? '')) } catch { return 0 }
+}
+
+function eventSequence(event) {
+  const seq = Number(event?.seq)
+  return Number.isSafeInteger(seq) ? seq : undefined
+}
+
+function messagesBefore(projection, endRoot) {
+  const messages = []
+  const seen = new Set()
+  const events = [...(projection.sourceEvents ?? [])].sort((a, b) => (eventSequence(a) ?? 0) - (eventSequence(b) ?? 0))
+  for (const event of events) {
+    const root = eventSequence(event)
+    if (root === undefined || root > endRoot || seen.has(root)) continue
+    const original = messageForRoot(event)
+    if (original === undefined) continue
+    const overlay = projection.contextOverlays?.get(root)
+    if (overlay?.mode === 'remove') {
+      seen.add(root)
+      continue
+    }
+    const composed = composeNativeRoot(projection, root)
+    const message = overlay?.mode === 'replace' ? overlay.message : composed.message ?? original
+    if (message !== undefined) messages.push(structuredClone(message))
+    seen.add(root)
+  }
+  return messages
+}
+
+function condensationInput(range) {
+  const lines = []
+  for (const source of range.sourceUnits) {
+    if (!source.included || !source.text.trim()) continue
+    const facts = [
+      `[${source.kind}] ${source.id}`,
+      source.toolNames?.length ? `tools=${source.toolNames.join(',')}` : '',
+      source.isError ? 'status=error' : '',
+      source.hasSignature ? 'signed-or-opaque-block=true' : '',
+    ].filter(Boolean).join(' ')
+    lines.push(`${facts}\n${source.text}`)
+  }
+  return lines.join('\n\n')
+}
+
+function condensationInstruction(range) {
+  const originalTokens = range.sourceUnits.filter(source => source.included).reduce((sum, source) => sum + source.approxTokens, 0)
+  const targetTokens = Math.max(1, Math.floor(originalTokens * 0.5))
+  return [
+    'Only condense the selected context below. Return the summary text only; do not add a preamble or markdown fence.',
+    'Write the summary in the same natural language as the selected conversation. For mixed-language content, follow the user-facing prose, not the language of code, logs, or these instructions. If the conversation is Chinese, write the summary in Chinese. Keep identifiers, paths and commands verbatim.',
+    'Condense rather than paraphrase line by line: merge repeated facts, remove filler and redundant narration, retain decisions and essential evidence rather than a step-by-step reasoning transcript. Use compact paragraphs or a short list; avoid large headings and repeated labels.',
+    'Aim to reduce the selected content by at least 40%, preferably around 50–70%, while preserving essential facts. If those facts cannot fit, preserve them rather than inventing or silently dropping them.',
+    'Approximate original size: ' + originalTokens + ' tokens. Aim for about ' + targetTokens + ' tokens of summary; this is a target, not permission to truncate essential facts.',
+    'Preserve the user goal, constraints, conclusions and evidence, unfinished work, and important file paths, commands, parameters, results, errors, modifications, and artifact locations.',
+    'Keep reasoning and tool facts that are needed to continue safely. Do not invent facts. Mark uncertain or omitted details explicitly.',
+    '<selected-context>',
+    condensationInput(range),
+    '</selected-context>',
+  ].join('\n')
+}
+
+function beforeChangeForRoot(projection, root) {
+  const overlay = projection.contextOverlays?.get(root)
+  if (!overlay) return { rootEventSeq: root, mode: 'clear' }
+  if (overlay.mode === 'remove') return { rootEventSeq: root, mode: 'remove' }
+  return { rootEventSeq: root, mode: 'replace', message: structuredClone(overlay.message) }
+}
+
+function condensationRole(projection, sourceRootSeqs) {
+  // Native projection replacements preserve the append root role, including
+  // ranges beginning with an assistant reasoning or answer message.
+  const original = (projection.sourceEvents ?? []).find(event => eventSequence(event) === sourceRootSeqs[0])
+  const role = messageForRoot(original)?.role
+  if (!['user', 'assistant', 'system'].includes(role)) throw new Error('CONTEXT_EDITOR_CONDENSATION_SOURCE_GONE')
+  return role
+}
+function buildCondensationChanges(projection, sourceRootSeqs, summary, operationId, sourceUnits = []) {
+  const roots = Array.from(new Set(sourceRootSeqs.map(Number).filter(value => Number.isSafeInteger(value)))).sort((a, b) => a - b)
+  if (!roots.length) throw new Error('CONTEXT_EDITOR_CONDENSATION_RANGE_EMPTY')
+  const first = roots[0]
+  const beforeChanges = roots.map(root => beforeChangeForRoot(projection, root))
+  const summaryMessage = {
+    id: `condensed-context-${operationId}`,
+    role: condensationRole(projection, roots, sourceUnits),
+    source: { kind: 'plugin', plugin: PACKAGE_NAME, form: 'condensation' },
+    content: [{ type: 'text', text: frameCondensationSummary(summary) }],
+  }
+  const selectedAtoms = new Set(sourceUnits.flatMap(unit => unit.atomIds ?? []))
+  const selectedUnits = new Set(sourceUnits.map(unit => unit.id))
+  const afterChanges = roots.map(root => {
+    const composed = composeNativeRoot(projection, root)
+    const content = []
+    let inserted = false
+    for (const pair of composed.pairs) {
+      const selected = selectedAtoms.has(pair.atomId) || selectedUnits.has(pair.unitId)
+        || (composed.message?.role === 'user' && sourceUnits.some(unit => unit.kind === 'user' && unit.sourceRootSeqs.includes(root)))
+      if (selected) {
+        if (root === first && !inserted) { content.push(summaryMessage.content[0]); inserted = true }
+        continue
+      }
+      if (pair.atomId && ['exclude', 'unavailable'].includes(projection.projectionStates?.get(pair.atomId))) continue
+      content.push(structuredClone(pair.block))
+    }
+    if (root === first && !inserted) content.unshift(summaryMessage.content[0])
+    if (!content.length) return { rootEventSeq: root, mode: 'remove' }
+    return { rootEventSeq: root, mode: 'replace', message: { ...structuredClone(composed.message), id: root === first ? summaryMessage.id : summaryMessage.id + '-' + root, source: summaryMessage.source, content } }
+  })
+  return { beforeChanges, afterChanges, summaryMessage }
+}
+
+function collectStreamText(stream) {
+  return (async () => {
+    const deltas = []
+    const blocks = new Map()
+    let finish
+    let usage
+    for await (const chunk of stream) {
+      if (chunk?.type === 'text-delta') {
+        const text = String(chunk.text ?? '')
+        if (text) deltas.push(text)
+      } else if (chunk?.type === 'block-end') {
+        const block = asObject(chunk.block)
+        if (block.type === 'text' && typeof block.text === 'string') blocks.set(Number(chunk.index), block.text)
+      } else if (chunk?.type === 'usage') usage = chunk.usage
+      else if (chunk?.type === 'finish') finish = chunk.reason
+    }
+    const text = deltas.length ? deltas.join('') : Array.from(blocks.values()).join('')
+    const reasonKind = typeof finish === 'string' ? finish : finish?.kind ?? finish?.reason?.kind
+    if (reasonKind === 'error') {
+      const failure = finish?.failure ?? finish?.reason?.failure
+      const detail = [failure?.code, failure?.message].filter(value => typeof value === 'string' && value.trim()).join(': ')
+      throw new Error('CONTEXT_EDITOR_CONDENSATION_MODEL_ERROR' + (detail ? ': ' + detail : ''))
+    }
+    if (reasonKind === 'aborted' || reasonKind === 'cancelled') throw new Error('CONTEXT_EDITOR_CONDENSATION_CANCELLED')
+    return { text, usage, truncated: ['max-tokens', 'length', 'truncated', 'limit'].includes(String(reasonKind)) }
+  })()
+}
+
+function requestHeaderFor(session) {
+  try { return session?.requestHeader?.() ?? session?.header ?? {} } catch { return session?.header ?? {} }
+}
+
+function modelTarget(session, request = {}) {
+  const header = requestHeaderFor(session)
+  const configured = asObject(header.config)
+  const provider = String(request.provider ?? configured.provider ?? '')
+  const model = String(request.model ?? configured.model ?? '')
+  if (!provider || !model) throw new Error('CONTEXT_EDITOR_CONDENSATION_MODEL_REQUIRED')
+  return { provider, model, header }
+}
+
+function rootEventExists(projection, root) {
+  if (!(projection.sourceEvents ?? []).some(event => eventSequence(event) === root)) return false
+  const atoms = (projection.atoms ?? []).filter(atom => Number(atom.sourceRef?.entryId) === root)
+  if (!atoms.length) return false
+  return atoms.some(atom => projection.projectionStates?.get(atom.id) !== 'unavailable')
+}
+
+function overlappingCondensation(projection, roots, operationId) {
+  const selected = new Set(roots)
+  return (projection.condensationEvents ?? []).find(event => event.operationId !== operationId
+    && event.sourceRootSeqs.some(root => selected.has(Number(root))))
+}
+
+function conflictingOverlay(projection, roots, operationId) {
+  for (const root of roots) {
+    const overlay = projection.contextOverlays?.get(root)
+    if (overlay
+      && String(overlay.operationId ?? '') !== String(operationId ?? '')
+      && String(overlay.owner ?? '') !== CONTEXT_PROJECTION_OWNER) return { root, overlay }
+  }
+  return undefined
+}
+
+function activeCondensationForUnits(projection, unitIds) {
+  const requested = new Set((unitIds ?? []).map(String))
+  if (!requested.size) return undefined
+  return (projection.condensationEvents ?? []).find(event => event.effectiveUnitIds.some(id => requested.has(String(id))))
+}
+
+function condensationSurfaceEvent(projection, request, unitIds) {
+  const operationId = String(request?.condensationOperationId ?? '')
+  if (!operationId) return undefined
+  const event = (projection.condensationEvents ?? []).find(value => value.operationId === operationId)
+  if (!event) return undefined
+  const firstRoot = event.sourceRootSeqs?.[0]
+  const firstUnit = (event.sourceUnits ?? []).find(unit => unit.sourceRootSeqs?.includes(firstRoot))
+  const requested = Array.from(new Set((unitIds ?? []).map(String)))
+  return firstUnit?.id !== undefined && requested.length === 1 && requested[0] === String(firstUnit.id)
+    ? event
+    : undefined
+}
+
+function isCondensationSurfaceOperation(projection, request, unitIds) {
+  return condensationSurfaceEvent(projection, request, unitIds) !== undefined
+}
+
+function buildCondensationSurfaceChanges(projection, event, action) {
+  if (action !== 'exclude' && action !== 'restore') throw new Error('CONTEXT_EDITOR_CONTEXT_ACTION_INVALID')
+  const root = Number(event.sourceRootSeqs?.[0])
+  const overlay = projection.contextOverlays?.get(root)
+  const summaryChange = (event.afterChanges ?? []).find(change => Number(change.rootEventSeq) === root && change.mode === 'replace')
+  const summaryMessage = summaryChange?.message
+  if (!Number.isSafeInteger(root) || !summaryMessage) throw new Error('CONTEXT_EDITOR_CONDENSATION_RESTORE_UNAVAILABLE')
+  const visible = isCondensationSummaryOverlay(overlay, event)
+  if (overlay?.mode !== 'remove' && !visible) throw new Error('CONTEXT_EDITOR_CONDENSATION_RESTORE_UNAVAILABLE')
+  const hasSummary = (overlay?.message?.content ?? []).some(block => block.type === 'text' && block.text === frameCondensationSummary(event.summary))
+  const withoutSummary = structuredClone(summaryMessage)
+  withoutSummary.content = withoutSummary.content.filter(block => !(block.type === 'text' && block.text === frameCondensationSummary(event.summary)))
+  const changes = action === 'exclude'
+    ? (!hasSummary ? [] : [withoutSummary.content.length ? { rootEventSeq: root, mode: 'replace', message: withoutSummary } : { rootEventSeq: root, mode: 'remove' }])
+    : (hasSummary ? [] : [{ rootEventSeq: root, mode: 'replace', message: structuredClone(summaryMessage) }])
+  const summaryTokens = estimateCondensationTokens(frameCondensationSummary(event.summary))
+  const before = hasSummary ? summaryTokens : 0
+  const after = action === 'restore' ? summaryTokens : 0
+  const firstUnit = (event.sourceUnits ?? []).find(unit => unit.sourceRootSeqs?.includes(root))
+  return {
+    changes,
+    selection: {
+      requestedUnitIds: firstUnit ? [firstUnit.id] : [],
+      effectiveUnitIds: firstUnit ? [firstUnit.id] : [],
+      autoExpandedUnitIds: [],
+      recordIds: firstUnit ? [firstUnit.recordId] : [],
+      unavailableUnitIds: [],
+    },
+    tokenEstimate: { before, after, delta: after - before },
+  }
+}
+
+function isCondensationSummaryOverlay(overlay, event) {
+  if (overlay?.mode !== 'replace' || !overlay.message) return false
+  if (String(overlay.message.id ?? '') === `condensed-context-${event.operationId}`) return true
+  const content = Array.isArray(overlay.message.content) ? overlay.message.content : []
+  return content.some(block => asObject(block).type === 'text'
+    && String(asObject(block).text ?? '') === frameCondensationSummary(event.summary))
+}
+
+function summaryValidationError(validation) {
+  if (validation.error === 'empty-summary') return 'CONTEXT_EDITOR_CONDENSATION_EMPTY'
+  if (validation.error === 'truncated-summary') return 'CONTEXT_EDITOR_CONDENSATION_TRUNCATED'
+  return 'CONTEXT_EDITOR_CONDENSATION_NOT_SHORTER'
+}
+
+function cleanCondensationOutput(value) {
+  let text = String(value ?? '').trim()
+  text = text.replace(/^```(?:text|markdown)?\s*/i, '').replace(/\s*```$/i, '').trim()
+  text = text.replace(/^<condensed-context>\s*/i, '').replace(/\s*<\/condensed-context>$/i, '').trim()
+  return text
+}
+
+
+
 
 function cloneReplacementMessage(original, excludedBlockIndices, replacementId) {
   const copy = structuredClone(original)
@@ -376,6 +800,8 @@ export class ContextEditorHost extends TypertRemoteService {
     this.searchCache = new Map()
     this.searchSequence = 0
     this.contextOperations = new Map()
+    this.condensationOperations = new Map()
+    this.condensationControllers = new Map()
     this.mutationAdmissionOpen = true
   }
 
@@ -386,6 +812,8 @@ export class ContextEditorHost extends TypertRemoteService {
 
   async dispose() {
     this.mutationAdmissionOpen = false
+    for (const controller of this.condensationControllers.values()) controller.abort()
+    this.condensationControllers.clear()
     await Promise.all(this.operationTails.values())
     if (this.domain !== undefined) await this.domain.close()
     this.searchCache.clear()
@@ -408,6 +836,7 @@ export class ContextEditorHost extends TypertRemoteService {
         storageVersion: 1,
         events: normalizeViewEvents(stored.events),
         replacementEvents: normalizeReplacementEvents(stored.replacementEvents),
+        condensationEvents: normalizeCondensationEvents(stored.condensationEvents),
       }
     }
     // A reused Session id must never inherit another lifecycle's hidden state.
@@ -420,6 +849,7 @@ export class ContextEditorHost extends TypertRemoteService {
       storageVersion: 1,
       events: [],
       replacementEvents: [],
+      condensationEvents: [],
     }
   }
 
@@ -429,7 +859,9 @@ export class ContextEditorHost extends TypertRemoteService {
     const row = this.rowFor(identity)
     const events = inspection.events ?? []
     const activeSurfaceSeqs = foldSurface(events).nodes
-    return buildProjection(identity, events, row, { activeSurfaceSeqs })
+    const projection = buildProjection(identity, events, row, { activeSurfaceSeqs })
+    projection.condensationEvents = activeCondensationEvents(row.condensationEvents, events)
+    return projection
   }
 
   projectionFromSession(session) {
@@ -437,7 +869,9 @@ export class ContextEditorHost extends TypertRemoteService {
     const row = this.rowFor(identity)
     const events = session.events ?? []
     const activeSurfaceSeqs = foldSurface(events).nodes
-    return buildProjection(identity, events, row, { activeSurfaceSeqs })
+    const projection = buildProjection(identity, events, row, { activeSurfaceSeqs })
+    projection.condensationEvents = activeCondensationEvents(row.condensationEvents, events)
+    return projection
   }
 
   snapshotOf(projection, running = isBusySession(this.ctx, projection.identity.id)) {
@@ -484,11 +918,13 @@ export class ContextEditorHost extends TypertRemoteService {
         viewMutation: !running,
         undo: !running,
         persistence: true,
-        // 0.3.1 release: the target profile install gate is complete;
+        // 0.4.0 release: the target profile install gate is complete;
         // real-provider smoke remains a separate user-owned check.
         contextExclusion: true,
         contextReplacement: true,
+        contextCondensation: true,
       },
+      condensations: (projection.condensationEvents ?? []).map(event => condensationSnapshot(event, projection)),
     }
   }
 
@@ -582,6 +1018,9 @@ export class ContextEditorHost extends TypertRemoteService {
   }
 
   async previewContext(request) {
+    if (request?.action === 'condense') return this.previewCondensation(request)
+    if (request?.action === 'condense-models') return this.listCondensationModels(request)
+    if (request?.action === 'cancel-condense') return this.cancelCondensation(request)
     const sessionId = requestSessionId(request)
     if (isBusySession(this.ctx, sessionId)) throw new Error('CONTEXT_EDITOR_BUSY')
     const projection = await this.readProjection(sessionId)
@@ -598,7 +1037,14 @@ export class ContextEditorHost extends TypertRemoteService {
     const unitIds = Array.isArray(request?.unitIds) ? request.unitIds.map(String) : undefined
     const recordIds = Array.isArray(request?.recordIds) ? request.recordIds.map(String) : undefined
     const operationId = String(request?.operationId ?? randomId('context-operation'))
-    const calculated = buildNativeContextChanges(projection, action, { ...request, unitIds, recordIds, operationId })
+    const surfaceEvent = condensationSurfaceEvent(projection, request, unitIds)
+    const calculated = surfaceEvent
+      ? buildCondensationSurfaceChanges(projection, surfaceEvent, action)
+      : buildNativeContextChanges(projection, action, { ...request, unitIds, recordIds, operationId })
+    if (activeCondensationForUnits(projection, calculated.selection.effectiveUnitIds)
+      && !surfaceEvent) {
+      throw new Error('CONTEXT_EDITOR_CONDENSATION_RESTORE_REQUIRED')
+    }
     assertContextOperationReuse(this.contextOperations.get(operationId), sessionId, action, unitIds, recordIds)
     this.contextOperations.set(operationId, {
       sessionId,
@@ -608,6 +1054,7 @@ export class ContextEditorHost extends TypertRemoteService {
       recordIds,
       changes: structuredClone(calculated.changes),
       tokenEstimate: calculated.tokenEstimate,
+      ...(request?.condensationOperationId === undefined ? {} : { condensationOperationId: String(request.condensationOperationId) }),
     })
     return {
       ok: true,
@@ -626,7 +1073,388 @@ export class ContextEditorHost extends TypertRemoteService {
     }
   }
 
+  async listCondensationModels(request) {
+    const sessionId = requestSessionId(request)
+    if (isBusySession(this.ctx, sessionId)) throw new Error('CONTEXT_EDITOR_BUSY')
+    return withSourceAgent(this.ctx, sessionId, async agent => {
+      const { provider, model } = modelTarget(agent.session, request)
+      let models = []
+      if (typeof this.ctx.llm?.listModels === 'function') {
+        try {
+          const listed = await this.ctx.llm.listModels(provider)
+          models = (Array.isArray(listed) ? listed : []).map(value => ({
+            provider,
+            id: String(value?.id ?? value?.model ?? ''),
+            name: String(value?.name ?? value?.id ?? value?.model ?? ''),
+          })).filter(value => value.id)
+        } catch {
+          models = []
+        }
+      }
+      if (!models.some(value => value.id === model)) models.unshift({ provider, id: model, name: model })
+      return { ok: true, sessionId, provider, currentModel: model, models }
+    })
+  }
+
+  async cancelCondensation(request = {}) {
+    const sessionId = requestSessionId(request)
+    const operationId = String(request.operationId ?? '')
+    if (!operationId) throw new Error('CONTEXT_EDITOR_CONDENSATION_OPERATION_ID_REQUIRED')
+    const controller = this.condensationControllers.get(operationId)
+    if (controller) controller.abort()
+    this.condensationControllers.delete(operationId)
+    this.condensationOperations.delete(operationId)
+    if (this.table !== undefined && sessionId) {
+      const inspection = await this.inspect(sessionId)
+      const identity = identityFromInspection(inspection, sessionId)
+      const row = this.rowFor(identity)
+      const condensationEvents = row.condensationEvents.filter(event => !(event.operationId === operationId && event.status === 'pending'))
+      if (condensationEvents.length !== row.condensationEvents.length) {
+        await this.table.put(sessionId, {
+          session: row.session,
+          schemaVersion: 1,
+          storageVersion: 1,
+          events: row.events,
+          replacementEvents: row.replacementEvents,
+          condensationEvents,
+        })
+      }
+    }
+    return { ok: true, operationId, cancelled: Boolean(controller) }
+  }
+
+  async previewCondensation(request = {}) {
+    const sessionId = requestSessionId(request)
+    if (isBusySession(this.ctx, sessionId)) throw new Error('CONTEXT_EDITOR_BUSY')
+    const initial = await this.readProjection(sessionId)
+    const expectedRevision = request?.baseRevision ?? request?.expectedRevision
+    if (expectedRevision !== undefined && String(expectedRevision) !== initial.revision) {
+      return { ok: false, conflict: true, snapshot: this.snapshotOf(initial), baseRevision: initial.revision }
+    }
+    return withSourceAgent(this.ctx, sessionId, async agent => {
+      const session = agent.session
+      const projection = this.projectionFromSession(session)
+      if (expectedRevision !== undefined && String(expectedRevision) !== projection.revision) {
+        return { ok: false, conflict: true, snapshot: this.snapshotOf(projection, false), baseRevision: projection.revision }
+      }
+      const requestedUnitIds = Array.isArray(request.unitIds) ? request.unitIds.map(String) : []
+      const onlyUnit = requestedUnitIds.length === 1 ? targetUnit(projection, requestedUnitIds[0])?.unit : undefined
+      const canExpandRelated = onlyUnit?.kind === 'answer'
+      const expandRelated = canExpandRelated && request.expandRelated === true
+      const range = selectCondensationRange(projection.records, requestedUnitIds, projection.projectionStates, { expandRelated })
+      if (!range.requestedUnitIds.length) throw new Error('CONTEXT_EDITOR_CONDENSATION_RANGE_EMPTY')
+      if (range.unavailableUnitIds.length) throw new Error('CONTEXT_EDITOR_CONDENSATION_UNAVAILABLE:' + range.unavailableUnitIds.join(','))
+      const opaque = range.sourceUnits.find(source => source.hasSignature || source.structured)
+      if (opaque) throw new Error('CONTEXT_EDITOR_CONDENSATION_OPAQUE_CONTENT:' + opaque.id)
+      const roots = range.sourceRootSeqs
+      if (roots.some(root => !rootEventExists(projection, root))) throw new Error('CONTEXT_EDITOR_CONDENSATION_SOURCE_GONE')
+      const overlap = overlappingCondensation(projection, roots)
+      if (overlap) throw new Error('CONTEXT_EDITOR_CONDENSATION_OVERLAP:' + overlap.operationId)
+      const overlayConflict = conflictingOverlay(projection, roots)
+      if (overlayConflict) throw new Error('CONTEXT_EDITOR_CONDENSATION_OVERLAP:root-' + overlayConflict.root)
+      const target = modelTarget(session, request)
+      const prefixMessages = messagesBefore(projection, roots[0] - 1)
+      const historyMessages = messagesBefore(projection, roots.at(-1))
+      const configured = asObject(target.header.config)
+      const prefixReused = String(configured.provider ?? '') === target.provider && String(configured.model ?? '') === target.model
+      const generationMessages = prefixReused
+        ? [...historyMessages, { id: randomId('condensation-instruction'), role: 'user', source: { kind: 'plugin', plugin: PACKAGE_NAME }, content: [{ type: 'text', text: condensationInstruction(range) }] }]
+        : [{ id: randomId('condensation-instruction'), role: 'user', source: { kind: 'plugin', plugin: PACKAGE_NAME }, content: [{ type: 'text', text: condensationInstruction(range) }] }]
+      const beforeTokens = range.sourceUnits.filter(source => source.included).reduce((sum, source) => sum + source.approxTokens, 0)
+      if (Number(request.maxInputTokens) > 0 && estimateCondensationTokens(JSON.stringify(generationMessages)) > Number(request.maxInputTokens)) {
+        throw new Error('CONTEXT_EDITOR_CONDENSATION_INPUT_TOO_LARGE')
+      }
+      if (typeof this.ctx.llm?.stream !== 'function') throw new Error('CONTEXT_EDITOR_CONDENSATION_LLM_UNAVAILABLE')
+      const operationId = String(request.operationId ?? randomId('condensation'))
+      const abortController = typeof AbortController === 'function' ? new AbortController() : undefined
+      if (request.signal?.aborted) throw new Error('CONTEXT_EDITOR_CONDENSATION_CANCELLED')
+      if (abortController) {
+        this.condensationControllers.set(operationId, abortController)
+        request.signal?.addEventListener?.('abort', () => abortController.abort(), { once: true })
+      }
+      let result
+      try {
+        const stream = this.ctx.llm.stream({
+          provider: target.provider,
+          model: target.model,
+          messages: generationMessages,
+          ...(prefixReused && target.header.system !== undefined ? { system: target.header.system } : {}),
+          ...(prefixReused && target.header.tools !== undefined ? { tools: target.header.tools } : {}),
+          ...(target.header.temperature === undefined ? {} : { temperature: target.header.temperature }),
+          maxTokens: Number(request.maxTokens) > 0 ? Number(request.maxTokens) : 4096,
+          ...(abortController ? { signal: abortController.signal } : request.signal === undefined ? {} : { signal: request.signal }),
+          sessionId: session.id,
+          purpose: 'compaction',
+        })
+        result = await collectStreamText(stream)
+      } finally {
+        if (this.condensationControllers.get(operationId) === abortController) this.condensationControllers.delete(operationId)
+      }
+      const summary = cleanCondensationOutput(result.text)
+      const summaryTokens = estimateCondensationTokens(frameCondensationSummary(summary))
+      const validation = validateCondensationSummary(summary, beforeTokens, { summaryTokens, truncated: result.truncated })
+      if (!validation.ok) throw new Error(summaryValidationError(validation))
+      const changes = buildCondensationChanges(projection, roots, summary, operationId, range.sourceUnits)
+      const risks = Array.from(new Set([...range.risks, ...(validation.warnings.length ? ['small-saving'] : [])]))
+      const proposal = {
+        schemaVersion: 1,
+        operationId,
+        sessionId,
+        baseRevision: projection.revision,
+        expandRelated,
+        canExpandRelated,
+        requestedUnitIds: range.requestedUnitIds,
+        effectiveUnitIds: range.effectiveUnitIds,
+        autoExpandedUnitIds: range.autoExpandedUnitIds,
+        recordIds: range.recordIds,
+        sourceRootSeqs: roots,
+        sourceFingerprint: range.sourceFingerprint,
+        sourceUnits: range.sourceUnits,
+        summary,
+        provider: target.provider,
+        model: target.model,
+        metrics: validation.metrics,
+        prefixTokens: prefixReused ? prefixMessages.reduce((sum, message) => sum + estimateMessageTokens(message), 0) : 0,
+        prefixReused,
+        summaryTokens,
+        risks,
+        warnings: [...validation.warnings, ...(prefixReused ? [] : ['prefix-not-reused'])],
+        createdAt: new Date().toISOString(),
+      }
+      const pendingEvent = {
+        ...proposal,
+        type: 'condensation',
+        action: 'apply',
+        status: 'pending',
+        beforeChanges: changes.beforeChanges,
+        afterChanges: changes.afterChanges,
+      }
+      const row = this.rowFor(projection.identity)
+      const condensationEvents = row.condensationEvents.some(value => value.operationId === operationId)
+        ? row.condensationEvents.map(value => value.operationId === operationId ? pendingEvent : value)
+        : [...row.condensationEvents, pendingEvent]
+      await this.table.put(sessionId, {
+        session: row.session,
+        schemaVersion: 1,
+        storageVersion: 1,
+        events: row.events,
+        replacementEvents: row.replacementEvents,
+        condensationEvents,
+      })
+      this.condensationOperations.set(operationId, {
+        ...proposal,
+        beforeChanges: changes.beforeChanges,
+        afterChanges: changes.afterChanges,
+      })
+      return {
+        ok: true,
+        ...proposal,
+        range,
+        validation,
+        snapshot: this.snapshotOf(projection, false),
+      }
+    })
+  }
+
+  async commitCondensation(request = {}) {
+    const sessionId = requestSessionId(request)
+    return this.enqueue(sessionId, async () => {
+      if (isBusySession(this.ctx, sessionId)) throw new Error('CONTEXT_EDITOR_BUSY')
+      const operationId = String(request.operationId ?? '')
+      if (!operationId) throw new Error('CONTEXT_EDITOR_CONDENSATION_OPERATION_ID_REQUIRED')
+      const initial = await this.readProjection(sessionId)
+      const row = this.rowFor(initial.identity)
+      const sidecarEvent = row.condensationEvents.find(event => event.operationId === operationId)
+      const priorNative = (initial.sourceEvents ?? []).find(event => nativeCondensationOperationId(event) === operationId
+        && (asObject(event.data).condensationAction ?? asObject(event.data).condensation?.action) === 'apply')
+      if (priorNative !== undefined && sidecarEvent !== undefined) {
+        return success(this.snapshotOf(initial, false), { operationId, eventId: String(priorNative.seq) })
+      }
+      const prepared = this.condensationOperations.get(operationId) ?? sidecarEvent
+      if (!prepared) throw new Error('CONTEXT_EDITOR_CONDENSATION_PROPOSAL_NOT_FOUND')
+      const expectedRevision = String(request.baseRevision ?? prepared.baseRevision ?? '')
+      if (!expectedRevision) throw new Error('CONTEXT_EDITOR_REVISION_REQUIRED')
+      if (expectedRevision !== initial.revision) return { ok: false, conflict: true, operationId, snapshot: this.snapshotOf(initial, false) }
+      const roots = (prepared.sourceRootSeqs ?? []).map(Number).filter(Number.isSafeInteger)
+      if (!roots.length) throw new Error('CONTEXT_EDITOR_CONDENSATION_RANGE_EMPTY')
+      const opaque = (prepared.sourceUnits ?? []).find(source => source.hasSignature || source.structured)
+      if (opaque) throw new Error('CONTEXT_EDITOR_CONDENSATION_OPAQUE_CONTENT:' + opaque.id)
+      if (roots.some(root => !rootEventExists(initial, root))) throw new Error('CONTEXT_EDITOR_CONDENSATION_SOURCE_GONE')
+      if (prepared.sourceFingerprint) {
+        const currentRange = selectCondensationRange(initial.records, prepared.requestedUnitIds ?? request.unitIds ?? [], initial.projectionStates, { expandRelated: prepared.expandRelated ?? true })
+        if (currentRange.sourceFingerprint !== prepared.sourceFingerprint) throw new Error('CONTEXT_EDITOR_CONDENSATION_CONFLICT')
+      }
+      if (overlappingCondensation(initial, roots, operationId)) throw new Error('CONTEXT_EDITOR_CONDENSATION_OVERLAP')
+      const overlayConflict = conflictingOverlay(initial, roots, operationId)
+      if (overlayConflict) throw new Error('CONTEXT_EDITOR_CONDENSATION_CONFLICT:root-' + overlayConflict.root)
+      if (prepared.beforeChanges) {
+        const currentBefore = roots.map(root => beforeChangeForRoot(initial, root))
+        if (!sameJson(currentBefore, prepared.beforeChanges)) throw new Error('CONTEXT_EDITOR_CONDENSATION_CONFLICT')
+      }
+      const summary = cleanCondensationOutput(String(request.summary ?? prepared.summary ?? ''))
+      if (request.summary !== undefined && sidecarEvent?.status === 'applied' && summary !== String(sidecarEvent.summary).trim()) {
+        throw new Error('CONTEXT_EDITOR_OPERATION_REUSED')
+      }
+      const beforeTokens = Number(prepared.metrics?.beforeTokens) || (prepared.sourceUnits ?? []).filter(source => source.included).reduce((sum, source) => sum + (Number(source.approxTokens) || 0), 0)
+      const summaryTokens = estimateCondensationTokens(frameCondensationSummary(summary))
+      const validation = validateCondensationSummary(summary, beforeTokens, { summaryTokens })
+      if (!validation.ok) throw new Error(summaryValidationError(validation))
+      const changes = buildCondensationChanges(initial, roots, summary, operationId, prepared.sourceUnits)
+      const event = {
+        schemaVersion: 1,
+        type: 'condensation',
+        action: 'apply',
+        status: 'pending',
+        operationId,
+        sessionId,
+        baseRevision: initial.revision,
+        expandRelated: prepared.expandRelated ?? true,
+        requestedUnitIds: (prepared.requestedUnitIds ?? request.unitIds ?? []).map(String),
+        effectiveUnitIds: (prepared.effectiveUnitIds ?? request.unitIds ?? []).map(String),
+        recordIds: (prepared.recordIds ?? []).map(String),
+        sourceRootSeqs: roots,
+        sourceFingerprint: String(prepared.sourceFingerprint ?? ''),
+        sourceUnits: structuredClone(prepared.sourceUnits ?? []),
+        summary,
+        provider: String(prepared.provider ?? request.provider ?? ''),
+        model: String(prepared.model ?? request.model ?? ''),
+        metrics: validation.metrics,
+        prefixTokens: Number(prepared.prefixTokens) || 0,
+        ...(prepared.prefixReused === undefined ? {} : { prefixReused: Boolean(prepared.prefixReused) }),
+        summaryTokens,
+        createdAt: String(prepared.createdAt ?? new Date().toISOString()),
+        beforeChanges: changes.beforeChanges,
+        afterChanges: changes.afterChanges,
+      }
+      const condensationEvents = row.condensationEvents.some(value => value.operationId === operationId)
+        ? row.condensationEvents.map(value => value.operationId === operationId ? event : value)
+        : [...row.condensationEvents, event]
+      await this.table.put(sessionId, {
+        session: row.session,
+        schemaVersion: 1,
+        storageVersion: 1,
+        events: row.events,
+        replacementEvents: row.replacementEvents,
+        condensationEvents,
+      })
+      return withSourceAgent(this.ctx, sessionId, async agent => {
+        const session = agent.session
+        const projection = this.projectionFromSession(session)
+        const native = (session.events ?? []).find(value => nativeCondensationOperationId(value) === operationId
+          && (asObject(value.data).condensationAction ?? asObject(value.data).condensation?.action) === 'apply')
+        if (native !== undefined) {
+          this.condensationOperations.delete(operationId)
+          return success(this.snapshotOf(projection, false), { operationId, eventId: String(native.seq) })
+        }
+        if (projection.revision !== initial.revision) return { ok: false, conflict: true, operationId, snapshot: this.snapshotOf(projection, false) }
+        const currentBefore = roots.map(root => beforeChangeForRoot(projection, root))
+        if (!sameJson(currentBefore, changes.beforeChanges)) throw new Error('CONTEXT_EDITOR_CONDENSATION_CONFLICT')
+        const baseSeq = session.events.at(-1)?.seq ?? -1
+        if (baseSeq < 0) throw new Error('CONTEXT_EDITOR_SESSION_EMPTY')
+        const data = {
+          schemaVersion: 1,
+          owner: CONTEXT_PROJECTION_OWNER,
+          operationId: `${operationId}:apply`,
+          baseSeq,
+          changes: changes.afterChanges,
+          condensationOperationId: operationId,
+          condensationAction: 'apply',
+          condensation: { operationId, action: 'apply' },
+        }
+        const nativeEvent = typeof session.appendContextProjection === 'function'
+          ? session.appendContextProjection(data)
+          : session.append('context/projection', data)
+        await this.ctx.sessions.flush(session)
+        const appliedEvent = { ...event, status: 'applied' }
+        await this.table.put(sessionId, {
+          session: row.session,
+          schemaVersion: 1,
+          storageVersion: 1,
+          events: row.events,
+          replacementEvents: row.replacementEvents,
+          condensationEvents: condensationEvents.map(value => value.operationId === operationId ? appliedEvent : value),
+        })
+        this.searchCache.clear()
+        this.condensationOperations.delete(operationId)
+        const next = this.projectionFromSession(session)
+        return success(this.snapshotOf(next, false), { operationId, eventId: String(nativeEvent.seq), metrics: validation.metrics, warnings: validation.warnings })
+      })
+    })
+  }
+
+  async restoreCondensation(request = {}) {
+    const sessionId = requestSessionId(request)
+    return this.enqueue(sessionId, async () => {
+      if (isBusySession(this.ctx, sessionId)) throw new Error('CONTEXT_EDITOR_BUSY')
+      const operationId = String(request.operationId ?? '')
+      if (!operationId) throw new Error('CONTEXT_EDITOR_CONDENSATION_OPERATION_ID_REQUIRED')
+      const initial = await this.readProjection(sessionId)
+      const row = this.rowFor(initial.identity)
+      const event = row.condensationEvents.find(value => value.operationId === operationId)
+      if (!event) throw new Error('CONTEXT_EDITOR_CONDENSATION_NOT_FOUND')
+      const existingRestore = (initial.sourceEvents ?? []).find(value => nativeCondensationOperationId(value) === operationId
+        && (asObject(value.data).condensationAction ?? asObject(value.data).condensation?.action) === 'restore')
+      if (existingRestore !== undefined) return success(this.snapshotOf(initial, false), { operationId, eventId: String(existingRestore.seq) })
+      const expectedRevision = String(request.baseRevision ?? initial.revision)
+      if (expectedRevision !== initial.revision) return { ok: false, conflict: true, operationId, snapshot: this.snapshotOf(initial, false) }
+      const roots = event.sourceRootSeqs.map(Number).filter(Number.isSafeInteger)
+      if (!roots.length || roots.some(root => !rootEventExists(initial, root))) throw new Error('CONTEXT_EDITOR_CONDENSATION_SOURCE_GONE')
+      for (const root of roots) {
+        const overlay = initial.contextOverlays?.get(root)
+        if (!overlay || (![operationId, `${operationId}:apply`].includes(String(overlay.operationId ?? ''))
+          && !isCondensationSummaryOverlay(overlay, event))) throw new Error('CONTEXT_EDITOR_CONDENSATION_RESTORE_UNAVAILABLE')
+      }
+      return withSourceAgent(this.ctx, sessionId, async agent => {
+        const session = agent.session
+        const projection = this.projectionFromSession(session)
+        if (projection.revision !== initial.revision) return { ok: false, conflict: true, operationId, snapshot: this.snapshotOf(projection, false) }
+        for (const root of roots) {
+          const overlay = projection.contextOverlays?.get(root)
+          if (!overlay || (![operationId, `${operationId}:apply`].includes(String(overlay.operationId ?? ''))
+            && !isCondensationSummaryOverlay(overlay, event))) throw new Error('CONTEXT_EDITOR_CONDENSATION_RESTORE_UNAVAILABLE')
+        }
+        const baseSeq = session.events.at(-1)?.seq ?? -1
+        if (baseSeq < 0) throw new Error('CONTEXT_EDITOR_SESSION_EMPTY')
+        const restoreId = `${operationId}:restore`
+        const data = {
+          schemaVersion: 1,
+          owner: CONTEXT_PROJECTION_OWNER,
+          operationId: restoreId,
+          baseSeq,
+          changes: structuredClone(event.beforeChanges),
+          condensationOperationId: operationId,
+          condensationAction: 'restore',
+          condensation: { operationId, action: 'restore' },
+        }
+        const nativeEvent = typeof session.appendContextProjection === 'function'
+          ? session.appendContextProjection(data)
+          : session.append('context/projection', data)
+        await this.ctx.sessions.flush(session)
+        const restoredEvent = { ...event, status: 'restored', restoreEventSeq: Number(nativeEvent.seq) }
+        const condensationEvents = row.condensationEvents.map(value => value.operationId === operationId ? restoredEvent : value)
+        await this.table.put(sessionId, {
+          session: row.session,
+          schemaVersion: 1,
+          storageVersion: 1,
+          events: row.events,
+          replacementEvents: row.replacementEvents,
+          condensationEvents,
+        })
+        this.searchCache.clear()
+        this.condensationOperations.delete(operationId)
+        const next = this.projectionFromSession(session)
+        return success(this.snapshotOf(next, false), { operationId, eventId: String(nativeEvent.seq) })
+      })
+    })
+  }
+
+  async prepareCondensation(request) { return this.previewCondensation(request) }
+  async generateCondensation(request) { return this.previewCondensation(request) }
+  async undoCondensation(request) { return this.restoreCondensation(request) }
+
   async commitContext(request) {
+    if (request?.action === 'condense') return this.commitCondensation(request)
+    if (request?.action === 'restore-condensation') return this.restoreCondensation(request)
     const sessionId = requestSessionId(request)
     return this.enqueue(sessionId, async () => {
       const operationId = String(request?.operationId ?? randomId('context-operation'))
@@ -665,11 +1493,10 @@ export class ContextEditorHost extends TypertRemoteService {
               events: session.events.slice(0, priorIndex),
             }
             const priorProjection = this.projectionFromSession(beforeSession)
-            const expectedChanges = buildNativeContextChanges(priorProjection, action, {
-              unitIds,
-              recordIds,
-              operationId,
-            }).changes
+            const priorSurface = condensationSurfaceEvent(priorProjection, { condensationOperationId: request?.condensationOperationId ?? stored?.condensationOperationId }, unitIds)
+            const expectedChanges = (priorSurface
+              ? buildCondensationSurfaceChanges(priorProjection, priorSurface, action)
+              : buildNativeContextChanges(priorProjection, action, { unitIds, recordIds, operationId })).changes
             if (!sameJson(expectedChanges, priorEvent.data.changes)) {
               throw new Error('CONTEXT_EDITOR_OPERATION_REUSED')
             }
@@ -692,11 +1519,18 @@ export class ContextEditorHost extends TypertRemoteService {
             snapshot: this.snapshotOf(projection, false),
           }
         }
-        const calculated = buildNativeContextChanges(projection, action, {
-          unitIds,
-          recordIds,
-          operationId,
-        })
+        const surfaceEvent = condensationSurfaceEvent(projection, { condensationOperationId: request?.condensationOperationId ?? stored?.condensationOperationId }, unitIds)
+        const calculated = surfaceEvent
+          ? buildCondensationSurfaceChanges(projection, surfaceEvent, action)
+          : buildNativeContextChanges(projection, action, {
+            unitIds,
+            recordIds,
+            operationId,
+          })
+        if (activeCondensationForUnits(projection, calculated.selection.effectiveUnitIds)
+          && !surfaceEvent) {
+          throw new Error('CONTEXT_EDITOR_CONDENSATION_RESTORE_REQUIRED')
+        }
         if (calculated.changes.length === 0) {
           return success(this.snapshotOf(projection, false), {
             operationId,
@@ -740,6 +1574,9 @@ export class ContextEditorHost extends TypertRemoteService {
     }
     const target = targetUnit(projection, String(request?.unitId ?? ''))
     if (!target) throw new Error('CONTEXT_EDITOR_REPLACEMENT_TARGET_NOT_FOUND')
+    if (activeCondensationForUnits(projection, [target.unit.id])) {
+      return { ok: false, snapshot: this.snapshotOf(projection), baseRevision: projection.revision, unitId: target.unit.id, unitKind: target.unit.kind, textChanged: false, excludeAssociatedReasoning: false, associatedReasoningUnitIds: [], requestedUnitIds: [target.unit.id], effectiveUnitIds: [target.unit.id], autoExpandedUnitIds: [], newlyExcludedUnitIds: [], alreadyExcludedUnitIds: [], newlyExcludedAtomIds: [], alreadyExcludedAtomIds: [], unavailableUnitIds: [], requiresConfirmation: false, canCommit: false, disabledReason: 'condensation-active' }
+    }
     if (!target.unit.replacementSupported || target.unit.replacementState === 'unavailable') {
       return { ok: false, snapshot: this.snapshotOf(projection), baseRevision: projection.revision, unitId: target.unit.id, unitKind: target.unit.kind, textChanged: false, excludeAssociatedReasoning: false, associatedReasoningUnitIds: [], requestedUnitIds: [target.unit.id], effectiveUnitIds: [target.unit.id], autoExpandedUnitIds: [], newlyExcludedUnitIds: [], alreadyExcludedUnitIds: [], newlyExcludedAtomIds: [], alreadyExcludedAtomIds: [], unavailableUnitIds: [], requiresConfirmation: false, canCommit: false, disabledReason: target.unit.replacementDisabledReason ?? 'invalid-target' }
     }
@@ -778,6 +1615,7 @@ export class ContextEditorHost extends TypertRemoteService {
       if (expectedRevision !== initial.revision) return { ok: false, conflict: true, operationId, snapshot: this.snapshotOf(initial, false) }
       const target = targetUnit(initial, String(request?.unitId ?? ''))
       if (!target) throw new Error('CONTEXT_EDITOR_REPLACEMENT_TARGET_NOT_FOUND')
+      if (activeCondensationForUnits(initial, [target.unit.id])) throw new Error('CONTEXT_EDITOR_CONDENSATION_RESTORE_REQUIRED')
       if (!target.unit.replacementSupported || target.unit.replacementState === 'unavailable') throw new Error('CONTEXT_EDITOR_REPLACEMENT_UNSUPPORTED:' + (target.unit.replacementDisabledReason ?? 'invalid-target'))
       const currentState = initial.replacementStates.get(target.unit.id)
       const row = this.rowFor(initial.identity)
@@ -820,7 +1658,7 @@ export class ContextEditorHost extends TypertRemoteService {
       }
       if (event === undefined) throw new Error('CONTEXT_EDITOR_REPLACEMENT_ACTION_INVALID')
       const replacementEvents = row.replacementEvents.some(value => value.eventId === event.eventId) ? row.replacementEvents : [...row.replacementEvents, event]
-      await this.table.put(sessionId, { session: row.session, schemaVersion: 1, storageVersion: 1, events: row.events, replacementEvents })
+      await this.table.put(sessionId, { session: row.session, schemaVersion: 1, storageVersion: 1, events: row.events, replacementEvents, condensationEvents: row.condensationEvents ?? [] })
       return withSourceAgent(this.ctx, sessionId, async agent => {
         const session = agent.session
         const sourceProjection = this.projectionFromSession(session)
@@ -890,6 +1728,7 @@ export class ContextEditorHost extends TypertRemoteService {
         storageVersion: 1,
         events: [...latest.events, event],
         replacementEvents: latest.replacementEvents ?? [],
+        condensationEvents: latest.condensationEvents ?? [],
       }
       await this.table.put(sessionId, nextRow)
       this.searchCache.clear()
@@ -930,6 +1769,7 @@ export class ContextEditorHost extends TypertRemoteService {
         storageVersion: 1,
         events: [...latest.events, event],
         replacementEvents: latest.replacementEvents ?? [],
+        condensationEvents: latest.condensationEvents ?? [],
       })
       this.searchCache.clear()
       const next = await this.readProjection(sessionId)

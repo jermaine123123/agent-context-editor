@@ -8,6 +8,11 @@ import type {
   ContextSearchScope,
   ContextEditorViewEventV2,
 } from './types.js'
+import type {
+  CondensationProposal,
+  CondensationRange,
+  CondensationValidation,
+} from './condensation.js'
 import type { ContextEditableUnitProjectionState } from './types.js'
 
 /** Host-neutral identity for one persisted conversation. */
@@ -39,6 +44,8 @@ export interface ContextHostCapabilities {
   readonly contextExclusion: boolean
   /** Whether the host can edit User/Answer text in the model-facing projection. */
   readonly contextReplacement: boolean
+  /** Whether this host can generate and apply AI condensation proposals. */
+  readonly contextCondensation?: boolean
 }
 
 export interface ContextRecordPage {
@@ -92,6 +99,8 @@ export interface ContextProjectionMutationRequest {
   readonly action: 'exclude' | 'restore'
   readonly recordIds?: readonly string[]
   readonly unitIds?: readonly string[]
+  /** Identifies the active condensation surface when toggling its summary as a whole. */
+  readonly condensationOperationId?: string
 }
 
 export interface ContextReplacementMutationRequest {
@@ -156,6 +165,45 @@ export interface ContextMutationResult {
   readonly snapshot: ContextEditorSnapshot
 }
 
+export interface ContextCondensationPrepareRequest {
+  readonly expandRelated?: boolean
+  readonly locator: ContextSessionLocator
+  readonly baseRevision: string
+  readonly unitIds: readonly string[]
+  readonly provider?: string
+  readonly model?: string
+  readonly maxTokens?: number
+  readonly signal?: AbortSignal
+}
+
+export interface ContextCondensationCommitRequest {
+  readonly locator: ContextSessionLocator
+  readonly baseRevision: string
+  readonly operationId: string
+  readonly summary: string
+  readonly unitIds?: readonly string[]
+}
+
+export interface ContextCondensationRestoreRequest {
+  readonly locator: ContextSessionLocator
+  readonly baseRevision: string
+  readonly operationId: string
+}
+
+export interface ContextCondensationCancelRequest {
+  readonly locator: ContextSessionLocator
+  readonly operationId: string
+}
+
+export interface ContextCondensationUndoRequest extends ContextCondensationRestoreRequest {}
+
+export interface ContextCondensationPreview extends CondensationProposal {
+  readonly ok: boolean
+  readonly snapshot: ContextEditorSnapshot
+  readonly range?: CondensationRange
+  readonly validation?: CondensationValidation
+}
+
 /** Host contract consumed by any Context Editor client. */
 export interface ContextEditorHostAdapter {
   getSnapshot(locator: ContextSessionLocator): Promise<ContextEditorSnapshot>
@@ -171,6 +219,12 @@ export interface ContextEditorHostAdapter {
   commitReplacement?(request: ContextReplacementMutationRequest): Promise<ContextMutationResult>
   restoreReplacement?(request: ContextReplacementUnitRequest): Promise<ContextMutationResult>
   undoReplacement?(request: ContextReplacementUnitRequest): Promise<ContextMutationResult>
+  prepareCondensation?(request: ContextCondensationPrepareRequest): Promise<ContextCondensationPreview>
+  generateCondensation?(request: ContextCondensationPrepareRequest): Promise<ContextCondensationPreview>
+  cancelCondensation?(request: ContextCondensationCancelRequest): Promise<{ readonly ok: boolean; readonly operationId: string; readonly cancelled: boolean }>
+  commitCondensation?(request: ContextCondensationCommitRequest): Promise<ContextMutationResult>
+  restoreCondensation?(request: ContextCondensationRestoreRequest): Promise<ContextMutationResult>
+  undoCondensation?(request: ContextCondensationUndoRequest): Promise<ContextMutationResult>
 }
 
 /** Persisted view event shape shared by Pi and non-Pi hosts. */

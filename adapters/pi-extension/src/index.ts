@@ -2,9 +2,10 @@ import type { ContextEvent, ExtensionAPI, ExtensionContext, SessionBeforeCompact
 import { normalizeSessionEntries } from "./normalize.js";
 import { readLatestState, STATE_ENTRY_TYPE } from "./state.js";
 import { runDesktopContextEditor } from "./desktop-ui.js";
-import { ContextEditorComponent, type ContextEditorExit, type ContextEditorUiState, type ReplacementReview } from "./ui.js";
+import { ContextEditorComponent, type ContextEditorExit, type ContextEditorUiState, type ReplacementReview, type CondensationReview } from "./ui.js";
 import { PiContextEditorHost } from "./host.js";
 import type { ContextEditorStateV1 } from "./types.js";
+import { estimateCondensationTokens, frameCondensationSummary, validateCondensationSummary } from "./shared-core/index.js";
 import { createPiText, detectPiLocale } from "./locale.js";
 import { projectModelContext, projectionOverlapsEntryIds } from "./projection-hook.js";
 
@@ -142,16 +143,17 @@ export default function contextEditorExtension(pi: ExtensionAPI): void {
 
       let uiState: ContextEditorUiState | undefined;
       let replacementReview: ReplacementReview | undefined;
+      let condensationReview: CondensationReview | undefined;
       const text = createPiText(locale);
+      const host = new PiContextEditorHost(ctx);
+      const locator = { host: "pi", sessionId: host.sessionId };
       while (true) {
-        const host = new PiContextEditorHost(ctx);
         const records = host.records();
         if (records.length === 0) {
           ctx.ui.notify("There are no editable context records in the active branch.", "info");
           break;
         }
         const snapshot = host.snapshot();
-        const locator = { host: "pi", sessionId: host.sessionId };
         const prefs = host.getPrefs();
         let exit: ContextEditorExit | undefined;
         await ctx.ui.custom((tui, theme, _keybindings, done) =>
@@ -169,6 +171,10 @@ export default function contextEditorExtension(pi: ExtensionAPI): void {
               commitContext: (input) => host.commitContext({ locator, ...input }),
               previewReplacement: (input) => host.previewReplacementMutation(input),
               commitReplacement: (input) => host.commitReplacementMutation(input),
+              generateCondensation: (input) => host.generateCondensation({ locator, ...input }),
+              cancelCondensation: (operationId) => host.cancelCondensation({ locator, operationId }),
+              commitCondensation: (input) => host.commitCondensation({ locator, ...input }),
+              restoreCondensation: (input) => host.restoreCondensation({ locator, ...input }),
               restoreReplacement: (input) => host.restoreReplacementMutation(input),
               undoReplacement: (input) => host.undoReplacementMutation(input),
               undo: (baseRevision) => host.undo(baseRevision),
@@ -177,6 +183,7 @@ export default function contextEditorExtension(pi: ExtensionAPI): void {
               isIdle: () => ctx.isIdle(),
               initialUiState: uiState,
               initialReplacementReview: replacementReview,
+              initialCondensationReview: condensationReview,
               locale,
             },
             (result) => { exit = result; done(undefined); },
@@ -184,6 +191,67 @@ export default function contextEditorExtension(pi: ExtensionAPI): void {
         );
         if (!exit || exit.kind === "close") break;
         uiState = exit.uiState;
+        if (exit.kind === "condensation-cancel") {
+          condensationReview = undefined;
+          if (exit.operationId) {
+            try { await host.cancelCondensation({ locator, operationId: exit.operationId }); } catch { /* candidate already gone */ }
+          }
+          continue;
+        }
+        if (exit.kind === "condensation-commit") {
+          const review = exit.review;
+          condensationReview = undefined;
+          try {
+            const result = await host.commitCondensation({
+              locator,
+              baseRevision: review.draft.baseRevision,
+              operationId: review.draft.operationId,
+              summary: review.preview.summary,
+              unitIds: review.draft.unitIds,
+            });
+            if (!result.ok || result.conflict) ctx.ui.notify(text.sidecarChanged(), "warning");
+            else ctx.ui.notify(text.condensationApplied(), "info");
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            ctx.ui.notify(text.condensationBlocked(message), "warning");
+          }
+          continue;
+        }
+        if (exit.kind === "condensation-edit") {
+          const review = exit.review;
+          let value: string | undefined;
+          try {
+            value = await ctx.ui.editor(text.condensationSummaryTitle(), review.preview.summary);
+          } catch (error) {
+            ctx.ui.notify("Editor failed: " + (error instanceof Error ? error.message : String(error)), "warning");
+            condensationReview = review;
+            continue;
+          }
+          if (value === undefined) {
+            condensationReview = review;
+            continue;
+          }
+          const summary = value.trim();
+          const summaryTokens = estimateCondensationTokens(frameCondensationSummary(summary));
+          const validation = validateCondensationSummary(summary, review.preview.metrics.beforeTokens, { summaryTokens });
+          if (!validation.ok) {
+            ctx.ui.notify(text.condensationBlocked(validation.error ?? "invalid-summary"), "warning");
+            condensationReview = review;
+            continue;
+          }
+          condensationReview = {
+            ...review,
+            preview: {
+              ...review.preview,
+              summary,
+              summaryTokens,
+              metrics: validation.metrics,
+              validation,
+              warnings: validation.warnings,
+            },
+          };
+          continue;
+        }
         if (exit.kind === "cancel-edit") {
           replacementReview = undefined;
           continue;

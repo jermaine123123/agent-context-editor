@@ -10,6 +10,8 @@ import {
   type ContextEditorSnapshot,
   type ContextMutationResult,
   type ContextProjectionPreview,
+  type ContextCondensationPreview,
+  type ContextCondensationSnapshot,
   type ContextReplacementPreview,
   type ContextRecord,
   type ContextRecordKind,
@@ -43,10 +45,44 @@ export interface ReplacementReview {
   excludeAssociatedReasoning: boolean;
 }
 
+export interface CondensationReview {
+  draft: {
+    unitIds: string[];
+    baseRevision: string;
+    operationId: string;
+    expandRelated: boolean;
+    uiState: ContextEditorUiState;
+  };
+  preview: ContextCondensationPreview;
+}
+
+interface CondensationSetup {
+  unitIds: string[];
+  baseRevision: string;
+  canExpandRelated: boolean;
+  expandRelated: boolean;
+  uiState: ContextEditorUiState;
+}
+
+type CondensationGenerate = (input: {
+  baseRevision: string;
+  unitIds: readonly string[];
+  expandRelated: boolean;
+  signal?: AbortSignal;
+}) => Promise<ContextCondensationPreview>;
+type CondensationCancel = (operationId: string) => Promise<{ ok: boolean; operationId: string; cancelled: boolean }>;
+type CondensationCommit = (input: {
+  baseRevision: string;
+  operationId: string;
+  summary: string;
+  unitIds: readonly string[];
+}) => ContextMutationResult | Promise<ContextMutationResult>;
+
 export interface ContextEditorUiState {
   query: string;
   searchScope: ContextSearchScope;
   selectedUnitId?: string;
+  checkedUnitIds?: string[];
   showOriginal: boolean;
 }
 
@@ -54,9 +90,12 @@ export type ContextEditorExit =
   | { kind: "close" }
   | { kind: "edit"; unitId: string; title: string; text: string; originalText: string; baseRevision: string; operationId: string; unitKind: "user" | "answer"; excludeAssociatedReasoning?: boolean; uiState: ContextEditorUiState }
   | { kind: "replacement-commit"; review: ReplacementReview; uiState: ContextEditorUiState }
+  | { kind: "condensation-edit"; review: CondensationReview; uiState: ContextEditorUiState }
+  | { kind: "condensation-commit"; review: CondensationReview; uiState: ContextEditorUiState }
+  | { kind: "condensation-cancel"; operationId?: string; uiState: ContextEditorUiState }
   | { kind: "cancel-edit"; uiState: ContextEditorUiState };
-type PreviewContext = (input: { baseRevision: string; action: "exclude" | "restore"; unitIds?: readonly string[] }) => ContextProjectionPreview | Promise<ContextProjectionPreview>;
-type CommitContext = (input: { baseRevision: string; action: "exclude" | "restore"; unitIds?: readonly string[] }) => ContextMutationResult | Promise<ContextMutationResult>;
+type PreviewContext = (input: { baseRevision: string; action: "exclude" | "restore"; unitIds?: readonly string[]; condensationOperationId?: string }) => ContextProjectionPreview | Promise<ContextProjectionPreview>;
+type CommitContext = (input: { baseRevision: string; action: "exclude" | "restore"; unitIds?: readonly string[]; condensationOperationId?: string }) => ContextMutationResult | Promise<ContextMutationResult>;
 type Notify = (message: string, type?: "info" | "warning" | "error") => void;
 type Confirm = (message: string) => Promise<boolean>;
 type PendingConfirmation =
@@ -95,6 +134,10 @@ export class ContextEditorComponent implements Component {
   private readonly previewReplacement?: ReplacementPreview;
   private readonly restoreReplacement?: ReplacementUnitMutation;
   private readonly undoReplacement?: ReplacementUnitMutation;
+  private readonly generateCondensation?: CondensationGenerate;
+  private readonly cancelCondensation?: CondensationCancel;
+  private readonly commitCondensation?: CondensationCommit;
+  private readonly restoreCondensation?: (input: { baseRevision: string; operationId: string }) => ContextMutationResult | Promise<ContextMutationResult>;
   private projectionAvailable: boolean;
   private readonly text: PiText;
 
@@ -120,6 +163,14 @@ export class ContextEditorComponent implements Component {
   private pendingConfirmation: PendingConfirmation | null = null;
   private replacementReview: ReplacementReview | null = null;
   private replacementReviewScrollOffset = 0;
+  private condensationError: string | null = null;
+  private condensationSetup: CondensationSetup | null = null;
+  private condensationReview: CondensationReview | null = null;
+  private condensationReviewScrollOffset = 0;
+  private condensationAbortController: AbortController | null = null;
+  private condensationGenerationNonce = 0;
+  private condensations: ContextCondensationSnapshot[] = [];
+  private condensationCardExpanded = false;
   private operationInFlight = false;
   private readonly bodyCache = new Map<string, { width: number; text: string; highlightKey: string; lines: string[] }>();
 
@@ -144,9 +195,14 @@ export class ContextEditorComponent implements Component {
       previewReplacement?: ReplacementPreview;
       restoreReplacement?: ReplacementUnitMutation;
       undoReplacement?: ReplacementUnitMutation;
+      generateCondensation?: CondensationGenerate;
+      cancelCondensation?: CondensationCancel;
+      commitCondensation?: CondensationCommit;
+      restoreCondensation?: (input: { baseRevision: string; operationId: string }) => ContextMutationResult | Promise<ContextMutationResult>;
       initialUiState?: Partial<ContextEditorUiState>;
       locale?: PiLocale;
       initialReplacementReview?: ReplacementReview;
+      initialCondensationReview?: CondensationReview;
     },
     done: (exit?: ContextEditorExit) => void,
   ) {
@@ -161,6 +217,11 @@ export class ContextEditorComponent implements Component {
     this.previewReplacement = deps.previewReplacement;
     this.restoreReplacement = deps.restoreReplacement;
     this.undoReplacement = deps.undoReplacement;
+    this.generateCondensation = deps.generateCondensation;
+    this.cancelCondensation = deps.cancelCondensation;
+    this.commitCondensation = deps.commitCondensation;
+    this.restoreCondensation = deps.restoreCondensation;
+    this.condensations = [...(snapshot.condensations ?? [])];
     this.projectionAvailable = snapshot.projectionAvailable !== false && !!deps.previewContext && !!deps.commitContext;
     this.prefs = { ...prefs, enabledUnitKinds: [...prefs.enabledUnitKinds] };
     this.query = deps.initialUiState?.query ?? "";
@@ -175,6 +236,8 @@ export class ContextEditorComponent implements Component {
     this.isIdle = deps.isIdle;
     this.done = done;
     this.text = createPiText(deps.locale ?? detectPiLocale());
+    const validIds = new Set(records.flatMap(record => record.units.map(unit => unit.id)));
+    for (const id of deps.initialUiState?.checkedUnitIds ?? []) if (validIds.has(id)) this.selected.add(id);
     const selectedUnitId = deps.initialUiState?.selectedUnitId;
     if (selectedUnitId) {
       const index = this.flatUnits().findIndex(({ unit }) => unit.id === selectedUnitId);
@@ -182,6 +245,7 @@ export class ContextEditorComponent implements Component {
     }
     this.matches = this.query.trim() ? this.searchOccurrencesForPrefs() : [];
     this.replacementReview = deps.initialReplacementReview ?? null;
+    this.condensationReview = deps.initialCondensationReview ?? null;
 
   }
 
@@ -260,7 +324,10 @@ export class ContextEditorComponent implements Component {
     const hidden = this.unitIsHidden(unit);
     const state = hidden ? (unit.viewState === "mixed" ? "partial" : "hidden") : "shown";
     const modelState = unit.projectionState ?? "include";
-    const base = `${cursor} ${checkbox} ${this.text.unitKind(unit.kind)} · ${this.text.recordKind(record.kind)} · ${this.text.unitState(state)} · ${this.text.contextState(modelState)} · ${unit.atoms.reduce((sum, atom) => sum + atom.approxTokens, 0)} tok`;
+    const sourceIndex = this.records.flatMap(r => r.units).findIndex(u => u.id === unit.id) + 1;
+    const covering = this.condensations.findIndex(c => c.sourceUnits.some(u => u.id === unit.id));
+    const label = covering >= 0 ? this.text.condensationCovered(covering + 1) : this.text.contextState(modelState);
+    const base = `${cursor} ${checkbox} #${sourceIndex} ${this.text.unitKind(unit.kind)} · ${this.text.recordKind(record.kind)} · ${this.text.unitState(state)} · ${label} · ${unit.atoms.reduce((sum, atom) => sum + atom.approxTokens, 0)} tok`;
     if (hidden && !this.prefs.showHidden) return base;
     const tool = this.toolNameForUnit(unit);
     if (!tool) return base;
@@ -309,7 +376,7 @@ export class ContextEditorComponent implements Component {
   }
 
   private totalLineCount(width: number): number {
-    return this.flatUnits().reduce((sum, item) => sum + this.unitLineCount(item, width), 0);
+    return this.condensationCardLines(width).length + this.flatUnits().reduce((sum, item) => sum + this.unitLineCount(item, width), 0);
   }
 
   private clampScroll(width = this.tui.terminal.columns): number {
@@ -336,12 +403,14 @@ export class ContextEditorComponent implements Component {
     const selectedLine = this.unitStartOffset(this.selectedIndex, width);
     const viewport = this.availableRows();
     if (selectedLine < this.scrollOffset) this.scrollOffset = selectedLine;
-    if (selectedLine >= this.scrollOffset + viewport) this.scrollOffset = selectedLine - viewport + 1;
+    const item = this.currentUnit();
+    const visibleHeight = item ? Math.min(viewport, this.unitLineCount(item, width)) : 1;
+    if (selectedLine + visibleHeight > this.scrollOffset + viewport) this.scrollOffset = selectedLine + visibleHeight - viewport;
     this.scrollOffset = Math.max(0, this.scrollOffset);
   }
 
   private unitStartOffset(index: number, width: number): number {
-    return this.flatUnits()
+    return this.condensationCardLines(width).length + this.flatUnits()
       .slice(0, index)
       .reduce((sum, item) => sum + this.unitLineCount(item, width), 0);
   }
@@ -388,7 +457,7 @@ export class ContextEditorComponent implements Component {
   private renderWindow(width: number, start: number, end: number): string[] {
     const units = this.flatUnits();
     const output: string[] = [];
-    let lineOffset = 0;
+    let lineOffset = this.condensationCardLines(width).length;
     for (let index = 0; index < units.length; index += 1) {
       const item = units[index];
       if (!item) continue;
@@ -426,6 +495,7 @@ export class ContextEditorComponent implements Component {
     this.records = this.loadRecords();
     this.revision = snapshot.revision;
     this.canUndo = snapshot.canUndo;
+    this.condensations = [...(snapshot.condensations ?? [])];
     this.projectionAvailable = snapshot.projectionAvailable !== false && !!this.previewContext && !!this.commitContext;
     const focusedIndex = focusId ? this.flatUnits().findIndex(({ unit }) => unit.id === focusId) : -1;
     this.selectedIndex = focusedIndex >= 0 ? focusedIndex : Math.min(this.selectedIndex, Math.max(0, this.flatUnits().length - 1));
@@ -444,6 +514,7 @@ export class ContextEditorComponent implements Component {
     this.records = this.loadRecords();
     this.revision = snapshot.revision;
     this.canUndo = snapshot.canUndo;
+    this.condensations = [...(snapshot.condensations ?? [])];
     this.projectionAvailable = snapshot.projectionAvailable !== false && !!this.previewContext && !!this.commitContext;
     const focusedIndex = focusId ? this.flatUnits().findIndex(({ unit }) => unit.id === focusId) : -1;
     this.selectedIndex = focusedIndex >= 0 ? focusedIndex : Math.min(this.selectedIndex, Math.max(0, this.flatUnits().length - 1));
@@ -455,12 +526,18 @@ export class ContextEditorComponent implements Component {
     this.pendingConfirmation = null;
     this.replacementReview = null;
     this.replacementReviewScrollOffset = 0;
+    this.condensationGenerationNonce += 1;
+    this.condensationAbortController?.abort();
+    this.condensationAbortController = null;
+    this.condensationSetup = null;
+    this.condensationReview = null;
+    this.condensationReviewScrollOffset = 0;
     this.notify(this.text.sessionChanged(), "info");
     return true;
   }
 
   private uiState(): ContextEditorUiState {
-    return { query: this.query, searchScope: this.searchScope, selectedUnitId: this.currentUnit()?.unit.id, showOriginal: this.showOriginal };
+    return { checkedUnitIds: [...this.selected], query: this.query, searchScope: this.searchScope, selectedUnitId: this.currentUnit()?.unit.id, showOriginal: this.showOriginal };
   }
 
   private requestEdit(): void {
@@ -476,6 +553,215 @@ export class ContextEditorComponent implements Component {
     }
     const unitKind = item.unit.kind as "user" | "answer";
     this.done({ kind: "edit", unitId: item.unit.id, unitKind, title: this.text.editTitle(this.text.unitKind(unitKind)), text: item.unit.effectiveText, originalText: this.originalText(item.unit), baseRevision: this.revision, operationId: replacementOperationId(), uiState: { ...this.uiState(), selectedUnitId: item.unit.id } });
+  }
+
+  private beginCondensation(): void {
+    if (this.isIdle && !this.isIdle()) {
+      this.notify(this.text.condensationBusy(), "warning");
+      return;
+    }
+    if (!this.generateCondensation) {
+      this.notify(this.text.contextUnavailableAction(), "warning");
+      return;
+    }
+    const selected = this.selectedUnitIds();
+    const unitIds = selected.length > 0
+      ? selected
+      : [this.currentUnit()?.unit.id].filter((id): id is string => !!id);
+    const items = this.flatUnits().filter(({ unit }) => unitIds.includes(unit.id));
+    if (!unitIds.length || items.length !== unitIds.length) {
+      this.notify(this.text.condensationNoSelection(), "warning");
+      return;
+    }
+    const canExpandRelated = unitIds.length === 1 && items[0]?.unit.kind === "answer";
+    this.condensationError = null;
+    this.condensationSetup = {
+      unitIds: [...unitIds],
+      baseRevision: this.revision,
+      canExpandRelated,
+      expandRelated: false,
+      uiState: { ...this.uiState(), selectedUnitId: unitIds[0] },
+    };
+    this.condensationReview = null;
+    this.condensationReviewScrollOffset = 0;
+    this.tui.requestRender();
+  }
+
+  private condensationSetupLines(width: number): string[] {
+    const setup = this.condensationSetup;
+    if (!setup) return [];
+    const wrap = (value: string): string[] => wrapTextWithAnsi(value, Math.max(8, width - 4)).map((line) => this.theme.fg("dim", "  " + line));
+    if (this.operationInFlight) {
+      return [
+        this.theme.fg("warning", "[AI] " + this.text.condensationGenerating()),
+        ...wrap(this.text.condensationSetup(setup.unitIds.length, setup.canExpandRelated, setup.expandRelated)),
+        this.theme.fg("accent", this.text.condensationCancelHint()),
+      ];
+    }
+    return [
+      this.theme.fg("warning", "[AI] " + this.text.condensationSetupTitle()),
+      ...wrap(this.text.condensationSetup(setup.unitIds.length, setup.canExpandRelated, setup.expandRelated)),
+      ...(setup.canExpandRelated
+        ? [this.theme.fg("accent", this.text.condensationExpandRelated(setup.expandRelated))]
+        : [this.theme.fg("dim", this.text.condensationExpandDisabled())]),
+      ...(this.condensationError ? wrap(this.condensationError) : []),
+      this.theme.fg("accent", this.text.condensationSetupHint()),
+    ];
+  }
+
+  private async startCondensationGeneration(): Promise<void> {
+    const setup = this.condensationSetup;
+    if (!setup || !this.generateCondensation || this.operationInFlight) return;
+    this.operationInFlight = true;
+    this.condensationError = null;
+    const controller = new AbortController();
+    const nonce = ++this.condensationGenerationNonce;
+    this.condensationAbortController = controller;
+    this.tui.requestRender();
+    try {
+      const preview = await this.generateCondensation({
+        baseRevision: setup.baseRevision,
+        unitIds: setup.unitIds,
+        expandRelated: setup.expandRelated,
+        signal: controller.signal,
+      });
+      if (nonce !== this.condensationGenerationNonce || controller.signal.aborted) return;
+      this.condensationReview = {
+        draft: {
+          unitIds: [...setup.unitIds],
+          baseRevision: setup.baseRevision,
+          operationId: preview.operationId,
+          expandRelated: setup.expandRelated,
+          uiState: setup.uiState,
+        },
+        preview,
+      };
+      this.condensationSetup = null;
+      this.condensationReviewScrollOffset = 0;
+    } catch (error) {
+      if (nonce !== this.condensationGenerationNonce) return;
+      const message = error instanceof Error ? error.message : String(error);
+      if (!controller.signal.aborted) {
+        this.condensationError = this.text.condensationGenerationFailed(message);
+        this.notify(this.condensationError, "warning");
+      }
+      this.condensationReview = null;
+    } finally {
+      if (nonce === this.condensationGenerationNonce) {
+        this.condensationAbortController = null;
+        this.operationInFlight = false;
+        this.tui.requestRender();
+      }
+    }
+  }
+
+  private cancelCondensationGeneration(): void {
+    this.condensationGenerationNonce += 1;
+    this.condensationAbortController?.abort();
+    this.condensationAbortController = null;
+    this.operationInFlight = false;
+    this.condensationSetup = null;
+    this.tui.requestRender();
+  }
+
+  private condensationReviewLines(width: number): string[] {
+    const review = this.condensationReview;
+    if (!review) return [];
+    const preview = review.preview;
+    const wrap = (value: string): string[] => wrapTextWithAnsi(value, Math.max(8, width - 4)).map((line) => this.theme.fg("dim", "  " + line));
+    const metrics = preview.metrics;
+    const lines: string[] = [this.theme.fg("warning", "[AI] " + this.text.condensationReviewTitle())];
+    lines.push(...wrap(this.text.condensationSource(preview.effectiveUnitIds.length, (preview.sourceEntryIds ?? []).length)));
+    lines.push(...wrap(this.text.condensationModel(preview.provider, preview.model)));
+    lines.push(...wrap(this.text.condensationMetrics(metrics.beforeTokens, metrics.afterTokens, metrics.savedTokens, metrics.savingsRatio)));
+    if (preview.risks.length) lines.push(...wrap(this.text.condensationRisks(preview.risks)));
+    if (preview.warnings?.length) lines.push(...wrap(this.text.condensationWarnings(preview.warnings)));
+    lines.push(this.theme.fg("accent", this.text.condensationSummaryTitle()));
+    lines.push(...wrap(preview.summary));
+    lines.push(this.theme.fg("accent", this.text.condensationReviewHint()));
+    return lines;
+  }
+
+  private scrollCondensationReview(delta: number): void {
+    const lines = this.condensationReviewLines(Math.max(24, this.tui.terminal.columns));
+    const maxOffset = Math.max(0, lines.length - this.availableRows());
+    this.condensationReviewScrollOffset = Math.max(0, Math.min(maxOffset, this.condensationReviewScrollOffset + delta));
+    this.tui.requestRender();
+  }
+
+  private async regenerateCondensation(): Promise<void> {
+    const review = this.condensationReview;
+    if (!review || !this.cancelCondensation || this.operationInFlight) return;
+    try {
+      await this.cancelCondensation(review.draft.operationId);
+    } catch {
+      // A pending candidate may already have been discarded by a session change.
+    }
+    this.condensationReview = null;
+    this.condensationSetup = {
+      unitIds: [...review.draft.unitIds],
+      baseRevision: review.draft.baseRevision,
+      canExpandRelated: review.draft.unitIds.length === 1 && this.flatUnits().find(({ unit }) => unit.id === review.draft.unitIds[0])?.unit.kind === "answer",
+      expandRelated: review.draft.expandRelated,
+      uiState: review.draft.uiState,
+    };
+    void this.startCondensationGeneration();
+  }
+
+  private handleCondensationSetupInput(data: string): void {
+    const setup = this.condensationSetup;
+    if (!setup) return;
+    if (this.operationInFlight) {
+      if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data === "q" || data === "Q") this.cancelCondensationGeneration();
+      return;
+    }
+    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data === "q" || data === "Q") {
+      this.condensationSetup = null;
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, "space") && setup.canExpandRelated) {
+      setup.expandRelated = !setup.expandRelated;
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, "enter")) void this.startCondensationGeneration();
+  }
+
+  private handleCondensationReviewInput(data: string): void {
+    const review = this.condensationReview;
+    if (!review) return;
+    if (this.operationInFlight) return;
+    if (matchesKey(data, "pageDown") || matchesKey(data, "down") || data === "j") {
+      this.scrollCondensationReview(matchesKey(data, "pageDown") ? this.availableRows() : 1);
+      return;
+    }
+    if (matchesKey(data, "pageUp") || matchesKey(data, "up") || data === "k") {
+      this.scrollCondensationReview(matchesKey(data, "pageUp") ? -this.availableRows() : -1);
+      return;
+    }
+    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data === "q" || data === "Q") {
+      this.condensationReview = null;
+      this.done({ kind: "condensation-cancel", operationId: review.draft.operationId, uiState: review.draft.uiState });
+      return;
+    }
+    if (data === "e") {
+      this.condensationReview = null;
+      this.done({ kind: "condensation-edit", review, uiState: review.draft.uiState });
+      return;
+    }
+    if (data === "r") {
+      void this.regenerateCondensation();
+      return;
+    }
+    if (matchesKey(data, "enter")) {
+      if (review.preview.validation && !review.preview.validation.ok) {
+        this.notify(this.text.condensationBlocked(review.preview.validation.error ?? "invalid-summary"), "warning");
+        return;
+      }
+      this.condensationReview = null;
+      this.done({ kind: "condensation-commit", review, uiState: review.draft.uiState });
+    }
   }
 
   private replacementReviewLines(width: number): string[] {
@@ -613,6 +899,75 @@ export class ContextEditorComponent implements Component {
       this.notify(message === "AGENT_RUNTIME_BUSY" ? this.text.busy() : this.text.operationFailed(message), "warning");
     } finally { this.operationInFlight = false; this.tui.requestRender(); }
   }
+  private condensationCardLines(width: number): string[] {
+    if (this.condensations.length === 0) return [];
+    const wrap = (value: string): string[] => wrapTextWithAnsi(value, Math.max(8, width - 4)).map((line) => this.theme.fg("dim", "  " + line));
+    const lines: string[] = [];
+    for (const [cardIndex, condensation] of this.condensations.entries()) {
+      const state = condensation.contextExcluded ? this.text.condensationCardExcluded() : this.text.condensationCardActive();
+      lines.push(this.theme.fg("accent", this.text.condensationCardTitle(condensation.operationId, state)));
+      lines.push(...wrap(this.condensationCardExpanded ? condensation.summary : condensation.summary.split(/\r?\n/)[0]!.slice(0, 100)));
+      lines.push(...wrap(this.text.condensationSourceList(cardIndex + 1, condensation.sourceUnits.length)));
+      lines.push(...wrap(this.text.condensationCardMetrics(condensation.metrics.savedTokens, condensation.metrics.savingsRatio)));
+      const allUnits = this.records.flatMap(record => record.units);
+      for (const source of condensation.sourceUnits) {
+        const sourceIndex = allUnits.findIndex(unit => unit.id === source.id) + 1;
+        const title = '#' + (sourceIndex || '?') + ' ' + this.text.unitKind(source.kind) + ' · ' + source.id;
+        lines.push(...wrap(title));
+        const content = source.text || this.text.contextState("exclude");
+        lines.push(...wrap(this.condensationCardExpanded ? content : content.replace(/\s+/g, ' ').slice(0, 100)));
+      }
+    }
+    return lines;
+  }
+
+  private async toggleCondensationSurface(): Promise<void> {
+    const condensation = this.condensations[0];
+    if (!condensation || this.operationInFlight || !this.previewContext || !this.commitContext) return;
+    this.operationInFlight = true;
+    const action = condensation.contextExcluded ? "restore" : "exclude";
+    try {
+      const preview = await this.previewContext({ baseRevision: this.revision, action, condensationOperationId: condensation.operationId });
+      const result = await this.commitContext({ baseRevision: preview.baseRevision, action, condensationOperationId: condensation.operationId });
+      if (!result.ok || result.conflict) {
+        this.notify(this.text.sidecarChanged(), "warning");
+        this.refreshData();
+      } else {
+        this.refreshData();
+      }
+    } catch (error) {
+      this.notify(this.text.operationFailed(error instanceof Error ? error.message : String(error)), "warning");
+    } finally {
+      this.operationInFlight = false;
+      this.tui.requestRender();
+    }
+  }
+
+  private async restoreActiveCondensation(): Promise<void> {
+    const condensation = this.condensations[0];
+    if (!condensation || this.operationInFlight || !this.restoreCondensation) return;
+    if (this.isIdle && !this.isIdle()) {
+      this.notify(this.text.condensationBusy(), "warning");
+      return;
+    }
+    this.operationInFlight = true;
+    try {
+      const result = await this.restoreCondensation({ baseRevision: this.revision, operationId: condensation.operationId });
+      if (!result.ok || result.conflict) {
+        this.notify(this.text.sidecarChanged(), "warning");
+        this.refreshData();
+      } else {
+        this.refreshData();
+        this.notify(this.text.condensationRestored(), "info");
+      }
+    } catch (error) {
+      this.notify(this.text.operationFailed(error instanceof Error ? error.message : String(error)), "warning");
+    } finally {
+      this.operationInFlight = false;
+      this.tui.requestRender();
+    }
+  }
+
   private async beginContextProjection(): Promise<void> {
     if (this.operationInFlight || this.pendingConfirmation) return;
     if (!this.projectionAvailable || !this.previewContext || !this.commitContext) {
@@ -735,7 +1090,7 @@ export class ContextEditorComponent implements Component {
       const hi = Math.max(this.rangeAnchor, this.selectedIndex);
       this.selected = new Set(this.flatUnits().slice(lo, hi + 1).map(({ unit }) => unit.id));
     } else if (!extend) {
-      this.resetSelection();
+      this.rangeAnchor = null;
     }
     this.matchIndex = -1;
     this.manualScroll = false;
@@ -853,6 +1208,14 @@ export class ContextEditorComponent implements Component {
 
   handleInput(data: string): void {
     if (this.syncExternalState()) return;
+    if (this.condensationSetup) {
+      this.handleCondensationSetupInput(data);
+      return;
+    }
+    if (this.condensationReview) {
+      this.handleCondensationReviewInput(data);
+      return;
+    }
     if (this.replacementReview) {
       if (this.operationInFlight) return;
       this.handleReplacementReviewInput(data);
@@ -939,6 +1302,10 @@ export class ContextEditorComponent implements Component {
       this.tui.requestRender();
       return;
     }
+    if (data === "c") { this.beginCondensation(); return; }
+    if (data === "C") { void this.toggleCondensationSurface(); return; }
+    if (data === "D") { void this.restoreActiveCondensation(); return; }
+    if (data === "O") { this.condensationCardExpanded = !this.condensationCardExpanded; this.scrollOffset = 0; this.manualScroll = true; this.tui.requestRender(); return; }
     if (data === "e") { this.requestEdit(); return; }
     if (data === "E") { this.beginRestoreReplacement(); return; }
     if (data === "z") { void this.undoCurrentReplacement(); return; }
@@ -963,7 +1330,14 @@ export class ContextEditorComponent implements Component {
     const safeWidth = Math.max(24, width);
     const viewport = this.availableRows();
     let visible: string[];
-    if (this.replacementReview) {
+    if (this.condensationReview) {
+      const reviewLines = this.condensationReviewLines(safeWidth);
+      const maxOffset = Math.max(0, reviewLines.length - viewport);
+      this.condensationReviewScrollOffset = Math.max(0, Math.min(this.condensationReviewScrollOffset, maxOffset));
+      visible = reviewLines.slice(this.condensationReviewScrollOffset, this.condensationReviewScrollOffset + viewport);
+    } else if (this.condensationSetup) {
+      visible = this.condensationSetupLines(safeWidth).slice(0, viewport);
+    } else if (this.replacementReview) {
       const reviewLines = this.replacementReviewLines(safeWidth);
       const maxOffset = Math.max(0, reviewLines.length - viewport);
       this.replacementReviewScrollOffset = Math.max(0, Math.min(this.replacementReviewScrollOffset, maxOffset));
@@ -979,7 +1353,9 @@ export class ContextEditorComponent implements Component {
       const totalLines = this.totalLineCount(safeWidth);
       const maxOffset = Math.max(0, totalLines - viewport);
       this.scrollOffset = Math.min(this.scrollOffset, maxOffset);
-      visible = this.renderWindow(safeWidth, this.scrollOffset, this.scrollOffset + viewport);
+      const card = this.condensationCardLines(safeWidth);
+      const end = this.scrollOffset + viewport;
+      visible = [...card.slice(this.scrollOffset, end), ...this.renderWindow(safeWidth, this.scrollOffset, end)];
     }
     this.lastRenderWidth = safeWidth;
     this.lastRenderRows = this.tui.terminal.rows;
@@ -995,7 +1371,9 @@ export class ContextEditorComponent implements Component {
     const title = this.helpMode
       ? this.theme.fg("accent", this.text.tuiHelpTitle())
       : this.theme.fg("accent", "Pi Context Editor") + this.theme.fg("dim", `  ${this.text.unitCount(this.flatUnits().length)}`);
-    const mode = this.replacementReview
+    const mode = this.condensationReview || this.condensationSetup
+      ? this.theme.fg("warning", this.text.contextAwaiting())
+      : this.replacementReview
       ? this.theme.fg("warning", this.text.contextAwaiting())
       : this.pendingConfirmation
       ? this.theme.fg("warning", this.text.contextAwaiting())
@@ -1004,9 +1382,13 @@ export class ContextEditorComponent implements Component {
       : this.searchMode
       ? this.theme.fg("warning", this.text.tuiSearch(this.query, this.matches.length, this.matchIndex, this.searchScope))
       : this.theme.fg("dim", this.text.tuiSearchIdle(this.query, this.matches.length, this.matchIndex, this.searchScope));
-    const filterLine = this.helpMode || this.pendingConfirmation || this.replacementReview ? "" : `${enabled("user")} [1]  ${aiLabel} [2] (${enabled("reasoning")} [4]  ${enabled("answer")} [5])  ${enabled("tool")} [3]`;
+    const filterLine = this.helpMode || this.pendingConfirmation || this.replacementReview || this.condensationSetup || this.condensationReview ? "" : `${enabled("user")} [1]  ${aiLabel} [2] (${enabled("reasoning")} [4]  ${enabled("answer")} [5])  ${enabled("tool")} [3]`;
     const statusMode = this.helpMode ? "help" : this.searchMode ? "search" : this.matches.length > 0 ? "results" : "normal";
-    const status = this.replacementReview
+    const status = this.condensationReview
+      ? this.theme.fg("dim", this.text.condensationReviewHint())
+      : this.condensationSetup
+      ? this.theme.fg("dim", this.operationInFlight ? this.text.condensationCancelHint() : this.text.condensationSetupHint())
+      : this.replacementReview
       ? this.theme.fg("dim", this.text.replacementReviewHint())
       : this.pendingConfirmation
       ? this.theme.fg("dim", this.text.contextConfirmHint())

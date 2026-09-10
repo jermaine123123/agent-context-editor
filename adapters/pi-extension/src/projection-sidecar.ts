@@ -1,6 +1,6 @@
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { stableFingerprint, type ContextProjectionChange, type ContextProjectionEvent, type ContextProjectionEventV1 } from "./shared-core/index.js";
+import { stableFingerprint, type ContextProjectionChange, type ContextProjectionEvent, type ContextProjectionEventV1, type ContextCondensationEventV1 } from "./shared-core/index.js";
 
 export const PROJECTION_SIDECAR_SCHEMA_VERSION = 1 as const;
 
@@ -54,9 +54,38 @@ function isLinkedExclusion(value: unknown, eventId: string): boolean {
   return true;
 }
 
+function isCondensationEvent(value: unknown): value is ContextCondensationEventV1 {
+  if (!value || typeof value !== "object") return false;
+  const row = value as Record<string, unknown>;
+  if (row.type !== "condensation" || row.schemaVersion !== 1) return false;
+  if (!['apply', 'restore', 'exclude-summary', 'restore-summary'].includes(String(row.action))) return false;
+  if (typeof row.eventId !== 'string' || !row.eventId || typeof row.operationId !== 'string' || !row.operationId ||
+      typeof row.sessionId !== 'string' || !row.sessionId || (typeof row.baseRevision !== 'string' && typeof row.baseRevision !== 'number') ||
+      typeof row.summary !== 'string' || typeof row.provider !== 'string' || typeof row.model !== 'string' || typeof row.createdAt !== 'string') return false;
+  if (row.sourceFingerprint !== undefined && typeof row.sourceFingerprint !== "string") return false;
+  if (!Array.isArray(row.requestedUnitIds) || !row.requestedUnitIds.every((id) => typeof id === 'string')) return false;
+  if (!Array.isArray(row.effectiveUnitIds) || !row.effectiveUnitIds.every((id) => typeof id === 'string')) return false;
+  if (!Array.isArray(row.sourceEntryIds) || !row.sourceEntryIds.every((id) => typeof id === 'string' && id.length > 0)) return false;
+  if (!Array.isArray(row.sourceRootSeqs) || !row.sourceRootSeqs.every((id) => Number.isSafeInteger(id))) return false;
+  if (!Array.isArray(row.sourceUnits) || !row.sourceUnits.every((unit) => {
+    if (!unit || typeof unit !== 'object') return false;
+    const item = unit as Record<string, unknown>;
+    return typeof item.id === 'string' && typeof item.recordId === 'string' && typeof item.kind === 'string' &&
+      Array.isArray(item.atomIds) && item.atomIds.every((id) => typeof id === 'string') &&
+      Array.isArray(item.sourceRootSeqs) && item.sourceRootSeqs.every((id) => Number.isSafeInteger(id)) &&
+      (item.sourceEntryIds === undefined || (Array.isArray(item.sourceEntryIds) && item.sourceEntryIds.every((id) => typeof id === 'string'))) &&
+      typeof item.text === 'string' && typeof item.included === 'boolean' && Number.isFinite(Number(item.approxTokens));
+  })) return false;
+  const metrics = row.metrics;
+  if (!metrics || typeof metrics !== 'object') return false;
+  if (!Array.isArray(row.beforeMessages) || !row.beforeMessages.every((item) => item && typeof item === 'object' && typeof (item as Record<string, unknown>).entryId === 'string' && 'message' in (item as Record<string, unknown>))) return false;
+  if (!Array.isArray(row.afterMessages) || !row.afterMessages.every((item) => item && typeof item === 'object' && typeof (item as Record<string, unknown>).entryId === 'string' && 'message' in (item as Record<string, unknown>))) return false;
+  return true;
+}
 function isProjectionEvent(value: unknown): value is ContextProjectionEvent {
   if (!value || typeof value !== "object") return false;
   const row = value as Record<string, unknown>;
+  if (row.type === "condensation") return isCondensationEvent(value);
   if ("type" in row && row.type !== "replacement") return false;
   if (row.type === "replacement") {
     if (row.schemaVersion !== 1 || typeof row.eventId !== "string" || row.eventId.length === 0 || typeof row.unitId !== "string" || row.unitId.length === 0 || typeof row.createdAt !== "string" || (typeof row.baseRevision !== "string" && typeof row.baseRevision !== "number")) return false;
@@ -206,6 +235,6 @@ export function appendProjectionSidecarEvent(
       events: [...current.document.events, { anchorEntryId, event }],
     };
     writeDocument(path, next);
-    return "type" in event && event.type === "replacement" ? event.eventId : (event as ContextProjectionEventV1).transactionId;
+    return "type" in event ? event.eventId : (event as ContextProjectionEventV1).transactionId;
   });
 }

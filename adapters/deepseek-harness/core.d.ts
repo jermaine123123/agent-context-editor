@@ -1,12 +1,13 @@
 /*
  * GENERATED FILE - do not edit directly.
- * Canonical Core source digest: c5eea2828a07537c783172568092103d8f5ae0c63b201a70877fc088b651bb65
+ * Canonical Core source digest: 58a42b438e4197afdf2a1d5c43f68f572bcb98c24756115875d1de10304079ca
  * Rebuild with: npm run build:deepseek
  */
 export const HOST_ID: string
 export const VIEW_SCHEMA_VERSION: number
 export const STORAGE_SCHEMA_VERSION: number
 export const RECORD_KINDS: readonly string[]
+export const CONDENSATION_SCHEMA_VERSION: 1
 
 export type ContextEditableUnitKind = 'reasoning' | 'answer' | 'user' | 'tool'
 export type ContextEditableUnitViewState = 'show' | 'hide' | 'collapse' | 'mixed'
@@ -72,7 +73,7 @@ export interface ContextEditableUnit {
 }
 
 export type ContextReplacementProjectionState = 'original' | 'replaced' | 'unavailable'
-export type ContextReplacementDisabledReason = 'unsupported-unit-kind' | 'structured-user-content' | 'signed-content' | 'projection-unavailable' | 'invalid-target' | 'associated-reasoning-unavailable'
+export type ContextReplacementDisabledReason = 'unsupported-unit-kind' | 'structured-user-content' | 'signed-content' | 'projection-unavailable' | 'invalid-target' | 'associated-reasoning-unavailable' | 'condensation-active'
 export interface ContextReplacementAtomRef {
   atomId: string
   sourceRef: { entryId: string; blockIndex: number }
@@ -177,3 +178,88 @@ export function buildProjection(identity: unknown, events: readonly unknown[], r
   canUndo: boolean
 }
 export function recordSnapshot(record: ContextRecord): ContextRecord
+
+export type CondensationRiskKind = 'tool-output' | 'reasoning' | 'structured-content' | 'already-excluded' | 'small-saving'
+export interface CondensationSourceUnit {
+  id: string
+  recordId: string
+  kind: ContextEditableUnitKind
+  atomIds: string[]
+  sourceRootSeqs: number[]
+  text: string
+  approxTokens: number
+  included: boolean
+  toolNames?: string[]
+  isError?: boolean
+  hasSignature?: boolean
+  structured?: boolean
+}
+export interface CondensationRange {
+  requestedUnitIds: string[]
+  effectiveUnitIds: string[]
+  autoExpandedUnitIds: string[]
+  recordIds: string[]
+  sourceRootSeqs: number[]
+  sourceUnits: CondensationSourceUnit[]
+  shadowedTokenCount: number
+  unavailableUnitIds: string[]
+  risks: CondensationRiskKind[]
+  sourceFingerprint: string
+}
+export interface CondensationMetrics { beforeTokens: number; afterTokens: number; savedTokens: number; savingsRatio: number; belowRecommendedThreshold: boolean }
+export interface CondensationProposal {
+  schemaVersion: 1
+  operationId: string
+  sessionId: string
+  baseRevision: string
+  requestedUnitIds: string[]
+  effectiveUnitIds: string[]
+  autoExpandedUnitIds: string[]
+  recordIds: string[]
+  sourceRootSeqs: number[]
+  sourceUnits: CondensationSourceUnit[]
+  summary: string
+  provider: string
+  model: string
+  metrics: CondensationMetrics
+  prefixTokens: number
+  prefixReused?: boolean
+  summaryTokens: number
+  risks: CondensationRiskKind[]
+  createdAt: string
+  warnings?: string[]
+  sourceFingerprint: string
+}
+export interface CondensationChange { rootEventSeq: number; mode: 'clear' | 'remove' | 'replace'; message?: unknown }
+export interface CondensationEvent {
+  schemaVersion: 1
+  type: 'condensation'
+  action: 'apply' | 'restore'
+  status: 'pending' | 'applied' | 'restored'
+  operationId: string
+  sessionId: string
+  baseRevision: string
+  requestedUnitIds: string[]
+  effectiveUnitIds: string[]
+  recordIds: string[]
+  sourceRootSeqs: number[]
+  sourceFingerprint: string
+  sourceUnits: CondensationSourceUnit[]
+  summary: string
+  provider: string
+  model: string
+  metrics: CondensationMetrics
+  prefixTokens: number
+  prefixReused?: boolean
+  summaryTokens: number
+  createdAt: string
+  beforeChanges: CondensationChange[]
+  afterChanges: CondensationChange[]
+  restoreEventSeq?: number
+}
+export interface CondensationValidation { ok: boolean; summary: string; metrics: CondensationMetrics; warnings: string[]; error?: 'empty-summary' | 'truncated-summary' | 'not-smaller' }
+export function condensationUnitText(unit: ContextEditableUnit, projectionStates?: ReadonlyMap<string, ContextEditableUnitProjectionState | 'unavailable'>): string
+export function selectCondensationRange(records: readonly ContextRecord[], requestedUnitIds: readonly string[], projectionStates?: ReadonlyMap<string, ContextEditableUnitProjectionState | 'unavailable'>, options?: { expandRelated?: boolean }): CondensationRange
+export function validateCondensationSummary(summary: string, beforeTokens: number, options?: { summaryTokens?: number; truncated?: boolean }): CondensationValidation
+export function frameCondensationSummary(summary: string): string
+export function estimateCondensationTokens(value: string): number

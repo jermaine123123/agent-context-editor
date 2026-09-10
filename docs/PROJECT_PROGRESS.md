@@ -1,7 +1,7 @@
 # Agent Context Editor 项目进度
 
-更新日期：2026-09-09
-当前基线：Pi `0.84.2`、DeepSeek Harness `@deepseek-ai/dsh@0.1.0-rc.8`（commit `141eb6f…`）；Pi TUI 与 DeepSeek Harness 的上下文排除和 User/Answer 手动编辑均已完成，并通过自动化与本地宿主回归
+更新日期：2026-09-11
+当前基线：Pi `0.84.2`、DeepSeek Harness `@deepseek-ai/dsh@0.1.0-rc.8`（commit `141eb6f…`）；Pi TUI 与 DeepSeek Harness 的上下文排除和 User/Answer 手动编辑均已完成，Pi TUI 与 DeepSeek Harness 的 AI 精简选中上下文并替换功能均已完成，并通过自动化与真实 Pi 宿主回归
 
 ## 1. 项目目标
 
@@ -24,13 +24,13 @@
 | 组件 | 当前版本/边界 | 当前状态 |
 | --- | --- | --- |
 | 共享 Core | 根目录 `packages/context-editor-core` | 已完成第一阶段，作为 Pi 与 DeepSeek 的行为基准 |
-| Pi Extension | `pi-context-editor@0.5.1` | 已构建；Pi TUI `/ctx` 支持模型上下文排除和 User/Answer 手动替换，Pi Desktop/RPC 保持旧路径 |
-| Pi TUI | Pi `0.84.2` | 全屏编辑器、上下文排除、User/Answer 替换、恢复、LIFO 撤销和状态恢复已实现，自动化测试与宿主回归通过 |
+| Pi Extension | `pi-context-editor@0.6.0` | 已构建；Pi TUI `/ctx` 支持上下文排除、User/Answer 手动替换和 AI 精简选中上下文，Pi Desktop/RPC 保持旧路径 |
+| Pi TUI | Pi `0.84.2` | 全屏编辑器、上下文排除、User/Answer 替换、AI 精简、摘要排除/恢复和原文恢复已实现，自动化测试与真实宿主回归通过 |
 | Pi Desktop/RPC | Pi Desktop 原生对话框路径 | 可用，但仍是独立管理器，不改主聊天时间线 |
-| DeepSeek Harness | `context-editor-deepseek-harness@0.3.1` | rc.8 原生上下文投影、独立 reasoning/answer、搜索筛选和 User/Answer replacement 已实现；Answer 编辑默认可联动排除同轮 Reasoning，签名思考扩展工具链时要求确认；`contextReplacement` 已对符合条件的 User/Answer 单元启用 |
+| DeepSeek Harness | `context-editor-deepseek-harness@0.4.0` | rc.8 原生上下文投影、独立 reasoning/answer、搜索筛选、User/Answer replacement 和选中范围 AI 精简已实现；精简支持模型选择、前缀复用提示、预览编辑、风险提示、幂等应用、恢复和冲突保护 |
 | Pi Context Desktop | 独立 fork 的 Windows x64 `0.1.4` 社区构建 | 已发布边界记录，不属于本仓库的可复用适配器源码 |
 
-Pi 和 DeepSeek 的发布包均为预构建 tarball；`v0.3.1` 通过 GitHub Release 发布；DeepSeek 宿主本身仍是 rc.8 Developer Preview。
+Pi 和 DeepSeek 的发布包均为预构建 tarball；`v0.4.0` 通过 GitHub Release 发布；DeepSeek 宿主本身仍是 rc.8 Developer Preview。
 
 ## 3. 按最终功能表的完成度
 
@@ -42,14 +42,14 @@ Pi 和 DeepSeek 的发布包均为预构建 tarball；`v0.3.1` 通过 GitHub Rel
 | 1.1 | 隐藏全部对话 | 未开始 | 当前没有独立的“隐藏全部”入口；只能通过选择或筛选结果进行批量隐藏。后续应定义当前分支内全部可见 User、AI、Tool 单元的范围，并以一次可撤销的视觉状态变更提交，不修改 Session 或模型上下文。 |
 | 1.2 | 恢复全部对话 | 已完成（视觉状态） | Pi TUI 使用大写 `R` 确认后恢复全部视觉隐藏单元；Pi Desktop/RPC 和 DeepSeek 也提供恢复全部入口。该操作只写入 `reset` 视觉事件，不删除原始记录，也不改变主聊天时间线或模型上下文。 |
 | 2 | 从上下文中删除 | Pi TUI 与 DeepSeek Harness 已完成 | Pi TUI 使用 `x` 预览并确认 exclude/restore；投影事件写入独立 `<sessionFile>.context-editor.projection.json`，context hook 只改变 provider payload，不改 Session JSONL。DeepSeek rc.8 使用原生 `context/projection` 事件，只改变派生模型消息历史；两宿主的 Tool 配对、CAS、恢复和失败关闭均有测试。 |
-| 3 | 保存当前对话修改 | 基础能力完成 | Pi TUI 的视觉状态仍写入 `<sessionFile>.context-editor.json`，模型投影写入独立 sidecar；两者均原子写入并按分支 anchor 读取。DeepSeek 使用 `context_editor` sidecar；Pi Desktop/RPC 保留旧 V1 CustomEntry 兼容路径。AI 摘要替换尚未实现。 |
+| 3 | 保存当前对话修改 | 基础能力完成 | Pi TUI 的视觉状态仍写入 `<sessionFile>.context-editor.json`，模型投影写入独立 sidecar；两者均原子写入并按分支 anchor 读取。DeepSeek 使用 `context_editor` sidecar；Pi Desktop/RPC 保留旧 V1 CustomEntry 兼容路径。DeepSeek 精简事件只在对应 native projection 落盘后生效。 |
 | 3.1 | 手动替换上下文 User/Answer | Pi TUI 与 DeepSeek Harness 已完成 | 两个宿主都按单元保存 replacement event；编辑纯文本 User 或完整未签名 Answer，恢复 canonical 原文、LIFO 撤销、原文对照，搜索和 Provider composer 使用 `effectiveText`。原始 Surface/历史事件不变，排除优先于替换。结构化 User、签名 Answer、reasoning、Tool、System、附件和批量替换保持禁用。 |
 | 4 | 按消息类型筛选 | 部分完成 | 独立编辑器支持 User、AI、Tool 筛选及组合筛选；筛选只改变编辑器列表，不改变主聊天时间线。 |
 | 5 | 搜索对话记录 | 部分完成 | 默认只搜索 User 消息和 AI 最终回答；Pi TUI 按 `s`、DeepSeek 按搜索框按钮、Pi Desktop/RPC 按范围项临时切换全文（reasoning、Tool 名称/参数和输出）。支持 Unicode、逐次命中、命中次数和上一个/下一个结果；范围不写入 sidecar 或偏好。 |
 | 6 | AI 精简整篇对话 | 未开始 | 尚未实现 AI 分析整篇对话并提出隐藏、删除或摘要建议的流程。 |
-| 7 | AI 总结选中的一段对话 | 未开始 | 尚未实现选中片段提交给 AI 并生成摘要的流程。 |
-| 7.1 | 在对话窗口中用摘要替换原内容 | 未开始 | 尚未实现“主窗口显示摘要、原文可展开恢复”的摘要卡片或替换状态。 |
-| 7.2 | 在上下文中用摘要替换原内容 | 未开始 | 尚未实现只向模型发送摘要、同时保留原始记录的上下文投影。 |
+| 7 | AI 总结选中的一段对话 | Pi TUI 与 DeepSeek Harness 已完成 | 选择连续范围后可按完整回合扩展，使用当前有效内容生成可编辑摘要；不完整关联、签名/结构化内容、过期 revision 和重叠范围会被拒绝或提示。 |
+| 7.1 | 在对话窗口中用摘要替换原内容 | Pi TUI 与 DeepSeek Harness 已完成 | 预览显示原文、摘要、节省量、首次变化位置和工具风险；确认后写入宿主对应的模型上下文投影，摘要卡支持查看来源、整体排除/恢复和恢复精简前内容。 |
+| 7.2 | 在上下文中用摘要替换原内容 | Pi TUI 与 DeepSeek Harness 已完成 | 选区外顺序和角色保持稳定；DeepSeek 在同模型时可复用截至选区前的请求前缀，应用阶段只提交一次可恢复的摘要投影。 |
 
 ### 当前阶段判断
 
@@ -57,8 +57,8 @@ Pi 和 DeepSeek 的发布包均为预构建 tarball；`v0.3.1` 通过 GitHub Rel
 
 - 不能直接修改 Pi 或其他 Agent 的主聊天时间线显示；
 - Pi Desktop/RPC 和其他 Agent 尚未接入模型上下文排除；
-- 不能执行 AI 自动精简或选段摘要；
-- 不能用摘要替换显示层或模型上下文中的原内容。
+- 不能执行 AI 自动精简整篇对话；
+- Pi Desktop/RPC 与其他 Agent 尚未接入选中范围 AI 精简。
 
 ## 4. 已完成的实现
 
@@ -94,6 +94,7 @@ Pi 和 DeepSeek 的发布包均为预构建 tarball；`v0.3.1` 通过 GitHub Rel
 - `x` 先显示请求单元、自动扩展、最终影响范围和最近一轮警告，再确认 exclude/restore。
 - `e` 关闭 custom UI 后调用 Pi 原生多行编辑器；`E` 恢复替换，`z` 撤销当前单元最近一次替换/恢复，`o` 对照 canonical 文本，并保留搜索、筛选和焦点。
 - 模型状态与 `h/r/R/u` 视觉状态分开显示；projection sidecar 不可用时禁用 `x`，仍可浏览和视觉操作。
+- `c` 生成并预览选中范围摘要，`C` 排除/恢复摘要，`D` 恢复精简前原文，`O` 展开来源；多选、取消生成、重进 TUI 和 sidecar 恢复均已覆盖。
 - 终端宽度变化时会重新计算换行和滚动范围，并覆盖 CJK 宽字符测试场景。
 
 ### 4.3 Pi sidecar
@@ -115,7 +116,7 @@ Pi 和 DeepSeek 的发布包均为预构建 tarball；`v0.3.1` 通过 GitHub Rel
 - Pi Desktop/RPC 路径提供原生选择、输入、确认和详情窗口；旧 V1 视觉 CustomEntry 仍可读取。
 - DeepSeek Harness 适配器提供同一 Session 的 Context Editor 标签页。
 - DeepSeek 中 reasoning 与 answer 可独立选择、隐藏、恢复和撤销；搜索默认对话范围，搜索框按钮可临时启用全文。
-- DeepSeek 0.3.0 已迁移纯文本 User/完整无签名 Answer 的多行编辑、恢复、单元 LIFO 撤销和原文对照；列表、搜索和 Provider composer 统一使用 `effectiveText`。
+- DeepSeek 0.4.0 支持 AI 精简选中范围，并保留 0.3.0 起已迁移的纯文本 User/完整无签名 Answer 的多行编辑、恢复、单元 LIFO 撤销和原文对照；列表、搜索和 Provider composer 统一使用 `effectiveText`。
 - replacement 事件先写入 `context_editor.replacementEvents`，再在 Agent maintenance 内追加同 `operationId` 的原生 `context/projection`；只有匹配的原生事件才生效，预写崩溃记录失败关闭。
 - Pi Desktop/RPC 在原生对话框增加搜索范围项，默认对话范围且不扩展 V1 `viewFilter` 持久化格式。
 - DeepSeek Host 在 Session 运行期间保持可读；未稳定投影时拒绝写入，避免部分状态。
@@ -130,7 +131,7 @@ Pi 和 DeepSeek 的发布包均为预构建 tarball；`v0.3.1` 通过 GitHub Rel
 
 ## 5. 自动化验证现状
 
-截至 2026-08-26，以下核心验证命令已通过：
+截至 2026-09-11，以下核心验证命令已通过：
 
 ```text
 npm run build:pi-core
@@ -143,13 +144,13 @@ npm run build:client
 npm run verify:pack
 ```
 
-完整 `npm run verify` 已通过（20 个测试文件、89 个测试）；本地 `deepseek-harness-latest` 仅作为未发布的 rc.8 验证夹具，已加入忽略规则，不进入 GitHub 仓库和发布 tarball。
+完整 `npm run verify` 已通过（23 个测试文件、110 个测试）；本地 `deepseek-harness-latest` 仅作为未发布的 rc.8 验证夹具，已加入忽略规则，不进入 GitHub 仓库和发布 tarball。
 
 验证结果：
 
 - TypeScript 严格检查通过；
-- 20 个测试文件通过；
-- 89 个测试通过；
+- 23 个测试文件通过；
+- 110 个测试通过；
 - 中英文 UI 字面量扫描通过；
 - Pi vendored Core 和 Pi bundle 构建通过；
 - DeepSeek Core/client 构建通过；
@@ -207,9 +208,9 @@ npm run verify:pack
 Pi TUI 与 rc.8 DeepSeek Harness 的契约和安全门已经实现；两者均已启用 `contextExclusion`，DeepSeek 对可编辑的 User/Answer 单元也已启用 `contextReplacement`。后续新宿主仍需各自完成同一验收流程。
 本稳定版不把真实外部 API smoke 作为发布前置条件；若跟随新宿主或 Harness 新 commit，仍需重新执行对应验收。
 
-### 阶段 D：实现摘要和 AI 精简
+### 阶段 D：继续扩展 AI 精简
 
-最后增加选段摘要、摘要显示替换、摘要上下文替换和 AI 全篇精简建议。AI 建议必须先展示、再由用户确认，并且每次变更可撤销；不要把摘要功能和当前视觉隐藏事件混为一类。
+选段摘要、摘要显示替换和摘要上下文替换已在 Pi TUI 与 DeepSeek Harness 完成；下一步可研究 AI 全篇精简建议。AI 建议必须先展示、再由用户确认，并且每次变更可撤销；不要把摘要功能和当前视觉隐藏事件混为一类。
 
 ### 宿主选择原则
 
@@ -219,8 +220,8 @@ Pi TUI 与 rc.8 DeepSeek Harness 的契约和安全门已经实现；两者均�
 
 ## 8. 当前结论
 
-项目已经进入“共享 Core + Pi TUI 上下文排除与手动替换 + DeepSeek 0.3.1 稳定适配 + 独立管理视图”的稳定发布阶段。Pi TUI 和 DeepSeek 都能在不改写原始 Surface/历史事件的前提下生成后续派生模型输入；主聊天时间线原位编辑、AI 精简和摘要替换仍未完成。
+项目已经进入“共享 Core + Pi TUI 与 DeepSeek 上下文排除、手动替换和 AI 精简 + 独立管理视图”的稳定发布阶段。两个宿主都能在不改写原始 Session 的前提下，用可恢复摘要替换后续派生模型输入；主聊天时间线原位编辑和 AI 全篇精简仍未完成。
 
 因此当前最准确的状态是：
 
-> 当前状态：共享 Core、Pi TUI 和 DeepSeek Harness replacement + Answer/Reasoning 联动实现已完成；0.3.1 定向测试、检查、扫描、构建和候选 tarball 已生成，目标 rc.8 profile 已安装并启动，Host getSnapshot 冒烟通过。浏览器自动化受本机沙箱初始化错误阻断，真实外部 API smoke 仍未执行；主聊天时间线原位编辑、AI 精简和摘要替换仍未完成。
+> 当前状态：共享 Core、Pi TUI 和 DeepSeek Harness 的上下文排除、手动替换及 AI 精简并替换均已完成；v0.4.0 全量验证通过，真实 Pi 0.84.2 模型调用和摘要应用/恢复链路通过。DeepSeek 浏览器真实 API smoke 仍未执行，Pi Desktop/RPC 与主聊天时间线原位编辑不在本版本范围。

@@ -64,6 +64,7 @@ export function reduceProjectionStates(
     ownerByAtom.set(atom.id, owner)
   }
   for (const event of events) {
+    if ('type' in event && event.type === 'condensation') continue
     if (isReplacementEvent(event)) {
       if (event.action === 'undo') {
         const changes = linkedByEvent.get(event.undoOf)

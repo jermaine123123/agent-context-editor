@@ -13,9 +13,9 @@ This adapter targets the official DeepSeek Harness Developer Preview commit
 package adds a `Context Editor` tab beside the normal `Chat` view for the same
 Session; it never creates a second conversation.
 
-Version `0.3.1` targets Harness rc.8 and adds the migrated User/Answer replacement path. When an Answer has same-turn reasoning, the edit dialog defaults to linked exclusion of that reasoning; signed reasoning may expand the confirmed impact to its paired tool chain. The replacement and linked exclusion are one operation with one `operationId`, so whole-operation undo restores only exclusions introduced by that edit. Plain-text User messages and complete unsigned Answers expose a multiline editor; replacement, restore, and per-unit LIFO undo events are persisted in the `context_editor` sidecar and materialized as matching native `context/projection` events. The original Surface nodes and history remain unchanged. Reasoning, Tool, structured User content, signed Answers, and batch replacement remain unsupported.
+Version `0.4.0` targets Harness rc.8 and adds reversible AI condensation for selected context alongside the existing User/Answer replacement path. When an Answer has same-turn reasoning, the edit dialog defaults to linked exclusion of that reasoning; signed reasoning may expand the confirmed impact to its paired tool chain. The replacement and linked exclusion are one operation with one `operationId`, so whole-operation undo restores only exclusions introduced by that edit. Plain-text User messages and complete unsigned Answers expose a multiline editor; replacement, restore, and per-unit LIFO undo events are persisted in the `context_editor` sidecar and materialized as matching native `context/projection` events. The original Surface nodes and history remain unchanged. Reasoning, Tool, structured User content, signed Answers, and batch replacement remain unsupported.
 
-The replacement path is enabled in the 0.3.1 release for the tested rc.8
+The replacement path is enabled in the 0.4.0 release for the tested rc.8
 boundary. Automated Core/Host fixtures, isolated package installation, local
 provider-payload composition, and rc.8 web profile startup checks passed. The
 Harness host itself remains a Developer Preview; later Harness commits require
@@ -30,6 +30,20 @@ beside the search box to temporarily include reasoning, Tool Call and Tool
 Output atoms. The scope is window-local and is not written to localStorage or
 the `context_editor` sidecar; User/AI/Tool type filters remain the upper bound.
 
+To condense a range, select one or more units and choose **AI-condense
+selected**. Selecting exactly one Answer enables an optional checkbox to include same-turn
+reasoning and tool output; it is off by default and disabled for other
+selections. The Host sends the effective selected content to the configured
+model and shows the original range, candidate summary, estimated savings, and
+risks.
+Edit the candidate before applying it. Apply writes one native
+`context/projection` event whose first root contains a fixed
+`<condensed-context>` summary (a single plain User/Answer keeps its role;
+complex ranges use a user summary) and whose remaining roots are removed.
+The active summary card can restore the saved effective source. A stale
+revision, changed source fingerprint, active native compaction, or an
+overlapping summary rejects the operation without a partial projection.
+
 ## Install the tarball
 
 From this directory, create the package and install the resulting file into a
@@ -39,7 +53,7 @@ Harness profile:
 node ./scripts/build-core.mjs
 node ./scripts/build-client.mjs
 npm pack --ignore-scripts
-dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.3.1.tgz
+dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.4.0.tgz
 ```
 
 On Windows, `dsh` may not be on `PATH` even when Harness is installed.  Use
@@ -47,13 +61,13 @@ the profile's bundled launcher explicitly from PowerShell:
 
 ```powershell
 $env:DSH_HOME = '<harness-root>\.dsh'
-& '<harness-root>\node_modules\.bin\dsh.cmd' plugin --profile web add '<package-path>\context-editor-deepseek-harness-0.3.1.tgz'
+& '<harness-root>\node_modules\.bin\dsh.cmd' plugin --profile web add '<package-path>\context-editor-deepseek-harness-0.4.0.tgz'
 ```
 
 On Windows, if either the repository path or Harness path contains spaces and
 the CLI reports `ENOENT` for a truncated `editor\adapters\...` path, first
 copy the tarball to a path without spaces (for example
-`D:\context-editor-deepseek-harness-0.3.1.tgz`) and pass that path to the same
+`D:\context-editor-deepseek-harness-0.4.0.tgz`) and pass that path to the same
 command. The package itself remains installed in the selected Harness profile.
 
 If the launcher reports that `pnpm` is missing, add the Harness-provided pnpm

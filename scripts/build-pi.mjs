@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto"
+﻿import { createHash } from "node:crypto"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -17,6 +17,7 @@ const coreFiles = [
   "packages/context-editor-core/src/service.ts",
   "packages/context-editor-core/src/prefs.ts",
   "packages/context-editor-core/src/protocol.ts",
+  "packages/context-editor-core/src/condensation.ts",
 ]
 const digest = createHash("sha256")
 for (const file of coreFiles) digest.update(await readFile(resolve(root, file)))
