@@ -14,7 +14,7 @@ describe('DeepSeek Harness installable bundle', () => {
       dsh?: { bundle?: { patch?: string }; client?: { platform?: string } }
     }
     expect(manifest.name).toBe('context-editor-deepseek-harness')
-    expect(manifest.version).toBe('0.5.0')
+    expect(manifest.version).toBe('0.4.1')
     expect(manifest.dsh?.bundle?.patch).toBe('./cordis.patch.yml')
     expect(manifest.dsh?.client?.platform).toBe('web')
     expect(readFileSync(resolve(root, 'cordis.patch.yml'), 'utf8')).toContain('id: context-editor')
