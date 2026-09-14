@@ -909,6 +909,12 @@ export class ContextEditorComponent implements Component {
       lines.push(...wrap(this.condensationCardExpanded ? condensation.summary : condensation.summary.split(/\r?\n/)[0]!.slice(0, 100)));
       lines.push(...wrap(this.text.condensationSourceList(cardIndex + 1, condensation.sourceUnits.length)));
       lines.push(...wrap(this.text.condensationCardMetrics(condensation.metrics.savedTokens, condensation.metrics.savingsRatio)));
+      if (condensation.coverage) {
+        lines.push(...wrap(this.text.condensationCoverage(condensation.coverage.status, condensation.coverage.restoreMode)));
+        if (condensation.coverage.status !== "none" || condensation.coverage.restoreMode === "unavailable") {
+          lines.push(...wrap(this.text.condensationRestoreRequired(condensation.coverage.restoreMode, condensation.coverage.checkpointEntryId)));
+        }
+      }
       const allUnits = this.records.flatMap(record => record.units);
       for (const source of condensation.sourceUnits) {
         const sourceIndex = allUnits.findIndex(unit => unit.id === source.id) + 1;
@@ -930,7 +936,8 @@ export class ContextEditorComponent implements Component {
       const preview = await this.previewContext({ baseRevision: this.revision, action, condensationOperationId: condensation.operationId });
       const result = await this.commitContext({ baseRevision: preview.baseRevision, action, condensationOperationId: condensation.operationId });
       if (!result.ok || result.conflict) {
-        this.notify(this.text.sidecarChanged(), "warning");
+        if (result.restoreRequired) this.notify(this.text.condensationRestoreRequired(result.restoreMode ?? "unavailable", result.checkpointEntryId), "warning");
+        else this.notify(this.text.sidecarChanged(), "warning");
         this.refreshData();
       } else {
         this.refreshData();
@@ -954,7 +961,8 @@ export class ContextEditorComponent implements Component {
     try {
       const result = await this.restoreCondensation({ baseRevision: this.revision, operationId: condensation.operationId });
       if (!result.ok || result.conflict) {
-        this.notify(this.text.sidecarChanged(), "warning");
+        if (result.restoreRequired) this.notify(this.text.condensationRestoreRequired(result.restoreMode ?? "unavailable", result.checkpointEntryId), "warning");
+        else this.notify(this.text.sidecarChanged(), "warning");
         this.refreshData();
       } else {
         this.refreshData();
@@ -1021,7 +1029,8 @@ export class ContextEditorComponent implements Component {
     try {
       const result = await this.commitContext({ baseRevision: this.revision, action: pending.action, unitIds: pending.unitIds });
       if (!result.ok || result.conflict) {
-        this.notify(this.text.sidecarChanged(), "warning");
+        if (result.restoreRequired) this.notify(this.text.condensationRestoreRequired(result.restoreMode ?? "unavailable", result.checkpointEntryId), "warning");
+        else this.notify(this.text.sidecarChanged(), "warning");
         this.refreshData();
         return;
       }
@@ -1069,7 +1078,8 @@ export class ContextEditorComponent implements Component {
     try {
       const result = this.mutate({ baseRevision: this.revision, action, ...(unitIds ? { unitIds } : {}) });
       if (!result.ok || result.conflict) {
-        this.notify(this.text.sidecarChanged(), "warning");
+        if (result.restoreRequired) this.notify(this.text.condensationRestoreRequired(result.restoreMode ?? "unavailable", result.checkpointEntryId), "warning");
+        else this.notify(this.text.sidecarChanged(), "warning");
         this.refreshData();
         return;
       }

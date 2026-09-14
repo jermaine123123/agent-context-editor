@@ -1,9 +1,11 @@
 /* GENERATED FROM packages/context-editor-core; do not edit directly. */
 import type {
   ContextAtom,
+  ContextCondensationCoverage,
   ContextEditableUnit,
   ContextEditableUnitKind,
   ContextRecord,
+  ContextNativeCompactionRef,
 } from './types.js'
 import { stableFingerprint } from './fingerprint.js'
 
@@ -55,6 +57,135 @@ export interface CondensationMetrics {
   savedTokens: number
   savingsRatio: number
   belowRecommendedThreshold: boolean
+}
+
+/**
+ * Reconcile a selective condensation with successful host-native compactions.
+ *
+ * Native compaction operates on surface roots, so the relationship is derived
+ * from the exact shadowed root set rather than from a positional range. This
+ * keeps partial coverage meaningful when a later compaction only absorbs part
+ * of an older selective summary.
+ */
+export function deriveCondensationCoverage(
+  sourceRootSeqs: readonly number[] | readonly string[],
+  nativeCompactions: readonly ContextNativeCompactionRef[],
+): ContextCondensationCoverage {
+  if (sourceRootSeqs.some(value => typeof value === "string")) {
+    return deriveCondensationEntryCoverage(sourceRootSeqs.map(String), nativeCompactions)
+  }
+  const source = Array.from(new Set(((sourceRootSeqs as readonly number[]) ?? [])
+    .map(Number)
+    .filter((value) => Number.isSafeInteger(value) && value >= 0)))
+    .sort((a, b) => a - b)
+  const refs = Array.from(new Map((nativeCompactions ?? [])
+    .filter((ref) => ref && typeof ref.compactionId === 'string' && ref.compactionId.length > 0)
+    .map((ref) => [ref.compactionId, {
+      ...ref,
+      host: String(ref.host ?? ''),
+      compactionId: String(ref.compactionId),
+      shadowedRootSeqs: Array.from(new Set((ref.shadowedRootSeqs ?? [])
+        .map(Number)
+        .filter((value) => Number.isSafeInteger(value) && value >= 0))).sort((a, b) => a - b),
+      ...(Number.isSafeInteger(ref.startSeq) ? { startSeq: Number(ref.startSeq) } : {}),
+      ...(ref.shadowedRange && Number.isSafeInteger(ref.shadowedRange.start) && Number.isSafeInteger(ref.shadowedRange.end)
+        ? { shadowedRange: { start: Number(ref.shadowedRange.start), end: Number(ref.shadowedRange.end) } }
+        : {}),
+      ...(Number.isSafeInteger(ref.summarySeq) ? { summarySeq: Number(ref.summarySeq) } : {}),
+      ...(Number.isSafeInteger(ref.checkpointSeq) ? { checkpointSeq: Number(ref.checkpointSeq) } : {}),
+      ...(Number.isSafeInteger(ref.endSeq) ? { endSeq: Number(ref.endSeq) } : {}),
+      committed: ref.committed !== false,
+    } satisfies ContextNativeCompactionRef]))
+    .values())
+    .filter((ref) => ref.shadowedRootSeqs.length > 0)
+    .sort((left, right) => (right.checkpointSeq ?? right.endSeq ?? right.summarySeq ?? -1)
+      - (left.checkpointSeq ?? left.endSeq ?? left.summarySeq ?? -1))
+  const relatedRefs = refs.filter((ref) => source.some((root) => ref.shadowedRootSeqs.includes(root)))
+  const verifiedRefs = relatedRefs.filter((ref) => ref.committed !== false)
+  const covered = source.filter((root) => verifiedRefs.some((ref) => ref.shadowedRootSeqs.includes(root)))
+  const uncertainRefs = relatedRefs.filter((ref) => ref.committed === false
+    && ref.shadowedRootSeqs.some((root) => source.includes(root) && !covered.includes(root)))
+  const outputRefs = [...verifiedRefs, ...uncertainRefs]
+  const uncertain = uncertainRefs.length > 0
+  const uncovered = source.filter((root) => !covered.includes(root))
+  const status: ContextCondensationCoverage['status'] = covered.length === 0
+    ? 'none'
+    : uncovered.length === 0 ? 'full' : 'partial'
+  const checkpoint = verifiedRefs.find((ref) => Number.isSafeInteger(ref.checkpointSeq))
+  const restoreMode: ContextCondensationCoverage['restoreMode'] = uncertain
+    ? 'unavailable'
+    : status === 'none'
+      ? 'inline'
+      : checkpoint ? 'checkpoint' : 'unavailable'
+  return {
+    status,
+    restoreMode,
+    coveredSourceRootSeqs: covered,
+    uncoveredSourceRootSeqs: uncovered,
+    nativeCompactions: outputRefs,
+    ...(checkpoint ? { checkpointCompactionId: checkpoint.compactionId, checkpointSeq: checkpoint.checkpointSeq } : {}),
+    ...(restoreMode === 'inline' ? {} : {
+      reason: restoreMode === 'checkpoint'
+        ? 'native-compaction-absorbed-source' as const
+        : 'checkpoint-unavailable' as const,
+    }),
+  }
+}
+
+/** Derive coverage for hosts whose durable surface uses opaque entry IDs (Pi). */
+export function deriveCondensationEntryCoverage(
+  sourceEntryIds: readonly string[],
+  nativeCompactions: readonly ContextNativeCompactionRef[],
+): ContextCondensationCoverage {
+  const source = Array.from(new Set(sourceEntryIds.map(String).filter(Boolean)))
+  const refs = Array.from(new Map((nativeCompactions ?? [])
+    .filter(ref => ref && typeof ref.compactionId === 'string' && ref.compactionId.length > 0)
+    .map(ref => [ref.compactionId, {
+      ...ref,
+      host: String(ref.host ?? ''),
+      compactionId: String(ref.compactionId),
+      shadowedRootSeqs: Array.from(new Set((ref.shadowedRootSeqs ?? []).map(Number)
+        .filter(value => Number.isSafeInteger(value) && value >= 0))).sort((a, b) => a - b),
+      shadowedEntryIds: Array.from(new Set((ref.shadowedEntryIds ?? []).map(String).filter(Boolean))),
+      ...(typeof ref.checkpointEntryId === 'string' && ref.checkpointEntryId.length > 0 ? { checkpointEntryId: ref.checkpointEntryId } : {}),
+      committed: ref.committed !== false,
+    } satisfies ContextNativeCompactionRef]))
+    .values())
+    .filter(ref => ref.shadowedEntryIds.length > 0)
+    .sort((left, right) => (right.checkpointSeq ?? right.endSeq ?? right.summarySeq ?? -1)
+      - (left.checkpointSeq ?? left.endSeq ?? left.summarySeq ?? -1))
+  const relatedRefs = refs.filter(ref => source.some(entryId => ref.shadowedEntryIds?.includes(entryId)))
+  const verifiedRefs = relatedRefs.filter(ref => ref.committed !== false)
+  const covered = source.filter(entryId => verifiedRefs.some(ref => ref.shadowedEntryIds?.includes(entryId)))
+  const uncertainRefs = relatedRefs.filter(ref => ref.committed === false
+    && ref.shadowedEntryIds?.some(entryId => source.includes(entryId) && !covered.includes(entryId)))
+  const uncovered = source.filter(entryId => !covered.includes(entryId))
+  const status: ContextCondensationCoverage['status'] = covered.length === 0
+    ? 'none'
+    : uncovered.length === 0 ? 'full' : 'partial'
+  const checkpoint = verifiedRefs.find(ref => typeof ref.checkpointEntryId === 'string' && ref.checkpointEntryId.length > 0)
+  const restoreMode: ContextCondensationCoverage['restoreMode'] = uncertainRefs.length > 0
+    ? 'unavailable'
+    : status === 'none' ? 'inline' : checkpoint ? 'checkpoint' : 'unavailable'
+  return {
+    status,
+    restoreMode,
+    coveredSourceRootSeqs: [],
+    uncoveredSourceRootSeqs: [],
+    coveredSourceEntryIds: covered,
+    uncoveredSourceEntryIds: uncovered,
+    nativeCompactions: [...verifiedRefs, ...uncertainRefs],
+    ...(checkpoint ? {
+      checkpointCompactionId: checkpoint.compactionId,
+      ...(checkpoint.checkpointSeq === undefined ? {} : { checkpointSeq: checkpoint.checkpointSeq }),
+      ...(checkpoint.checkpointEntryId === undefined ? {} : { checkpointEntryId: checkpoint.checkpointEntryId }),
+    } : {}),
+    ...(restoreMode === 'inline' ? {} : {
+      reason: restoreMode === 'checkpoint'
+        ? 'native-compaction-absorbed-source' as const
+        : 'checkpoint-unavailable' as const,
+    }),
+  }
 }
 
 export interface CondensationProposal {
@@ -322,4 +453,5 @@ export interface CondensationEvent {
   beforeChanges: CondensationChange[]
   afterChanges: CondensationChange[]
   restoreEventSeq?: number
+  coverage?: ContextCondensationCoverage
 }

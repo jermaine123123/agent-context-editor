@@ -1,6 +1,6 @@
 /*
  * GENERATED FILE - do not edit directly.
- * Canonical Core source digest: 58a42b438e4197afdf2a1d5c43f68f572bcb98c24756115875d1de10304079ca
+ * Canonical Core source digest: d467cb89a9c9c6860c58d815d8cd3993be5b6a3869a9e4a80d3ecd3ed2fc8d3f
  * Rebuild with: npm run build:deepseek
  */
 import {
@@ -522,6 +522,9 @@ export function buildProjection(identity, events, row, options = {}) {
   return {
     ...normalized,
     sourceEvents: Array.isArray(events) ? events : [],
+    activeSurfaceSeqs: Array.isArray(options.activeSurfaceSeqs)
+      ? options.activeSurfaceSeqs.map(Number).filter(value => Number.isSafeInteger(value) && value >= 0)
+      : undefined,
     events: viewEvents,
     replacementEvents: matched,
     activeReplacementEvents,

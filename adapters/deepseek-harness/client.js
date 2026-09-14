@@ -1144,6 +1144,13 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
     setCondensationError('')
     try {
       const result = await controller.restoreCondensation(operationId, loaded.snapshot.revision)
+      if (result?.restoreRequired) {
+        setCondensationError(result.restoreMode === 'checkpoint'
+          ? text.condensationCheckpoint(result.checkpointSeq)
+          : text.condensationRestoreUnavailable)
+        await refresh(true)
+        return
+      }
       if (result?.conflict) {
         await refresh(true)
         return
@@ -1292,27 +1299,36 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
 
   const matchUnitId = match?.unitId
   const aiState = aiFilterState(prefs.enabledUnitKinds)
-  const renderCondensation = item => h('article', { key: item.operationId, className: 'context-editor__condensation-card', 'data-condensation-operation-id': item.operationId },
-         h('div', { className: 'context-editor__condensation-card-header' },
-           h('strong', null, text.activeCondensation),
-           h('span', null, text.condensationModel(item.provider, item.model)),
-           h('button', { type: 'button', disabled: readOnly, onClick: () => void toggleCondensationContext(item) }, item.contextExcluded === true ? text.restoreContext : text.excludeContext),
-           h('button', { type: 'button', disabled: readOnly, onClick: () => void restoreCondensation(item.operationId) }, text.restoreCondensation),
-         ),
-         h('pre', { className: 'context-editor__condensation-summary' }, item.summary),
-         h('div', { className: 'context-editor__condensation-card-metrics' },
-           h('span', null, text.condensationBefore(item.metrics?.beforeTokens)), ' → ',
-           h('span', null, text.condensationAfter(item.metrics?.afterTokens)),
-           h('strong', null, ' · ' + text.condensationSaved(item.metrics?.savedTokens, item.metrics?.savingsRatio))),
-         item.metrics?.belowRecommendedThreshold ? h('div', { className: 'context-editor__condensation-risks' }, text.condensationLowSaving) : null,
-         h('details', { className: 'context-editor__condensation-source' },
-           h('summary', null, text.condensationOriginal),
-           h('div', null, (item.sourceUnits ?? []).filter(source => source.included).map(source => h('article', { key: source.id },
-             h('strong', null, `${source.kind} · ${source.id}`),
-             h('pre', null, source.text),
-           ))),
-         ),
-       )
+  const renderCondensation = item => {
+    const coverage = item.coverage ?? { status: 'none', restoreMode: 'inline', coveredSourceRootSeqs: [], uncoveredSourceRootSeqs: [] }
+    const coveredCount = coverage.coveredSourceRootSeqs?.length ?? 0
+    const totalCount = (coverage.coveredSourceRootSeqs?.length ?? 0) + (coverage.uncoveredSourceRootSeqs?.length ?? 0)
+    const restoreBlocked = coverage.restoreMode !== 'inline'
+    return h('article', { key: item.operationId, className: 'context-editor__condensation-card', 'data-condensation-operation-id': item.operationId },
+      h('div', { className: 'context-editor__condensation-card-header' },
+        h('strong', null, text.activeCondensation),
+        h('span', null, text.condensationModel(item.provider, item.model)),
+        h('button', { type: 'button', disabled: readOnly, onClick: () => void toggleCondensationContext(item) }, item.contextExcluded === true ? text.restoreContext : text.excludeContext),
+        h('button', { type: 'button', disabled: readOnly || restoreBlocked, onClick: () => void restoreCondensation(item.operationId) }, text.restoreCondensation),
+      ),
+      h('pre', { className: 'context-editor__condensation-summary' }, item.summary),
+      h('div', { className: 'context-editor__condensation-risks', role: 'status' }, text.condensationCoverage(coverage.status, coveredCount, totalCount)),
+      coverage.restoreMode === 'checkpoint' ? h('div', { className: 'context-editor__condensation-risks' }, text.condensationCheckpoint(coverage.checkpointSeq)) : null,
+      coverage.restoreMode === 'unavailable' ? h('div', { className: 'context-editor__condensation-risks' }, text.condensationRestoreUnavailable) : null,
+      h('div', { className: 'context-editor__condensation-card-metrics' },
+        h('span', null, text.condensationBefore(item.metrics?.beforeTokens)), ' → ',
+        h('span', null, text.condensationAfter(item.metrics?.afterTokens)),
+        h('strong', null, ' · ' + text.condensationSaved(item.metrics?.savedTokens, item.metrics?.savingsRatio))),
+      item.metrics?.belowRecommendedThreshold ? h('div', { className: 'context-editor__condensation-risks' }, text.condensationLowSaving) : null,
+      h('details', { className: 'context-editor__condensation-source' },
+        h('summary', null, text.condensationOriginal),
+        h('div', null, (item.sourceUnits ?? []).filter(source => source.included).map(source => h('article', { key: source.id },
+          h('strong', null, `${source.kind} · ${source.id}`),
+          h('pre', null, source.text),
+        ))),
+      ),
+    )
+  }
 
   return h('section', { className: 'context-editor', 'aria-label': 'Context Editor' },
     h('div', { className: 'context-editor__controls', ref: controlsNode },

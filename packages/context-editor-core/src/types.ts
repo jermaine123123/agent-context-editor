@@ -29,6 +29,39 @@ export type ContextReplacementDisabledReason =
 /** The revision type is string in Pi, while small in-memory hosts often use a number. */
 export type ContextRevision = string | number
 
+export type ContextCondensationCoverageStatus = 'none' | 'partial' | 'full'
+export type ContextCondensationRestoreMode = 'inline' | 'checkpoint' | 'unavailable'
+
+export interface ContextNativeCompactionRef {
+  host: string
+  compactionId: string
+  shadowedRootSeqs: number[]
+  /** Host-native opaque entry identifiers (Pi uses these instead of seqs). */
+  shadowedEntryIds?: string[]
+  startSeq?: number
+  shadowedRange?: { start: number; end: number }
+  summarySeq?: number
+  checkpointSeq?: number
+  /** Host-native checkpoint identifier used for branch/tree recovery. */
+  checkpointEntryId?: string
+  endSeq?: number
+  committed?: boolean
+}
+
+export interface ContextCondensationCoverage {
+  status: ContextCondensationCoverageStatus
+  restoreMode: ContextCondensationRestoreMode
+  coveredSourceRootSeqs: number[]
+  uncoveredSourceRootSeqs: number[]
+  coveredSourceEntryIds?: string[]
+  uncoveredSourceEntryIds?: string[]
+  nativeCompactions: ContextNativeCompactionRef[]
+  checkpointCompactionId?: string
+  checkpointSeq?: number
+  checkpointEntryId?: string
+  reason?: 'native-compaction-absorbed-source' | 'checkpoint-unavailable'
+}
+
 export interface SourceRef {
   entryId: string
   blockIndex: number
@@ -186,6 +219,7 @@ export interface ContextCondensationSnapshot {
   provider: string
   model: string
   createdAt: string
+  coverage?: ContextCondensationCoverage
 }
 
 export interface ContextSearchOccurrence {
@@ -316,6 +350,7 @@ export interface ContextCondensationEventV1 {
   /** Provider-shaped messages before and after the condensation. */
   beforeMessages: Array<{ entryId: string; message: unknown }>
   afterMessages: Array<{ entryId: string; message: unknown }>
+  coverage?: ContextCondensationCoverage
 }
 
 export type ContextProjectionEvent = ContextProjectionEventV1 | ContextReplacementEventV1 | ContextCondensationEventV1

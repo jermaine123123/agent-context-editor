@@ -5,4 +5,4 @@
 export { projectRecords } from '../../packages/context-editor-core/src/records.ts'
 export { reduceProjectionStates, reduceReplacementStates, selectAssociatedReasoningTargets, selectProjectionTargets } from '../../packages/context-editor-core/src/projection.ts'
 export { atomMatchesSearchScope, searchRecords } from '../../packages/context-editor-core/src/search.ts'
-export { selectCondensationRange, validateCondensationSummary, frameCondensationSummary, estimateCondensationTokens } from '../../packages/context-editor-core/src/condensation.ts'
+export { selectCondensationRange, validateCondensationSummary, frameCondensationSummary, estimateCondensationTokens, deriveCondensationCoverage } from '../../packages/context-editor-core/src/condensation.ts'

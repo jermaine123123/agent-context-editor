@@ -1,9 +1,9 @@
 /* GENERATED FILE - rebuild with npm run build:pi. */
-/* Canonical Core source digest: 8585d42b2e93310a425514e7b4a92722812c6ca361de06668c5fd5490bf977b3 */
+/* Canonical Core source digest: 5fbf9432539f4794c97cdb65a5ebb8564a14e376cecb530b5ca01c2058998e7b */
+import { sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
 import { decodeKittyPrintable, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
 //#region adapters/pi-extension/src/shared-core/fingerprint.ts
 /** Deterministic identity check; this is not intended as a security hash. */
 function stableFingerprint(parts) {
@@ -1375,6 +1375,89 @@ function contextEditorBranchRevisionParts(entries) {
 }
 //#endregion
 //#region adapters/pi-extension/src/shared-core/condensation.ts
+/**
+* Reconcile a selective condensation with successful host-native compactions.
+*
+* Native compaction operates on surface roots, so the relationship is derived
+* from the exact shadowed root set rather than from a positional range. This
+* keeps partial coverage meaningful when a later compaction only absorbs part
+* of an older selective summary.
+*/
+function deriveCondensationCoverage(sourceRootSeqs, nativeCompactions) {
+	if (sourceRootSeqs.some((value) => typeof value === "string")) return deriveCondensationEntryCoverage(sourceRootSeqs.map(String), nativeCompactions);
+	const source = Array.from(new Set((sourceRootSeqs ?? []).map(Number).filter((value) => Number.isSafeInteger(value) && value >= 0))).sort((a, b) => a - b);
+	const relatedRefs = Array.from(new Map((nativeCompactions ?? []).filter((ref) => ref && typeof ref.compactionId === "string" && ref.compactionId.length > 0).map((ref) => [ref.compactionId, {
+		...ref,
+		host: String(ref.host ?? ""),
+		compactionId: String(ref.compactionId),
+		shadowedRootSeqs: Array.from(new Set((ref.shadowedRootSeqs ?? []).map(Number).filter((value) => Number.isSafeInteger(value) && value >= 0))).sort((a, b) => a - b),
+		...Number.isSafeInteger(ref.startSeq) ? { startSeq: Number(ref.startSeq) } : {},
+		...ref.shadowedRange && Number.isSafeInteger(ref.shadowedRange.start) && Number.isSafeInteger(ref.shadowedRange.end) ? { shadowedRange: {
+			start: Number(ref.shadowedRange.start),
+			end: Number(ref.shadowedRange.end)
+		} } : {},
+		...Number.isSafeInteger(ref.summarySeq) ? { summarySeq: Number(ref.summarySeq) } : {},
+		...Number.isSafeInteger(ref.checkpointSeq) ? { checkpointSeq: Number(ref.checkpointSeq) } : {},
+		...Number.isSafeInteger(ref.endSeq) ? { endSeq: Number(ref.endSeq) } : {},
+		committed: ref.committed !== false
+	}])).values()).filter((ref) => ref.shadowedRootSeqs.length > 0).sort((left, right) => (right.checkpointSeq ?? right.endSeq ?? right.summarySeq ?? -1) - (left.checkpointSeq ?? left.endSeq ?? left.summarySeq ?? -1)).filter((ref) => source.some((root) => ref.shadowedRootSeqs.includes(root)));
+	const verifiedRefs = relatedRefs.filter((ref) => ref.committed !== false);
+	const covered = source.filter((root) => verifiedRefs.some((ref) => ref.shadowedRootSeqs.includes(root)));
+	const uncertainRefs = relatedRefs.filter((ref) => ref.committed === false && ref.shadowedRootSeqs.some((root) => source.includes(root) && !covered.includes(root)));
+	const outputRefs = [...verifiedRefs, ...uncertainRefs];
+	const uncertain = uncertainRefs.length > 0;
+	const uncovered = source.filter((root) => !covered.includes(root));
+	const status = covered.length === 0 ? "none" : uncovered.length === 0 ? "full" : "partial";
+	const checkpoint = verifiedRefs.find((ref) => Number.isSafeInteger(ref.checkpointSeq));
+	const restoreMode = uncertain ? "unavailable" : status === "none" ? "inline" : checkpoint ? "checkpoint" : "unavailable";
+	return {
+		status,
+		restoreMode,
+		coveredSourceRootSeqs: covered,
+		uncoveredSourceRootSeqs: uncovered,
+		nativeCompactions: outputRefs,
+		...checkpoint ? {
+			checkpointCompactionId: checkpoint.compactionId,
+			checkpointSeq: checkpoint.checkpointSeq
+		} : {},
+		...restoreMode === "inline" ? {} : { reason: restoreMode === "checkpoint" ? "native-compaction-absorbed-source" : "checkpoint-unavailable" }
+	};
+}
+/** Derive coverage for hosts whose durable surface uses opaque entry IDs (Pi). */
+function deriveCondensationEntryCoverage(sourceEntryIds, nativeCompactions) {
+	const source = Array.from(new Set(sourceEntryIds.map(String).filter(Boolean)));
+	const relatedRefs = Array.from(new Map((nativeCompactions ?? []).filter((ref) => ref && typeof ref.compactionId === "string" && ref.compactionId.length > 0).map((ref) => [ref.compactionId, {
+		...ref,
+		host: String(ref.host ?? ""),
+		compactionId: String(ref.compactionId),
+		shadowedRootSeqs: Array.from(new Set((ref.shadowedRootSeqs ?? []).map(Number).filter((value) => Number.isSafeInteger(value) && value >= 0))).sort((a, b) => a - b),
+		shadowedEntryIds: Array.from(new Set((ref.shadowedEntryIds ?? []).map(String).filter(Boolean))),
+		...typeof ref.checkpointEntryId === "string" && ref.checkpointEntryId.length > 0 ? { checkpointEntryId: ref.checkpointEntryId } : {},
+		committed: ref.committed !== false
+	}])).values()).filter((ref) => ref.shadowedEntryIds.length > 0).sort((left, right) => (right.checkpointSeq ?? right.endSeq ?? right.summarySeq ?? -1) - (left.checkpointSeq ?? left.endSeq ?? left.summarySeq ?? -1)).filter((ref) => source.some((entryId) => ref.shadowedEntryIds?.includes(entryId)));
+	const verifiedRefs = relatedRefs.filter((ref) => ref.committed !== false);
+	const covered = source.filter((entryId) => verifiedRefs.some((ref) => ref.shadowedEntryIds?.includes(entryId)));
+	const uncertainRefs = relatedRefs.filter((ref) => ref.committed === false && ref.shadowedEntryIds?.some((entryId) => source.includes(entryId) && !covered.includes(entryId)));
+	const uncovered = source.filter((entryId) => !covered.includes(entryId));
+	const status = covered.length === 0 ? "none" : uncovered.length === 0 ? "full" : "partial";
+	const checkpoint = verifiedRefs.find((ref) => typeof ref.checkpointEntryId === "string" && ref.checkpointEntryId.length > 0);
+	const restoreMode = uncertainRefs.length > 0 ? "unavailable" : status === "none" ? "inline" : checkpoint ? "checkpoint" : "unavailable";
+	return {
+		status,
+		restoreMode,
+		coveredSourceRootSeqs: [],
+		uncoveredSourceRootSeqs: [],
+		coveredSourceEntryIds: covered,
+		uncoveredSourceEntryIds: uncovered,
+		nativeCompactions: [...verifiedRefs, ...uncertainRefs],
+		...checkpoint ? {
+			checkpointCompactionId: checkpoint.compactionId,
+			...checkpoint.checkpointSeq === void 0 ? {} : { checkpointSeq: checkpoint.checkpointSeq },
+			...checkpoint.checkpointEntryId === void 0 ? {} : { checkpointEntryId: checkpoint.checkpointEntryId }
+		} : {},
+		...restoreMode === "inline" ? {} : { reason: restoreMode === "checkpoint" ? "native-compaction-absorbed-source" : "checkpoint-unavailable" }
+	};
+}
 function textOfAtom(atom) {
 	return [atom.toolName ?? "", atom.text].filter(Boolean).join(": ");
 }
@@ -2054,6 +2137,8 @@ function createPiText(locale) {
 		condensationCardActive: () => zh ? "生效" : "active",
 		condensationCardExcluded: () => zh ? "摘要已排除" : "summary excluded",
 		condensationCardMetrics: (saved, ratio) => zh ? `预计节省 ${saved} tokens（${Math.round(ratio * 100)}%）· C 排除/恢复摘要 · D 恢复精简前内容 · O 展开来源` : `Estimated saving ${saved} tokens (${Math.round(ratio * 100)}%) · C exclude/restore summary · D restore pre-condensation content · O expand sources`,
+		condensationCoverage: (status, restoreMode) => zh ? `原生压缩覆盖：${status} · 恢复方式：${restoreMode}` : `Native compaction coverage: ${status} · restore: ${restoreMode}`,
+		condensationRestoreRequired: (restoreMode, checkpointEntryId) => zh ? `原生压缩已吸收来源；请先通过 /tree 返回压缩前检查点${checkpointEntryId ? `（${checkpointEntryId}）` : ""}，再恢复。` : `Native compaction absorbed this source; use /tree to return to the pre-compaction checkpoint${checkpointEntryId ? ` (${checkpointEntryId})` : ""} before restoring.`,
 		condensationCovered: (index) => zh ? `已由摘要 #${index} 替换` : `Replaced by summary #${index}`,
 		condensationSourceList: (index, count) => zh ? `摘要 #${index} 来源 ${count} 条 · O 展开/收起原文 · PgUp/PgDn 滚动` : `Summary #${index}: ${count} sources · O expand/collapse originals · PgUp/PgDn scroll`,
 		condensationCardSources: (ids) => zh ? `来源单元：${ids.length ? ids.join("、") : "无"}` : `Source units: ${ids.length ? ids.join(", ") : "none"}`
@@ -3100,6 +3185,10 @@ var ContextEditorComponent = class {
 			lines.push(...wrap(this.condensationCardExpanded ? condensation.summary : condensation.summary.split(/\r?\n/)[0].slice(0, 100)));
 			lines.push(...wrap(this.text.condensationSourceList(cardIndex + 1, condensation.sourceUnits.length)));
 			lines.push(...wrap(this.text.condensationCardMetrics(condensation.metrics.savedTokens, condensation.metrics.savingsRatio)));
+			if (condensation.coverage) {
+				lines.push(...wrap(this.text.condensationCoverage(condensation.coverage.status, condensation.coverage.restoreMode)));
+				if (condensation.coverage.status !== "none" || condensation.coverage.restoreMode === "unavailable") lines.push(...wrap(this.text.condensationRestoreRequired(condensation.coverage.restoreMode, condensation.coverage.checkpointEntryId)));
+			}
 			const allUnits = this.records.flatMap((record) => record.units);
 			for (const source of condensation.sourceUnits) {
 				const title = "#" + (allUnits.findIndex((unit) => unit.id === source.id) + 1 || "?") + " " + this.text.unitKind(source.kind) + " · " + source.id;
@@ -3127,7 +3216,8 @@ var ContextEditorComponent = class {
 				condensationOperationId: condensation.operationId
 			});
 			if (!result.ok || result.conflict) {
-				this.notify(this.text.sidecarChanged(), "warning");
+				if (result.restoreRequired) this.notify(this.text.condensationRestoreRequired(result.restoreMode ?? "unavailable", result.checkpointEntryId), "warning");
+				else this.notify(this.text.sidecarChanged(), "warning");
 				this.refreshData();
 			} else this.refreshData();
 		} catch (error) {
@@ -3151,7 +3241,8 @@ var ContextEditorComponent = class {
 				operationId: condensation.operationId
 			});
 			if (!result.ok || result.conflict) {
-				this.notify(this.text.sidecarChanged(), "warning");
+				if (result.restoreRequired) this.notify(this.text.condensationRestoreRequired(result.restoreMode ?? "unavailable", result.checkpointEntryId), "warning");
+				else this.notify(this.text.sidecarChanged(), "warning");
 				this.refreshData();
 			} else {
 				this.refreshData();
@@ -3214,7 +3305,8 @@ var ContextEditorComponent = class {
 				unitIds: pending.unitIds
 			});
 			if (!result.ok || result.conflict) {
-				this.notify(this.text.sidecarChanged(), "warning");
+				if (result.restoreRequired) this.notify(this.text.condensationRestoreRequired(result.restoreMode ?? "unavailable", result.checkpointEntryId), "warning");
+				else this.notify(this.text.sidecarChanged(), "warning");
 				this.refreshData();
 				return;
 			}
@@ -3265,7 +3357,8 @@ var ContextEditorComponent = class {
 				...unitIds ? { unitIds } : {}
 			});
 			if (!result.ok || result.conflict) {
-				this.notify(this.text.sidecarChanged(), "warning");
+				if (result.restoreRequired) this.notify(this.text.condensationRestoreRequired(result.restoreMode ?? "unavailable", result.checkpointEntryId), "warning");
+				else this.notify(this.text.sidecarChanged(), "warning");
 				this.refreshData();
 				return;
 			}
@@ -3656,7 +3749,7 @@ var ContextEditorComponent = class {
 	}
 	invalidate() {}
 };
-function defaultDocument$1(sessionId) {
+function defaultDocument$2(sessionId) {
 	return {
 		schemaVersion: 1,
 		sessionId,
@@ -3743,33 +3836,33 @@ function isProjectionEvent(value) {
 	if (row.version !== 1 || typeof row.transactionId !== "string" || typeof row.createdAt !== "string" || typeof row.baseRevision !== "string" || row.action !== "exclude" && row.action !== "restore" || !Array.isArray(row.changes) || row.changes.length === 0) return false;
 	return row.changes.every((candidate) => isProjectionChange(candidate));
 }
-function parseDocument$1(raw, sessionId) {
+function parseDocument$2(raw, sessionId) {
 	if (!raw || typeof raw !== "object") return {
-		document: defaultDocument$1(sessionId),
+		document: defaultDocument$2(sessionId),
 		error: "projection sidecar JSON is malformed"
 	};
 	const row = raw;
 	if (row.schemaVersion !== 1) return {
-		document: defaultDocument$1(sessionId),
+		document: defaultDocument$2(sessionId),
 		error: "projection sidecar schema version is unsupported"
 	};
 	if (row.sessionId !== sessionId) return {
-		document: defaultDocument$1(sessionId),
+		document: defaultDocument$2(sessionId),
 		error: "projection sidecar Session id does not match"
 	};
 	if (!Array.isArray(row.events)) return {
-		document: defaultDocument$1(sessionId),
+		document: defaultDocument$2(sessionId),
 		error: "projection sidecar events are malformed"
 	};
 	const events = [];
 	for (const candidate of row.events) {
 		if (!candidate || typeof candidate !== "object") return {
-			document: defaultDocument$1(sessionId),
+			document: defaultDocument$2(sessionId),
 			error: "projection sidecar envelope is malformed"
 		};
 		const envelope = candidate;
 		if (typeof envelope.anchorEntryId !== "string" || !isProjectionEvent(envelope.event)) return {
-			document: defaultDocument$1(sessionId),
+			document: defaultDocument$2(sessionId),
 			error: "projection sidecar event is malformed"
 		};
 		events.push({
@@ -3783,7 +3876,7 @@ function parseDocument$1(raw, sessionId) {
 		events
 	} };
 }
-function revisionOf$1(path, raw, document, integrity) {
+function revisionOf$2(path, raw, document, integrity) {
 	let stat = "missing";
 	try {
 		const value = statSync(path);
@@ -3805,11 +3898,11 @@ function projectionSidecarPath(sessionFile) {
 function readProjectionSidecar(sessionFile, sessionId) {
 	const path = projectionSidecarPath(sessionFile);
 	if (!existsSync(path)) {
-		const document = defaultDocument$1(sessionId);
+		const document = defaultDocument$2(sessionId);
 		return {
 			path,
 			document,
-			revision: revisionOf$1(path, void 0, document, "missing"),
+			revision: revisionOf$2(path, void 0, document, "missing"),
 			projectionRevision: projectionRevisionOf(document),
 			integrity: "missing"
 		};
@@ -3818,11 +3911,11 @@ function readProjectionSidecar(sessionFile, sessionId) {
 	try {
 		rawText = readFileSync(path, "utf8");
 	} catch {
-		const document = defaultDocument$1(sessionId);
+		const document = defaultDocument$2(sessionId);
 		return {
 			path,
 			document,
-			revision: revisionOf$1(path, void 0, document, "invalid"),
+			revision: revisionOf$2(path, void 0, document, "invalid"),
 			projectionRevision: projectionRevisionOf(document),
 			integrity: "invalid",
 			error: "projection sidecar could not be read"
@@ -3832,21 +3925,21 @@ function readProjectionSidecar(sessionFile, sessionId) {
 	try {
 		raw = JSON.parse(rawText);
 	} catch {
-		const document = defaultDocument$1(sessionId);
+		const document = defaultDocument$2(sessionId);
 		return {
 			path,
 			document,
-			revision: revisionOf$1(path, rawText, document, "invalid"),
+			revision: revisionOf$2(path, rawText, document, "invalid"),
 			projectionRevision: projectionRevisionOf(document),
 			integrity: "invalid",
 			error: "projection sidecar JSON is malformed"
 		};
 	}
-	const parsed = parseDocument$1(raw, sessionId);
+	const parsed = parseDocument$2(raw, sessionId);
 	if (parsed.error) return {
 		path,
 		document: parsed.document,
-		revision: revisionOf$1(path, rawText, parsed.document, "invalid"),
+		revision: revisionOf$2(path, rawText, parsed.document, "invalid"),
 		projectionRevision: projectionRevisionOf(parsed.document),
 		integrity: "invalid",
 		error: parsed.error
@@ -3854,13 +3947,142 @@ function readProjectionSidecar(sessionFile, sessionId) {
 	return {
 		path,
 		document: parsed.document,
-		revision: revisionOf$1(path, rawText, parsed.document, "ok"),
+		revision: revisionOf$2(path, rawText, parsed.document, "ok"),
 		projectionRevision: projectionRevisionOf(parsed.document),
 		integrity: "ok"
 	};
 }
-function withLock$1(path, fn) {
+function withLock$2(path, fn) {
 	const lockPath = path + ".lock";
+	const deadline = Date.now() + 2e3;
+	let handle;
+	while (handle === void 0 && Date.now() < deadline) try {
+		handle = openSync(lockPath, "wx");
+		writeFileSync(handle, JSON.stringify({
+			pid: process.pid,
+			createdAt: (/* @__PURE__ */ new Date()).toISOString()
+		}));
+		fsyncSync(handle);
+	} catch (error) {
+		if (error.code !== "EEXIST") throw error;
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+	}
+	if (handle === void 0) throw new Error("CONTEXT_EDITOR_SIDECAR_BUSY");
+	try {
+		return fn();
+	} finally {
+		try {
+			closeSync(handle);
+		} catch {}
+		try {
+			unlinkSync(lockPath);
+		} catch {}
+	}
+}
+function writeDocument$2(path, document) {
+	mkdirSync(dirname(path), { recursive: true });
+	const tempPath = path + "." + process.pid + "." + Date.now() + ".tmp";
+	const handle = openSync(tempPath, "w");
+	try {
+		writeFileSync(handle, JSON.stringify(document, null, 2) + "\n", "utf8");
+		fsyncSync(handle);
+	} finally {
+		closeSync(handle);
+	}
+	renameSync(tempPath, path);
+}
+function appendProjectionSidecarEvent(sessionFile, sessionId, anchorEntryId, event, expectedRevision) {
+	const path = projectionSidecarPath(sessionFile);
+	return withLock$2(path, () => {
+		const current = readProjectionSidecar(sessionFile, sessionId);
+		if (current.integrity === "invalid") throw new Error("CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
+		if (current.revision !== expectedRevision) throw new Error("CONTEXT_EDITOR_CONFLICT");
+		const next = {
+			...current.document,
+			events: [...current.document.events, {
+				anchorEntryId,
+				event
+			}]
+		};
+		writeDocument$2(path, next);
+		return "type" in event ? event.eventId : event.transactionId;
+	});
+}
+function defaultDocument$1(sessionId) {
+	return {
+		schemaVersion: 1,
+		sessionId,
+		prefs: { ...DEFAULT_CONTEXT_EDITOR_PREFS },
+		events: []
+	};
+}
+function isEvent(value) {
+	if (!value || typeof value !== "object") return false;
+	const row = value;
+	const changes = Array.isArray(row.changes) ? row.changes : [];
+	const validChanges = changes.length > 0 && changes.every((change) => {
+		if (!change || typeof change !== "object") return false;
+		const item = change;
+		return typeof item.atomId === "string" && typeof item.fingerprint === "string" && (item.before === "show" || item.before === "collapse" || item.before === "hide") && (item.after === "show" || item.after === "collapse" || item.after === "hide");
+	});
+	return row.version === 2 && typeof row.transactionId === "string" && typeof row.createdAt === "string" && typeof row.baseRevision === "string" && (row.action === "hide" || row.action === "restore" || row.action === "reset" || row.action === "undo") && validChanges;
+}
+function parseDocument$1(raw, sessionId) {
+	if (!raw || typeof raw !== "object") return defaultDocument$1(sessionId);
+	const row = raw;
+	if (row.schemaVersion !== 1 || typeof row.sessionId === "string" && row.sessionId !== sessionId) return defaultDocument$1(sessionId);
+	const events = Array.isArray(row.events) ? row.events.flatMap((candidate) => {
+		if (!candidate || typeof candidate !== "object") return [];
+		const envelope = candidate;
+		if (typeof envelope.anchorEntryId !== "string" || !isEvent(envelope.event)) return [];
+		return [{
+			anchorEntryId: envelope.anchorEntryId,
+			event: envelope.event
+		}];
+	}) : [];
+	return {
+		schemaVersion: 1,
+		sessionId: typeof row.sessionId === "string" ? row.sessionId : sessionId,
+		prefs: normalizeContextEditorPrefs(row.prefs),
+		events
+	};
+}
+function sidecarPath(sessionFile) {
+	return `${resolve(sessionFile)}.context-editor.json`;
+}
+function revisionOf$1(path, document) {
+	let stat = "missing";
+	try {
+		const value = statSync(path);
+		stat = `${value.size}:${value.mtimeMs}`;
+	} catch {}
+	return stableFingerprint([
+		path,
+		stat,
+		JSON.stringify(document)
+	]);
+}
+function viewRevisionOf(document) {
+	return stableFingerprint([document.sessionId, JSON.stringify(document.events)]);
+}
+function readSidecar(sessionFile, sessionId) {
+	const path = sidecarPath(sessionFile);
+	let raw;
+	if (existsSync(path)) try {
+		raw = JSON.parse(readFileSync(path, "utf8"));
+	} catch {
+		raw = void 0;
+	}
+	const document = parseDocument$1(raw, sessionId);
+	return {
+		path,
+		document,
+		revision: revisionOf$1(path, document),
+		viewRevision: viewRevisionOf(document)
+	};
+}
+function withLock$1(path, fn) {
+	const lockPath = `${path}.lock`;
 	const deadline = Date.now() + 2e3;
 	let handle;
 	while (handle === void 0 && Date.now() < deadline) try {
@@ -3888,135 +4110,6 @@ function withLock$1(path, fn) {
 }
 function writeDocument$1(path, document) {
 	mkdirSync(dirname(path), { recursive: true });
-	const tempPath = path + "." + process.pid + "." + Date.now() + ".tmp";
-	const handle = openSync(tempPath, "w");
-	try {
-		writeFileSync(handle, JSON.stringify(document, null, 2) + "\n", "utf8");
-		fsyncSync(handle);
-	} finally {
-		closeSync(handle);
-	}
-	renameSync(tempPath, path);
-}
-function appendProjectionSidecarEvent(sessionFile, sessionId, anchorEntryId, event, expectedRevision) {
-	const path = projectionSidecarPath(sessionFile);
-	return withLock$1(path, () => {
-		const current = readProjectionSidecar(sessionFile, sessionId);
-		if (current.integrity === "invalid") throw new Error("CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
-		if (current.revision !== expectedRevision) throw new Error("CONTEXT_EDITOR_CONFLICT");
-		const next = {
-			...current.document,
-			events: [...current.document.events, {
-				anchorEntryId,
-				event
-			}]
-		};
-		writeDocument$1(path, next);
-		return "type" in event ? event.eventId : event.transactionId;
-	});
-}
-function defaultDocument(sessionId) {
-	return {
-		schemaVersion: 1,
-		sessionId,
-		prefs: { ...DEFAULT_CONTEXT_EDITOR_PREFS },
-		events: []
-	};
-}
-function isEvent(value) {
-	if (!value || typeof value !== "object") return false;
-	const row = value;
-	const changes = Array.isArray(row.changes) ? row.changes : [];
-	const validChanges = changes.length > 0 && changes.every((change) => {
-		if (!change || typeof change !== "object") return false;
-		const item = change;
-		return typeof item.atomId === "string" && typeof item.fingerprint === "string" && (item.before === "show" || item.before === "collapse" || item.before === "hide") && (item.after === "show" || item.after === "collapse" || item.after === "hide");
-	});
-	return row.version === 2 && typeof row.transactionId === "string" && typeof row.createdAt === "string" && typeof row.baseRevision === "string" && (row.action === "hide" || row.action === "restore" || row.action === "reset" || row.action === "undo") && validChanges;
-}
-function parseDocument(raw, sessionId) {
-	if (!raw || typeof raw !== "object") return defaultDocument(sessionId);
-	const row = raw;
-	if (row.schemaVersion !== 1 || typeof row.sessionId === "string" && row.sessionId !== sessionId) return defaultDocument(sessionId);
-	const events = Array.isArray(row.events) ? row.events.flatMap((candidate) => {
-		if (!candidate || typeof candidate !== "object") return [];
-		const envelope = candidate;
-		if (typeof envelope.anchorEntryId !== "string" || !isEvent(envelope.event)) return [];
-		return [{
-			anchorEntryId: envelope.anchorEntryId,
-			event: envelope.event
-		}];
-	}) : [];
-	return {
-		schemaVersion: 1,
-		sessionId: typeof row.sessionId === "string" ? row.sessionId : sessionId,
-		prefs: normalizeContextEditorPrefs(row.prefs),
-		events
-	};
-}
-function sidecarPath(sessionFile) {
-	return `${resolve(sessionFile)}.context-editor.json`;
-}
-function revisionOf(path, document) {
-	let stat = "missing";
-	try {
-		const value = statSync(path);
-		stat = `${value.size}:${value.mtimeMs}`;
-	} catch {}
-	return stableFingerprint([
-		path,
-		stat,
-		JSON.stringify(document)
-	]);
-}
-function viewRevisionOf(document) {
-	return stableFingerprint([document.sessionId, JSON.stringify(document.events)]);
-}
-function readSidecar(sessionFile, sessionId) {
-	const path = sidecarPath(sessionFile);
-	let raw;
-	if (existsSync(path)) try {
-		raw = JSON.parse(readFileSync(path, "utf8"));
-	} catch {
-		raw = void 0;
-	}
-	const document = parseDocument(raw, sessionId);
-	return {
-		path,
-		document,
-		revision: revisionOf(path, document),
-		viewRevision: viewRevisionOf(document)
-	};
-}
-function withLock(path, fn) {
-	const lockPath = `${path}.lock`;
-	const deadline = Date.now() + 2e3;
-	let handle;
-	while (handle === void 0 && Date.now() < deadline) try {
-		handle = openSync(lockPath, "wx");
-		writeFileSync(handle, JSON.stringify({
-			pid: process.pid,
-			createdAt: (/* @__PURE__ */ new Date()).toISOString()
-		}));
-		fsyncSync(handle);
-	} catch (error) {
-		if (error.code !== "EEXIST") throw error;
-		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-	}
-	if (handle === void 0) throw new Error("CONTEXT_EDITOR_SIDECAR_BUSY");
-	try {
-		return fn();
-	} finally {
-		try {
-			closeSync(handle);
-		} catch {}
-		try {
-			unlinkSync(lockPath);
-		} catch {}
-	}
-}
-function writeDocument(path, document) {
-	mkdirSync(dirname(path), { recursive: true });
 	const tempPath = `${path}.${process.pid}.${Date.now()}.tmp`;
 	const handle = openSync(tempPath, "w");
 	try {
@@ -4029,7 +4122,7 @@ function writeDocument(path, document) {
 }
 function appendSidecarEvent(sessionFile, sessionId, anchorEntryId, event, expectedRevision) {
 	const path = sidecarPath(sessionFile);
-	return withLock(path, () => {
+	return withLock$1(path, () => {
 		const current = readSidecar(sessionFile, sessionId);
 		if (current.revision !== expectedRevision) throw new Error("CONTEXT_EDITOR_CONFLICT");
 		const next = {
@@ -4039,18 +4132,18 @@ function appendSidecarEvent(sessionFile, sessionId, anchorEntryId, event, expect
 				event
 			}]
 		};
-		writeDocument(path, next);
+		writeDocument$1(path, next);
 		return event.transactionId;
 	});
 }
 function writeSidecarPrefs(sessionFile, sessionId, prefs) {
 	const path = sidecarPath(sessionFile);
-	return withLock(path, () => {
+	return withLock$1(path, () => {
 		const next = {
 			...readSidecar(sessionFile, sessionId).document,
 			prefs: normalizeContextEditorPrefs(prefs)
 		};
-		writeDocument(path, next);
+		writeDocument$1(path, next);
 		return readSidecar(sessionFile, sessionId);
 	});
 }
@@ -4249,6 +4342,223 @@ function activePiCondensationEvents(events) {
 	}
 	return [...result.values()];
 }
+function defaultDocument(sessionId) {
+	return {
+		schemaVersion: 1,
+		sessionId,
+		events: []
+	};
+}
+function revisionOf(path, raw, document, state) {
+	let stat = "";
+	try {
+		const item = requireStat(path);
+		stat = `${item.size}:${item.mtimeMs}`;
+	} catch {}
+	return stableFingerprint([
+		path,
+		stat,
+		state,
+		raw ?? JSON.stringify(document)
+	]);
+}
+function requireStat(path) {
+	return statSync(path);
+}
+function nativeCompactionSidecarPath(sessionFile) {
+	return resolve(sessionFile) + ".context-editor.compaction.json";
+}
+function parseEvidence(value) {
+	if (!value || typeof value !== "object") return false;
+	const row = value;
+	return row.schemaVersion === 1 && typeof row.sessionId === "string" && row.sessionId.length > 0 && typeof row.preparationId === "string" && row.preparationId.length > 0 && typeof row.firstKeptEntryId === "string" && row.firstKeptEntryId.length > 0 && Array.isArray(row.shadowedEntryIds) && row.shadowedEntryIds.every((id) => typeof id === "string" && id.length > 0) && (row.checkpointEntryId === void 0 || typeof row.checkpointEntryId === "string") && typeof row.preparedRevision === "string" && typeof row.sourceFingerprint === "string" && (row.reason === "manual" || row.reason === "threshold" || row.reason === "overflow") && typeof row.committed === "boolean" && (row.compactionId === void 0 || typeof row.compactionId === "string") && (row.summaryEntryId === void 0 || typeof row.summaryEntryId === "string") && typeof row.createdAt === "string" && typeof row.updatedAt === "string";
+}
+function parseDocument(value, sessionId) {
+	if (!value || typeof value !== "object") return {
+		document: defaultDocument(sessionId),
+		error: "native compaction sidecar must be an object"
+	};
+	const row = value;
+	if (row.schemaVersion !== 1) return {
+		document: defaultDocument(sessionId),
+		error: "unsupported native compaction sidecar version"
+	};
+	if (typeof row.sessionId !== "string" || row.sessionId !== sessionId) return {
+		document: defaultDocument(sessionId),
+		error: "native compaction sidecar session mismatch"
+	};
+	if (!Array.isArray(row.events) || !row.events.every(parseEvidence)) return {
+		document: defaultDocument(sessionId),
+		error: "native compaction sidecar contains an invalid event"
+	};
+	return { document: {
+		schemaVersion: 1,
+		sessionId,
+		events: row.events
+	} };
+}
+function readNativeCompactionSidecar(sessionFile, sessionId) {
+	const path = nativeCompactionSidecarPath(sessionFile);
+	if (!existsSync(path)) {
+		const document = defaultDocument(sessionId);
+		return {
+			path,
+			document,
+			revision: revisionOf(path, void 0, document, "missing"),
+			integrity: "missing"
+		};
+	}
+	let rawText;
+	try {
+		rawText = readFileSync(path, "utf8");
+	} catch {
+		const document = defaultDocument(sessionId);
+		return {
+			path,
+			document,
+			revision: revisionOf(path, void 0, document, "invalid"),
+			integrity: "invalid",
+			error: "native compaction sidecar could not be read"
+		};
+	}
+	let raw;
+	try {
+		raw = JSON.parse(rawText);
+	} catch {
+		const document = defaultDocument(sessionId);
+		return {
+			path,
+			document,
+			revision: revisionOf(path, rawText, document, "invalid"),
+			integrity: "invalid",
+			error: "native compaction sidecar JSON is malformed"
+		};
+	}
+	const parsed = parseDocument(raw, sessionId);
+	if (parsed.error) return {
+		path,
+		document: parsed.document,
+		revision: revisionOf(path, rawText, parsed.document, "invalid"),
+		integrity: "invalid",
+		error: parsed.error
+	};
+	return {
+		path,
+		document: parsed.document,
+		revision: revisionOf(path, rawText, parsed.document, "ok"),
+		integrity: "ok"
+	};
+}
+function withLock(path, fn) {
+	const lockPath = path + ".lock";
+	const deadline = Date.now() + 2e3;
+	let handle;
+	while (handle === void 0 && Date.now() < deadline) try {
+		handle = openSync(lockPath, "wx");
+		writeFileSync(handle, JSON.stringify({
+			pid: process.pid,
+			createdAt: (/* @__PURE__ */ new Date()).toISOString()
+		}));
+		fsyncSync(handle);
+	} catch (error) {
+		if (error.code !== "EEXIST") throw error;
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+	}
+	if (handle === void 0) throw new Error("CONTEXT_EDITOR_SIDECAR_BUSY");
+	try {
+		return fn();
+	} finally {
+		try {
+			closeSync(handle);
+		} catch {}
+		try {
+			unlinkSync(lockPath);
+		} catch {}
+	}
+}
+function writeDocument(path, document) {
+	mkdirSync(dirname(path), { recursive: true });
+	const tempPath = path + "." + process.pid + "." + Date.now() + ".tmp";
+	const handle = openSync(tempPath, "w");
+	try {
+		writeFileSync(handle, JSON.stringify(document, null, 2) + "\n", "utf8");
+		fsyncSync(handle);
+	} finally {
+		closeSync(handle);
+	}
+	renameSync(tempPath, path);
+}
+function upsertNativeCompactionEvidence(sessionFile, sessionId, evidence) {
+	const path = nativeCompactionSidecarPath(sessionFile);
+	return withLock(path, () => {
+		const current = readNativeCompactionSidecar(sessionFile, sessionId);
+		if (current.integrity === "invalid") throw new Error("CONTEXT_EDITOR_NATIVE_COMPACTION_UNAVAILABLE");
+		const events = current.document.events.filter((item) => item.preparationId !== evidence.preparationId && item.compactionId !== evidence.compactionId);
+		writeDocument(path, {
+			...current.document,
+			events: [...events, evidence]
+		});
+		return evidence.preparationId;
+	});
+}
+function nativeCompactionPreparationId(input) {
+	return stableFingerprint([
+		input.sessionId,
+		input.firstKeptEntryId,
+		...input.shadowedEntryIds,
+		input.preparedRevision,
+		input.sourceFingerprint
+	]);
+}
+function inferPiShadowedEntryIds(branchEntries, firstKeptEntryId, turnPrefixMessagesPresent) {
+	const rows = branchEntries;
+	const firstKeptIndex = rows.findIndex((entry) => String(entry.id ?? "") === firstKeptEntryId);
+	if (firstKeptIndex < 0) return [];
+	let boundary = 0;
+	for (let index = firstKeptIndex - 1; index >= 0; index -= 1) {
+		const entry = rows[index];
+		if (entry?.type === "compaction") {
+			const previousKept = String(entry.firstKeptEntryId ?? "");
+			const previousIndex = rows.findIndex((candidate) => String(candidate.id ?? "") === previousKept);
+			boundary = previousIndex >= 0 ? previousIndex : index + 1;
+			break;
+		}
+	}
+	if (turnPrefixMessagesPresent) {
+		for (let index = firstKeptIndex - 1; index >= boundary; index -= 1) if (rows[index]?.type === "message" && String(rows[index]?.message?.role ?? "") === "user") {
+			boundary = index;
+			break;
+		}
+	}
+	return rows.slice(boundary, firstKeptIndex).map((entry) => String(entry.id ?? "")).filter(Boolean).filter((id) => !rows.find((entry) => String(entry.id ?? "") === id && entry.type === "compaction"));
+}
+function piCompactionCheckpointEntryId(branchEntries) {
+	const last = branchEntries.at(-1);
+	return String(last?.id ?? "") || void 0;
+}
+function reconcileNativeCompactionEntry(branchEntries, compactionEntry, pending) {
+	const compactionId = String(compactionEntry.id ?? "");
+	const checkpointEntryId = String(compactionEntry.parentId ?? piCompactionCheckpointEntryId(branchEntries) ?? "");
+	return {
+		...pending,
+		committed: true,
+		compactionId: compactionId || pending.compactionId,
+		summaryEntryId: compactionId || pending.summaryEntryId,
+		firstKeptEntryId: String(compactionEntry.firstKeptEntryId ?? pending.firstKeptEntryId),
+		...checkpointEntryId ? { checkpointEntryId } : {},
+		updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+	};
+}
+function nativeCompactionRefs(document) {
+	return document.events.map((event) => ({
+		host: "pi",
+		compactionId: event.compactionId ?? event.preparationId,
+		shadowedRootSeqs: [],
+		shadowedEntryIds: [...event.shadowedEntryIds],
+		...event.checkpointEntryId ? { checkpointEntryId: event.checkpointEntryId } : {},
+		...event.committed ? {} : { committed: false }
+	}));
+}
 //#endregion
 //#region adapters/pi-extension/src/host.ts
 const service = new ContextEditorService();
@@ -4281,12 +4591,32 @@ var PiContextEditorHost = class {
 	branchEntries() {
 		return this.ctx.sessionManager.getBranch();
 	}
+	contextEntries() {
+		return this.ctx.sessionManager.buildContextEntries();
+	}
+	effectiveRead() {
+		const current = this.read();
+		const entries = this.contextEntries();
+		return {
+			...current,
+			entries,
+			atoms: normalizeSessionEntries(entries)
+		};
+	}
+	effectiveRecords() {
+		const snapshot = this.effectiveRead();
+		return service.getRecords({
+			read: () => snapshot,
+			isBusy: () => this.isBusy()
+		});
+	}
 	read() {
 		const entries = this.branchEntries();
 		const atoms = normalizeSessionEntries(entries);
 		const leafId = this.ctx.sessionManager.getLeafId();
 		const sidecar = readSidecar(this.sessionFile, this.sessionId);
 		const projection = readProjectionSidecar(this.sessionFile, this.sessionId);
+		const native = readNativeCompactionSidecar(this.sessionFile, this.sessionId);
 		const branchIds = new Set(entries.map((entry) => String(entry.id ?? "")));
 		const viewEvents = sidecar.document.events.filter((envelope) => envelope.anchorEntryId.length === 0 || branchIds.has(envelope.anchorEntryId)).map((envelope) => envelope.event);
 		const projectionEvents = projection.integrity === "ok" ? projection.document.events.filter((envelope) => envelope.anchorEntryId.length === 0 || branchIds.has(envelope.anchorEntryId)).map((envelope) => envelope.event) : [];
@@ -4294,7 +4624,8 @@ var PiContextEditorHost = class {
 		const revision = branchRevision(leafId, atoms, [
 			...branchParts,
 			sidecar.viewRevision,
-			projection.revision
+			projection.revision,
+			native.revision
 		]);
 		return {
 			entries,
@@ -4307,14 +4638,35 @@ var PiContextEditorHost = class {
 				leafId ?? "",
 				sidecar.viewRevision,
 				projection.revision,
+				native.revision,
 				revision,
 				...branchParts
 			]),
 			viewEvents,
 			projectionEvents,
+			nativeCompactions: native.integrity === "invalid" ? [] : nativeCompactionRefs(native.document).filter((ref) => ref.committed !== false && branchIds.has(ref.compactionId)),
+			nativeCompactionAvailable: native.integrity !== "invalid",
 			projectionAvailable: projection.integrity !== "invalid",
 			...projection.error ? { projectionError: projection.error } : {},
-			projectionRevision: projection.revision
+			...native.error ? { nativeCompactionError: native.error } : {},
+			projectionRevision: projection.revision,
+			nativeCompactionRevision: native.revision
+		};
+	}
+	nativeRecoveryRequired(operationId) {
+		const snapshot = this.snapshot();
+		const condensation = snapshot.condensations?.find((item) => item.operationId === operationId && item.coverage && (item.coverage.status !== "none" || item.coverage.restoreMode === "unavailable")) ?? (operationId ? void 0 : snapshot.condensations?.find((item) => item.coverage && (item.coverage.status !== "none" || item.coverage.restoreMode === "unavailable")));
+		const coverage = condensation?.coverage;
+		if (!condensation || !coverage) return void 0;
+		return {
+			ok: false,
+			operationId: condensation.operationId,
+			restoreRequired: true,
+			restoreMode: coverage.restoreMode,
+			...coverage.checkpointCompactionId ? { checkpointCompactionId: coverage.checkpointCompactionId } : {},
+			...coverage.checkpointSeq === void 0 ? {} : { checkpointSeq: coverage.checkpointSeq },
+			...coverage.checkpointEntryId ? { checkpointEntryId: coverage.checkpointEntryId } : {},
+			snapshot
 		};
 	}
 	appendViewEvent(event) {
@@ -4351,6 +4703,8 @@ var PiContextEditorHost = class {
 		}
 	}
 	restoreReplacementMutation(input) {
+		const blocked = this.nativeRecoveryRequired();
+		if (blocked) return blocked;
 		try {
 			return service.restoreReplacement(this, input);
 		} catch (error) {
@@ -4363,6 +4717,8 @@ var PiContextEditorHost = class {
 		}
 	}
 	undoReplacementMutation(input) {
+		const blocked = this.nativeRecoveryRequired();
+		if (blocked) return blocked;
 		try {
 			return service.undoReplacement(this, input);
 		} catch (error) {
@@ -4389,7 +4745,8 @@ var PiContextEditorHost = class {
 	}
 	snapshot() {
 		const snapshot = service.getSnapshot(this);
-		const projectionEvents = this.read().projectionEvents ?? [];
+		const current = this.read();
+		const projectionEvents = current.projectionEvents ?? [];
 		const byOperation = /* @__PURE__ */ new Map();
 		for (const event of projectionEvents) {
 			if (!("type" in event) || event.type !== "condensation") continue;
@@ -4412,13 +4769,22 @@ var PiContextEditorHost = class {
 			effectiveUnitIds: event.effectiveUnitIds,
 			autoExpandedUnitIds: event.autoExpandedUnitIds ?? [],
 			recordIds: event.recordIds ?? [],
+			...event.sourceEntryIds?.length ? { sourceEntryIds: event.sourceEntryIds } : {},
 			sourceRootSeqs: event.sourceRootSeqs,
 			...event.sourceFingerprint ? { sourceFingerprint: event.sourceFingerprint } : {},
 			sourceUnits: event.sourceUnits,
 			metrics: event.metrics,
 			provider: event.provider,
 			model: event.model,
-			createdAt: event.createdAt
+			createdAt: event.createdAt,
+			coverage: (() => {
+				const coverage = deriveCondensationCoverage(event.sourceEntryIds?.length ? event.sourceEntryIds : event.sourceRootSeqs, current.nativeCompactions ?? []);
+				return current.nativeCompactionAvailable === false ? {
+					...coverage,
+					restoreMode: "unavailable",
+					reason: "checkpoint-unavailable"
+				} : coverage;
+			})()
 		}));
 		return {
 			...snapshot,
@@ -4438,6 +4804,10 @@ var PiContextEditorHost = class {
 		return service.getContextSearchMatch(this, input);
 	}
 	commit(input) {
+		if (input.action === "restore") {
+			const blocked = this.nativeRecoveryRequired();
+			if (blocked) return blocked;
+		}
 		try {
 			return service.commitContextView(this, input);
 		} catch (error) {
@@ -4450,6 +4820,8 @@ var PiContextEditorHost = class {
 		}
 	}
 	undo(baseRevision) {
+		const blocked = this.nativeRecoveryRequired();
+		if (blocked) return blocked;
 		try {
 			return service.undoContextView(this, { baseRevision });
 		} catch (error) {
@@ -4471,9 +4843,9 @@ var PiContextEditorHost = class {
 		return active;
 	}
 	condensationRange(request) {
-		const current = this.read();
+		const current = this.effectiveRead();
 		if (current.projectionAvailable === false) throw new Error(current.projectionError || "CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
-		const records = this.records();
+		const records = this.effectiveRecords();
 		const requested = Array.from(new Set(request.unitIds.map(String).filter(Boolean)));
 		if (!requested.length) throw new Error("CONTEXT_EDITOR_CONDENSATION_RANGE_EMPTY");
 		const positions = /* @__PURE__ */ new Map();
@@ -4613,6 +4985,8 @@ var PiContextEditorHost = class {
 	}
 	async commitCondensation(request) {
 		asLocator(request.locator, this.sessionId);
+		const blocked = this.nativeRecoveryRequired(request.operationId);
+		if (blocked) return blocked;
 		if (!this.ctx.isIdle()) throw new Error("CONTEXT_EDITOR_BUSY");
 		const pending = this.condensationOperations.get(request.operationId);
 		const active = this.currentCondensation(request.operationId);
@@ -4652,9 +5026,9 @@ var PiContextEditorHost = class {
 			summary: request.summary.trim(),
 			provider: pending.proposal.provider,
 			model: pending.proposal.model,
-			entries: current.entries,
-			excludedAtomIds: new Set([...reduceProjectionStates(current.atoms, current.projectionEvents ?? []).entries()].filter(([, state]) => state === "exclude" || state === "unavailable").map(([id]) => id))
-		}, current.atoms);
+			entries: range.current.entries,
+			excludedAtomIds: new Set([...reduceProjectionStates(range.current.atoms, range.current.projectionEvents ?? []).entries()].filter(([, state]) => state === "exclude" || state === "unavailable").map(([id]) => id))
+		}, range.current.atoms);
 		event.metrics = validation.metrics;
 		const eventId = this.appendProjectionEvent(event);
 		this.condensationOperations.delete(request.operationId);
@@ -4672,6 +5046,18 @@ var PiContextEditorHost = class {
 			ok: true,
 			operationId: request.operationId,
 			snapshot: this.snapshot()
+		};
+		const currentSnapshot = this.snapshot();
+		const coverage = currentSnapshot.condensations?.find((item) => item.operationId === request.operationId)?.coverage;
+		if (coverage && (coverage.status !== "none" || coverage.restoreMode === "unavailable")) return {
+			ok: false,
+			operationId: request.operationId,
+			restoreRequired: true,
+			restoreMode: coverage.restoreMode,
+			...coverage.checkpointCompactionId ? { checkpointCompactionId: coverage.checkpointCompactionId } : {},
+			...coverage.checkpointSeq === void 0 ? {} : { checkpointSeq: coverage.checkpointSeq },
+			...coverage.checkpointEntryId ? { checkpointEntryId: coverage.checkpointEntryId } : {},
+			snapshot: currentSnapshot
 		};
 		const current = this.read();
 		if (String(request.baseRevision) !== String(current.revision)) return {
@@ -4704,6 +5090,17 @@ var PiContextEditorHost = class {
 	condensationSurfaceResult(operationId, action) {
 		const active = this.condensationSurfaceEvent(operationId);
 		if (!active) throw new Error("CONTEXT_EDITOR_CONDENSATION_RESTORE_UNAVAILABLE");
+		const snapshot = this.snapshot();
+		const coverage = snapshot.condensations?.find((item) => item.operationId === operationId)?.coverage;
+		if (coverage && (coverage.status !== "none" || coverage.restoreMode === "unavailable")) return {
+			ok: false,
+			operationId,
+			restoreRequired: true,
+			restoreMode: coverage.restoreMode,
+			...coverage.checkpointCompactionId ? { checkpointCompactionId: coverage.checkpointCompactionId } : {},
+			...coverage.checkpointSeq === void 0 ? {} : { checkpointSeq: coverage.checkpointSeq },
+			snapshot
+		};
 		const current = this.read();
 		const event = {
 			...active,
@@ -4798,6 +5195,10 @@ var PiContextEditorHost = class {
 		return service.previewContextProjection(this, request);
 	}
 	async commitContext(request) {
+		if (request.action === "restore") {
+			const blocked = this.nativeRecoveryRequired();
+			if (blocked) return blocked;
+		}
 		asLocator(request.locator, this.sessionId);
 		if (request.condensationOperationId) return this.condensationSurfaceResult(request.condensationOperationId, request.action);
 		try {
@@ -5209,23 +5610,129 @@ function notifyProjectionFailure(ctx, error) {
 	if (ctx.hasUI) ctx.ui.notify("Context projection blocked this operation: " + message, "error");
 }
 function projectionEntryIdsBeforeFirstKept(event) {
-	const ids = /* @__PURE__ */ new Set();
-	const first = event.branchEntries.findIndex((entry) => entry.id === event.preparation.firstKeptEntryId);
-	if (first < 0) return ids;
-	for (let index = 0; index < first; index += 1) {
-		const entry = event.branchEntries[index];
-		if (entry) ids.add(entry.id);
+	return new Set(inferPiShadowedEntryIds(event.branchEntries, event.preparation.firstKeptEntryId, event.preparation.turnPrefixMessages.length > 0));
+}
+function messageMatches(left, right) {
+	if (left === right) return true;
+	const a = left;
+	const b = right;
+	return String(a.role ?? "") === String(b.role ?? "") && JSON.stringify(a.content) === JSON.stringify(b.content) && String(a.toolCallId ?? "") === String(b.toolCallId ?? "") && String(a.toolName ?? "") === String(b.toolName ?? "");
+}
+function entryIdsForMessages(messages, entries) {
+	const used = /* @__PURE__ */ new Set();
+	const result = [];
+	for (const message of messages) {
+		const matches = entries.filter((entry) => {
+			const id = String(entry.id ?? "");
+			if (!id || used.has(id)) return false;
+			return sessionEntryToContextMessages(entry).some((candidate) => messageMatches(message, candidate));
+		});
+		if (matches.length !== 1) throw new Error("CONTEXT_EDITOR_COMPACTION_ALIGNMENT_UNAVAILABLE");
+		const match = matches[0];
+		const id = String(match?.id ?? "");
+		if (id) {
+			used.add(id);
+			result.push(id);
+		}
 	}
-	if (event.preparation.turnPrefixMessages.length > 0) {
-		const entry = event.branchEntries[first];
-		if (entry) ids.add(entry.id);
+	return result;
+}
+function projectCompactionMessages(messages, entries, atoms, projectionEvents) {
+	if (messages.length === 0 || projectionEvents.length === 0) return [...messages];
+	const entryIds = entryIdsForMessages(messages, entries);
+	if (entryIds.length !== messages.length) throw new Error("CONTEXT_EDITOR_COMPACTION_ALIGNMENT_UNAVAILABLE");
+	const selected = entries.filter((entry) => entryIds.includes(String(entry.id ?? "")));
+	return projectModelContext({
+		messages: [...messages],
+		entries: selected,
+		atoms,
+		projectionEvents
+	});
+}
+function createPiFileOps() {
+	return {
+		read: /* @__PURE__ */ new Set(),
+		written: /* @__PURE__ */ new Set(),
+		edited: /* @__PURE__ */ new Set()
+	};
+}
+function extractPiFileOps(messages, fileOps) {
+	for (const message of messages) {
+		const row = message;
+		if (row.role !== "assistant" || !Array.isArray(row.content)) continue;
+		for (const block of row.content) {
+			if (!block || typeof block !== "object") continue;
+			const item = block;
+			if (item.type !== "toolCall" || !item.arguments || typeof item.arguments !== "object") continue;
+			const args = item.arguments;
+			const path = typeof args.path === "string" && args.path.length > 0 ? args.path : void 0;
+			if (!path) continue;
+			if (item.name === "read") fileOps.read.add(path);
+			else if (item.name === "write") fileOps.written.add(path);
+			else if (item.name === "edit") fileOps.edited.add(path);
+		}
 	}
-	return ids;
+}
+function previousPiCompactionFileOps(branchEntries, firstKeptEntryId) {
+	const result = createPiFileOps();
+	const rows = branchEntries;
+	const firstKeptIndex = rows.findIndex((entry) => String(entry.id ?? "") === firstKeptEntryId);
+	for (let index = firstKeptIndex - 1; index >= 0; index -= 1) {
+		const entry = rows[index];
+		if (entry?.type !== "compaction" || entry.fromHook === true || !entry.details || typeof entry.details !== "object") continue;
+		const details = entry.details;
+		if (Array.isArray(details.readFiles)) {
+			for (const path of details.readFiles) if (typeof path === "string" && path) result.read.add(path);
+		}
+		if (Array.isArray(details.modifiedFiles)) {
+			for (const path of details.modifiedFiles) if (typeof path === "string" && path) result.edited.add(path);
+		}
+		break;
+	}
+	return result;
+}
+function projectPreparationFileOps(preparationFileOps, branchEntries, firstKeptEntryId, beforeMessages, beforePrefixMessages, afterMessages, afterPrefixMessages) {
+	const before = createPiFileOps();
+	extractPiFileOps(beforeMessages, before);
+	extractPiFileOps(beforePrefixMessages, before);
+	const after = createPiFileOps();
+	extractPiFileOps(afterMessages, after);
+	extractPiFileOps(afterPrefixMessages, after);
+	const previous = previousPiCompactionFileOps(branchEntries, firstKeptEntryId);
+	const result = {
+		read: new Set(preparationFileOps.read ?? []),
+		written: new Set(preparationFileOps.written ?? []),
+		edited: new Set(preparationFileOps.edited ?? [])
+	};
+	for (const key of [
+		"read",
+		"written",
+		"edited"
+	]) {
+		for (const path of before[key]) if (!after[key].has(path) && !previous[key].has(path)) result[key].delete(path);
+		for (const path of after[key]) result[key].add(path);
+		for (const path of previous[key]) result[key].add(path);
+	}
+	return result;
 }
 function projectionSummaryOverlap(ctx, entries, entryIds) {
 	const current = new PiContextEditorHost(ctx).read();
 	if (current.projectionAvailable === false) throw new Error(current.projectionError || "CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
 	return projectionOverlapsEntryIds(entryIds, normalizeSessionEntries(entries), current.projectionEvents ?? []);
+}
+function reconcilePendingNativeCompactions(ctx) {
+	const host = new PiContextEditorHost(ctx);
+	const native = readNativeCompactionSidecar(host.sessionFile, host.sessionId);
+	if (native.integrity === "invalid") return;
+	const branchEntries = ctx.sessionManager.getBranch();
+	for (const entry of branchEntries) {
+		if (entry.type !== "compaction") continue;
+		const compaction = entry;
+		const firstKeptEntryId = String(compaction.firstKeptEntryId ?? "");
+		const pending = native.document.events.filter((item) => item.firstKeptEntryId === firstKeptEntryId && !item.committed).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+		if (!pending) continue;
+		upsertNativeCompactionEvidence(host.sessionFile, host.sessionId, reconcileNativeCompactionEntry(branchEntries, compaction, pending));
+	}
 }
 function registerProjectionHooks(pi) {
 	pi.on("context", async (event, ctx) => {
@@ -5249,16 +5756,83 @@ function registerProjectionHooks(pi) {
 	});
 	pi.on("session_before_compact", async (event, ctx) => {
 		try {
-			const current = new PiContextEditorHost(ctx).read();
+			const host = new PiContextEditorHost(ctx);
+			const current = host.read();
 			if (current.projectionAvailable === false) throw new Error(current.projectionError || "CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
-			const ids = projectionEntryIdsBeforeFirstKept(event);
-			if (ids.size > 0 && projectionSummaryOverlap(ctx, event.branchEntries, ids)) {
-				if (ctx.hasUI) ctx.ui.notify("Compaction cancelled because it would summarize edited or excluded context.", "warning");
-				return { cancel: true };
-			}
+			if (current.nativeCompactionAvailable === false) throw new Error(current.nativeCompactionError || "CONTEXT_EDITOR_NATIVE_COMPACTION_UNAVAILABLE");
+			const projectionEvents = current.projectionEvents ?? [];
+			if (projectionEvents.length === 0) return;
+			const shadowedEntryIds = [...projectionEntryIdsBeforeFirstKept(event)];
+			if (shadowedEntryIds.length === 0) throw new Error("CONTEXT_EDITOR_COMPACTION_ALIGNMENT_UNAVAILABLE");
+			const sourceFingerprint = stableFingerprint([
+				event.preparation.firstKeptEntryId,
+				...shadowedEntryIds,
+				JSON.stringify(event.preparation.messagesToSummarize),
+				JSON.stringify(event.preparation.turnPrefixMessages)
+			]);
+			const preparedRevision = current.revision;
+			const preparationId = nativeCompactionPreparationId({
+				sessionId: host.sessionId,
+				firstKeptEntryId: event.preparation.firstKeptEntryId,
+				shadowedEntryIds,
+				preparedRevision,
+				sourceFingerprint
+			});
+			const checkpointEntryId = piCompactionCheckpointEntryId(event.branchEntries);
+			const atoms = normalizeSessionEntries(event.branchEntries);
+			const preparation = event.preparation;
+			const beforeMessages = [...preparation.messagesToSummarize];
+			const beforePrefixMessages = [...preparation.turnPrefixMessages];
+			const projectedMessages = projectCompactionMessages(beforeMessages, event.branchEntries, atoms, projectionEvents);
+			const projectedPrefixMessages = projectCompactionMessages(beforePrefixMessages, event.branchEntries, atoms, projectionEvents);
+			preparation.messagesToSummarize = projectedMessages;
+			preparation.turnPrefixMessages = projectedPrefixMessages;
+			preparation.fileOps = projectPreparationFileOps(preparation.fileOps, event.branchEntries, event.preparation.firstKeptEntryId, beforeMessages, beforePrefixMessages, projectedMessages, projectedPrefixMessages);
+			upsertNativeCompactionEvidence(host.sessionFile, host.sessionId, {
+				schemaVersion: 1,
+				sessionId: host.sessionId,
+				preparationId,
+				firstKeptEntryId: event.preparation.firstKeptEntryId,
+				shadowedEntryIds,
+				...checkpointEntryId ? { checkpointEntryId } : {},
+				preparedRevision,
+				sourceFingerprint,
+				reason: event.reason,
+				committed: false,
+				createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+				updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+			});
 		} catch (error) {
 			notifyProjectionFailure(ctx, error);
 			return { cancel: true };
+		}
+	});
+	pi.on("session_compact", async (event, ctx) => {
+		try {
+			const host = new PiContextEditorHost(ctx);
+			const native = readNativeCompactionSidecar(host.sessionFile, host.sessionId);
+			if (native.integrity === "invalid") throw new Error(native.error || "CONTEXT_EDITOR_NATIVE_COMPACTION_UNAVAILABLE");
+			const branchEntries = ctx.sessionManager.getBranch();
+			const firstKeptEntryId = String(event.compactionEntry.firstKeptEntryId ?? "");
+			const pending = native.document.events.filter((item) => item.firstKeptEntryId === firstKeptEntryId && !item.committed).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+			if (!pending) return;
+			upsertNativeCompactionEvidence(host.sessionFile, host.sessionId, reconcileNativeCompactionEntry(branchEntries, event.compactionEntry, pending));
+		} catch (error) {
+			notifyProjectionFailure(ctx, error);
+		}
+	});
+	pi.on("session_start", async (_event, ctx) => {
+		try {
+			reconcilePendingNativeCompactions(ctx);
+		} catch (error) {
+			notifyProjectionFailure(ctx, error);
+		}
+	});
+	pi.on("session_tree", async (_event, ctx) => {
+		try {
+			reconcilePendingNativeCompactions(ctx);
+		} catch (error) {
+			notifyProjectionFailure(ctx, error);
 		}
 	});
 	pi.on("session_before_tree", async (event, ctx) => {

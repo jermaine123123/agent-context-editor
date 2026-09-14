@@ -1,4 +1,4 @@
-﻿import { sessionEntryToContextMessages, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { sessionEntryToContextMessages, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   branchRevision,
   contextEditorBranchRevisionParts,
@@ -38,11 +38,13 @@ import {
   validateCondensationSummary,
   frameCondensationSummary,
   estimateCondensationTokens,
+  deriveCondensationCoverage,
 } from "./shared-core/index.js";
 import { appendProjectionSidecarEvent, readProjectionSidecar } from "./projection-sidecar.js";
 import { readSidecar, appendSidecarEvent, writeSidecarPrefs } from "./sidecar.js";
 import { normalizeSessionEntries } from "./normalize.js";
 import { activePiCondensationEvents, buildPiCondensationEvent, condensationInstruction } from "./condensation-host.js";
+import { nativeCompactionRefs, readNativeCompactionSidecar } from "./native-compaction-sidecar.js";
 
 const service = new ContextEditorService();
 
@@ -79,12 +81,30 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
     return this.ctx.sessionManager.getBranch() as unknown[];
   }
 
+  private contextEntries(): unknown[] {
+    return this.ctx.sessionManager.buildContextEntries() as unknown[];
+  }
+
+  private effectiveRead() {
+    const current = this.read();
+    const entries = this.contextEntries();
+    return { ...current, entries, atoms: normalizeSessionEntries(entries) };
+  }
+
+  private effectiveRecords(): ContextRecord[] {
+    const snapshot = this.effectiveRead();
+    return service.getRecords({
+      read: () => snapshot,
+      isBusy: () => this.isBusy(),
+    });
+  }
   read() {
     const entries = this.branchEntries();
     const atoms = normalizeSessionEntries(entries);
     const leafId = this.ctx.sessionManager.getLeafId();
     const sidecar = readSidecar(this.sessionFile, this.sessionId);
     const projection = readProjectionSidecar(this.sessionFile, this.sessionId);
+    const native = readNativeCompactionSidecar(this.sessionFile, this.sessionId);
     const branchIds = new Set(entries.map((entry) => String((entry as { id?: unknown }).id ?? "")));
     const viewEvents = sidecar.document.events
       .filter((envelope) => envelope.anchorEntryId.length === 0 || branchIds.has(envelope.anchorEntryId))
@@ -95,24 +115,46 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
         .map((envelope) => envelope.event)
       : [];
     const branchParts = contextEditorBranchRevisionParts(entries);
-    const revision = branchRevision(leafId, atoms, [...branchParts, sidecar.viewRevision, projection.revision]);
+    const revision = branchRevision(leafId, atoms, [...branchParts, sidecar.viewRevision, projection.revision, native.revision]);
     const revisionProbe = stableFingerprint([
       this.sessionFile,
       this.sessionId,
       leafId ?? "",
       sidecar.viewRevision,
       projection.revision,
+      native.revision,
       revision,
       ...branchParts,
     ]);
     return {
       entries, atoms, leafId, revision, revisionProbe, viewEvents, projectionEvents,
+      nativeCompactions: native.integrity === "invalid" ? [] : nativeCompactionRefs(native.document).filter((ref) => ref.committed !== false && branchIds.has(ref.compactionId)),
+      nativeCompactionAvailable: native.integrity !== "invalid",
       projectionAvailable: projection.integrity !== "invalid",
       ...(projection.error ? { projectionError: projection.error } : {}),
+      ...(native.error ? { nativeCompactionError: native.error } : {}),
       projectionRevision: projection.revision,
+      nativeCompactionRevision: native.revision,
     };
   }
 
+  private nativeRecoveryRequired(operationId?: string): ContextMutationResult | undefined {
+    const snapshot = this.snapshot();
+    const condensation = snapshot.condensations?.find(item => item.operationId === operationId && item.coverage && (item.coverage.status !== "none" || item.coverage.restoreMode === "unavailable"))
+      ?? (operationId ? undefined : snapshot.condensations?.find(item => item.coverage && (item.coverage.status !== "none" || item.coverage.restoreMode === "unavailable")));
+    const coverage = condensation?.coverage;
+    if (!condensation || !coverage) return undefined;
+    return {
+      ok: false,
+      operationId: condensation.operationId,
+      restoreRequired: true,
+      restoreMode: coverage.restoreMode,
+      ...(coverage.checkpointCompactionId ? { checkpointCompactionId: coverage.checkpointCompactionId } : {}),
+      ...(coverage.checkpointSeq === undefined ? {} : { checkpointSeq: coverage.checkpointSeq }),
+      ...(coverage.checkpointEntryId ? { checkpointEntryId: coverage.checkpointEntryId } : {}),
+      snapshot,
+    };
+  }
   appendViewEvent(event: ContextEditorViewEventV2): string {
     if (!this.ctx.isIdle()) throw new Error("AGENT_RUNTIME_BUSY");
     const current = this.read();
@@ -167,6 +209,8 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
   }
 
   restoreReplacementMutation(input: Pick<ContextReplacementUnitRequest, "baseRevision" | "unitId"> & Partial<Pick<ContextReplacementUnitRequest, "operationId">>): ContextMutationResult {
+    const blocked = this.nativeRecoveryRequired();
+    if (blocked) return blocked;
     try {
       return service.restoreReplacement(this, input);
     } catch (error) {
@@ -178,6 +222,8 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
   }
 
   undoReplacementMutation(input: Pick<ContextReplacementUnitRequest, "baseRevision" | "unitId"> & Partial<Pick<ContextReplacementUnitRequest, "operationId">>): ContextMutationResult {
+    const blocked = this.nativeRecoveryRequired();
+    if (blocked) return blocked;
     try {
       return service.undoReplacement(this, input);
     } catch (error) {
@@ -207,7 +253,8 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
 
   snapshot(): ContextEditorSnapshot {
     const snapshot = service.getSnapshot(this);
-    const projectionEvents = this.read().projectionEvents ?? [];
+    const current = this.read();
+    const projectionEvents = current.projectionEvents ?? [];
     const byOperation = new Map<string, { event: ContextCondensationEventV1; contextExcluded: boolean }>();
     for (const event of projectionEvents) {
       if (!("type" in event) || event.type !== "condensation") continue;
@@ -227,6 +274,7 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
       effectiveUnitIds: event.effectiveUnitIds,
       autoExpandedUnitIds: event.autoExpandedUnitIds ?? [],
       recordIds: event.recordIds ?? [],
+      ...(event.sourceEntryIds?.length ? { sourceEntryIds: event.sourceEntryIds } : {}),
       sourceRootSeqs: event.sourceRootSeqs,
       ...(event.sourceFingerprint ? { sourceFingerprint: event.sourceFingerprint } : {}),
       sourceUnits: event.sourceUnits,
@@ -234,6 +282,15 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
       provider: event.provider,
       model: event.model,
       createdAt: event.createdAt,
+      coverage: (() => {
+        const coverage = deriveCondensationCoverage(
+          event.sourceEntryIds?.length ? event.sourceEntryIds : event.sourceRootSeqs,
+          current.nativeCompactions ?? [],
+        );
+        return current.nativeCompactionAvailable === false
+          ? { ...coverage, restoreMode: "unavailable" as const, reason: "checkpoint-unavailable" as const }
+          : coverage;
+      })(),
     }));
     return {
       ...snapshot,
@@ -251,6 +308,10 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
   }
 
   commit(input: Pick<ContextViewMutationRequest, "baseRevision" | "action" | "recordIds" | "unitIds">): ContextMutationResult {
+    if (input.action === "restore") {
+      const blocked = this.nativeRecoveryRequired();
+      if (blocked) return blocked;
+    }
     try {
       return service.commitContextView(this, input);
     } catch (error) {
@@ -262,6 +323,8 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
   }
 
   undo(baseRevision: string): ContextMutationResult {
+    const blocked = this.nativeRecoveryRequired();
+    if (blocked) return blocked;
     try {
       return service.undoContextView(this, { baseRevision });
     } catch (error) {
@@ -283,9 +346,9 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
   }
 
   private condensationRange(request: ContextCondensationPrepareRequest) {
-    const current = this.read();
+    const current = this.effectiveRead();
     if (current.projectionAvailable === false) throw new Error(current.projectionError || "CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
-    const records = this.records();
+    const records = this.effectiveRecords();
     const requested = Array.from(new Set(request.unitIds.map(String).filter(Boolean)));
     if (!requested.length) throw new Error("CONTEXT_EDITOR_CONDENSATION_RANGE_EMPTY");
     const positions = new Map<string, number>();
@@ -421,6 +484,8 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
 
   async commitCondensation(request: ContextCondensationCommitRequest): Promise<ContextMutationResult> {
     asLocator(request.locator, this.sessionId);
+    const blocked = this.nativeRecoveryRequired(request.operationId);
+    if (blocked) return blocked;
     if (!this.ctx.isIdle()) throw new Error("CONTEXT_EDITOR_BUSY");
     const pending = this.condensationOperations.get(request.operationId);
     const active = this.currentCondensation(request.operationId);
@@ -450,9 +515,9 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
       summary: request.summary.trim(),
       provider: pending.proposal.provider,
       model: pending.proposal.model,
-      entries: current.entries,
-      excludedAtomIds: new Set([...reduceProjectionStates(current.atoms, current.projectionEvents ?? []).entries()].filter(([, state]) => state === "exclude" || state === "unavailable").map(([id]) => id)),
-    }, current.atoms);
+      entries: range.current.entries,
+      excludedAtomIds: new Set([...reduceProjectionStates(range.current.atoms, range.current.projectionEvents ?? []).entries()].filter(([, state]) => state === "exclude" || state === "unavailable").map(([id]) => id)),
+    }, range.current.atoms);
     event.metrics = validation.metrics;
     const eventId = this.appendProjectionEvent(event);
     this.condensationOperations.delete(request.operationId);
@@ -463,6 +528,20 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
     asLocator(request.locator, this.sessionId);
     const active = this.currentCondensation(request.operationId);
     if (!active) return { ok: true, operationId: request.operationId, snapshot: this.snapshot() };
+    const currentSnapshot = this.snapshot();
+    const coverage = currentSnapshot.condensations?.find(item => item.operationId === request.operationId)?.coverage;
+    if (coverage && (coverage.status !== "none" || coverage.restoreMode === "unavailable")) {
+      return {
+        ok: false,
+        operationId: request.operationId,
+        restoreRequired: true,
+        restoreMode: coverage.restoreMode,
+        ...(coverage.checkpointCompactionId ? { checkpointCompactionId: coverage.checkpointCompactionId } : {}),
+        ...(coverage.checkpointSeq === undefined ? {} : { checkpointSeq: coverage.checkpointSeq }),
+        ...(coverage.checkpointEntryId ? { checkpointEntryId: coverage.checkpointEntryId } : {}),
+        snapshot: currentSnapshot,
+      };
+    }
     const current = this.read();
     if (String(request.baseRevision) !== String(current.revision)) return { ok: false, conflict: true, operationId: request.operationId, snapshot: this.snapshot() };
     const event: ContextCondensationEventV1 = { ...active, action: "restore", eventId: request.operationId + ":restore:" + Date.now(), baseRevision: current.revision, createdAt: new Date().toISOString() };
@@ -481,6 +560,19 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
   private condensationSurfaceResult(operationId: string, action: "exclude" | "restore"): ContextMutationResult {
     const active = this.condensationSurfaceEvent(operationId);
     if (!active) throw new Error("CONTEXT_EDITOR_CONDENSATION_RESTORE_UNAVAILABLE");
+    const snapshot = this.snapshot();
+    const coverage = snapshot.condensations?.find(item => item.operationId === operationId)?.coverage;
+    if (coverage && (coverage.status !== "none" || coverage.restoreMode === "unavailable")) {
+      return {
+        ok: false,
+        operationId,
+        restoreRequired: true,
+        restoreMode: coverage.restoreMode,
+        ...(coverage.checkpointCompactionId ? { checkpointCompactionId: coverage.checkpointCompactionId } : {}),
+        ...(coverage.checkpointSeq === undefined ? {} : { checkpointSeq: coverage.checkpointSeq }),
+        snapshot,
+      };
+    }
     const current = this.read();
     const event: ContextCondensationEventV1 = {
       ...active,
@@ -579,6 +671,10 @@ export class PiContextEditorHost implements ContextEditorSessionAdapter, Context
   }
 
   async commitContext(request: ContextProjectionMutationRequest): Promise<ContextMutationResult> {
+    if (request.action === "restore") {
+      const blocked = this.nativeRecoveryRequired();
+      if (blocked) return blocked;
+    }
     asLocator(request.locator, this.sessionId);
     if (request.condensationOperationId) return this.condensationSurfaceResult(request.condensationOperationId, request.action);
     try {

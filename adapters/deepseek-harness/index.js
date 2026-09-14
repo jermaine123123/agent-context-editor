@@ -11,7 +11,7 @@ import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { z } from 'zod'
 import { foldSurface } from '@deepseek-ai/dsh-session'
-import { reduceReplacementStates, selectAssociatedReasoningTargets, selectProjectionTargets, selectCondensationRange, validateCondensationSummary, frameCondensationSummary, estimateCondensationTokens } from './core-runtime.js'
+import { reduceReplacementStates, selectAssociatedReasoningTargets, selectProjectionTargets, selectCondensationRange, validateCondensationSummary, frameCondensationSummary, estimateCondensationTokens, deriveCondensationCoverage } from './core-runtime.js'
 import {
   buildProjection,
   buildViewEvent,
@@ -92,10 +92,32 @@ const condensationSourceUnitSchema = z.object({
   recordId: z.string().min(1),
   kind: z.enum(['reasoning', 'answer', 'user', 'tool']),
   atomIds: z.array(z.string()),
+  sourceEntryIds: z.array(z.string()).optional(),
   sourceRootSeqs: z.array(nonNegativeSafeInteger),
   text: z.string(),
   approxTokens: z.number().nonnegative(),
   included: z.boolean(),
+}).passthrough()
+const nativeCompactionRefSchema = z.object({
+  host: z.string().min(1),
+  compactionId: z.string().min(1),
+  shadowedRootSeqs: z.array(nonNegativeSafeInteger),
+  startSeq: nonNegativeSafeInteger.optional(),
+  shadowedRange: z.object({ start: nonNegativeSafeInteger, end: nonNegativeSafeInteger }).optional(),
+  summarySeq: nonNegativeSafeInteger.optional(),
+  checkpointSeq: nonNegativeSafeInteger.optional(),
+  endSeq: nonNegativeSafeInteger.optional(),
+  committed: z.boolean().optional(),
+}).passthrough()
+const condensationCoverageSchema = z.object({
+  status: z.enum(['none', 'partial', 'full']),
+  restoreMode: z.enum(['inline', 'checkpoint', 'unavailable']),
+  coveredSourceRootSeqs: z.array(nonNegativeSafeInteger),
+  uncoveredSourceRootSeqs: z.array(nonNegativeSafeInteger),
+  nativeCompactions: z.array(nativeCompactionRefSchema),
+  checkpointCompactionId: z.string().optional(),
+  checkpointSeq: nonNegativeSafeInteger.optional(),
+  reason: z.enum(['native-compaction-absorbed-source', 'checkpoint-unavailable']).optional(),
 }).passthrough()
 const condensationEventSchema = z.object({
   schemaVersion: z.literal(1),
@@ -123,6 +145,7 @@ const condensationEventSchema = z.object({
   beforeChanges: z.array(condensationChangeSchema),
   afterChanges: z.array(condensationChangeSchema),
   restoreEventSeq: nonNegativeSafeInteger.optional(),
+  coverage: condensationCoverageSchema.optional(),
 }).passthrough()
 const sidecarRowSchema = z.object({
   session: z.object({
@@ -230,6 +253,7 @@ function normalizeCondensationEvents(events) {
         recordId: String(unit.recordId ?? ''),
         kind: String(unit.kind ?? 'tool'),
         atomIds: Array.isArray(unit.atomIds) ? unit.atomIds.map(String) : [],
+        ...(Array.isArray(unit.sourceEntryIds) ? { sourceEntryIds: unit.sourceEntryIds.map(String) } : {}),
         sourceRootSeqs: Array.isArray(unit.sourceRootSeqs) ? unit.sourceRootSeqs.map(Number).filter(Number.isSafeInteger) : [],
         text: String(unit.text ?? ''),
         approxTokens: Number(unit.approxTokens) || 0,
@@ -267,8 +291,42 @@ function normalizeCondensationEvents(events) {
       beforeChanges: raw.beforeChanges.map(change => ({ ...change, rootEventSeq: Number(change.rootEventSeq) })),
       afterChanges: raw.afterChanges.map(change => ({ ...change, rootEventSeq: Number(change.rootEventSeq) })),
       ...(Number.isSafeInteger(raw.restoreEventSeq) ? { restoreEventSeq: Number(raw.restoreEventSeq) } : {}),
+      ...(raw.coverage && ['none', 'partial', 'full'].includes(raw.coverage.status)
+        ? { coverage: normalizeCondensationCoverage(raw.coverage) }
+        : {}),
     }
   })
+}
+
+function normalizeCondensationCoverage(value) {
+  const raw = asObject(value)
+  const refs = Array.isArray(raw.nativeCompactions) ? raw.nativeCompactions.map(item => {
+    const ref = asObject(item)
+    return {
+      ...ref,
+      host: String(ref.host ?? ''),
+      compactionId: String(ref.compactionId ?? ''),
+      shadowedRootSeqs: Array.isArray(ref.shadowedRootSeqs) ? ref.shadowedRootSeqs.map(Number).filter(Number.isSafeInteger) : [],
+      ...(Number.isSafeInteger(ref.startSeq) ? { startSeq: Number(ref.startSeq) } : {}),
+      ...(ref.shadowedRange && Number.isSafeInteger(ref.shadowedRange.start) && Number.isSafeInteger(ref.shadowedRange.end)
+        ? { shadowedRange: { start: Number(ref.shadowedRange.start), end: Number(ref.shadowedRange.end) } }
+        : {}),
+      ...(Number.isSafeInteger(ref.summarySeq) ? { summarySeq: Number(ref.summarySeq) } : {}),
+      ...(Number.isSafeInteger(ref.checkpointSeq) ? { checkpointSeq: Number(ref.checkpointSeq) } : {}),
+      ...(Number.isSafeInteger(ref.endSeq) ? { endSeq: Number(ref.endSeq) } : {}),
+      ...(typeof ref.committed === 'boolean' ? { committed: ref.committed } : {}),
+    }
+  }).filter(ref => ref.host && ref.compactionId && ref.shadowedRootSeqs.length > 0) : []
+  return {
+    status: ['none', 'partial', 'full'].includes(raw.status) ? raw.status : 'none',
+    restoreMode: ['inline', 'checkpoint', 'unavailable'].includes(raw.restoreMode) ? raw.restoreMode : 'inline',
+    coveredSourceRootSeqs: Array.isArray(raw.coveredSourceRootSeqs) ? raw.coveredSourceRootSeqs.map(Number).filter(Number.isSafeInteger) : [],
+    uncoveredSourceRootSeqs: Array.isArray(raw.uncoveredSourceRootSeqs) ? raw.uncoveredSourceRootSeqs.map(Number).filter(Number.isSafeInteger) : [],
+    nativeCompactions: refs,
+    ...(typeof raw.checkpointCompactionId === 'string' ? { checkpointCompactionId: raw.checkpointCompactionId } : {}),
+    ...(Number.isSafeInteger(raw.checkpointSeq) ? { checkpointSeq: Number(raw.checkpointSeq) } : {}),
+    ...(typeof raw.reason === 'string' ? { reason: raw.reason } : {}),
+  }
 }
 
 function nativeCondensationOperationId(event) {
@@ -276,6 +334,82 @@ function nativeCondensationOperationId(event) {
   if (data.condensationOperationId !== undefined) return String(data.condensationOperationId)
   if (data.condensation?.operationId !== undefined) return String(data.condensation.operationId)
   return undefined
+}
+
+export function nativeCompactionRefs(sourceEvents) {
+  return nativeCompactionEvidence(sourceEvents).filter(ref => ref.committed === true)
+}
+
+/**
+ * Rebuild native compaction evidence from the durable event log.
+ *
+ * A summary/end pair without a persisted Surface replacement is deliberately
+ * retained as uncommitted evidence. It is not counted as covered content, but
+ * callers can surface an unavailable recovery path instead of guessing that
+ * the selective operation is still restorable inline.
+ */
+export function nativeCompactionEvidence(sourceEvents) {
+  const starts = new Map()
+  const summaries = new Map()
+  const ends = new Map()
+  for (const event of Array.isArray(sourceEvents) ? sourceEvents : []) {
+    const data = asObject(event?.data)
+    if (event?.type === 'compaction/start' && data.compactionId !== undefined) {
+      starts.set(String(data.compactionId), { event, data })
+    } else if (event?.type === 'compaction/summary' && data.compactionId !== undefined) {
+      summaries.set(String(data.compactionId), { event, data })
+    } else if (event?.type === 'compaction/end' && data.compactionId !== undefined) {
+      ends.set(String(data.compactionId), { event, data })
+    }
+  }
+  const refs = []
+  for (const [compactionId, summary] of summaries) {
+    const end = ends.get(compactionId)
+    if (end?.data.error !== undefined && end.data.error !== null) continue
+    const shadowedRootSeqs = Array.isArray(summary.data.shadowedSeqs)
+      ? summary.data.shadowedSeqs.map(Number).filter(Number.isSafeInteger)
+      : []
+    if (!shadowedRootSeqs.length) continue
+    const summarySeq = eventSequence(summary.event)
+    const endSeq = eventSequence(end.event)
+    const checkpoint = (Array.isArray(sourceEvents) ? sourceEvents : []).find(event => {
+      if (event?.type !== 'user/message') return false
+      const sources = Array.isArray(event.sourceEventSeqs)
+        ? event.sourceEventSeqs
+        : Array.isArray(event?.data?.sourceEventSeqs) ? event.data.sourceEventSeqs : []
+      const surfaceOp = event.surfaceOp ?? event?.data?.surfaceOp
+      const sourceNumbers = sources.map(Number)
+      const startSeq = eventSequence(starts.get(compactionId)?.event)
+      const shadowedRange = summary.data.shadowedRange
+      const rangeMatches = !shadowedRange || (surfaceOp?.start === Number(shadowedRange.start) && surfaceOp?.end === Number(shadowedRange.end))
+      return surfaceOp?.op === 'replace'
+        && summarySeq !== undefined
+        && (startSeq === undefined || (eventSequence(event) ?? -1) > startSeq)
+        && (endSeq === undefined || (eventSequence(event) ?? Number.MAX_SAFE_INTEGER) < endSeq)
+        && sourceNumbers.includes(summarySeq)
+        && (startSeq === undefined || sourceNumbers.includes(startSeq))
+        && shadowedRootSeqs.every(root => sourceNumbers.includes(root))
+        && rangeMatches
+    })
+    const checkpointSeq = eventSequence(checkpoint)
+    // A summary/end pair alone is not proof that the host replaced its
+    // current Surface. Keep the relation explicitly uncommitted so recovery
+    // can report the missing proof without treating the range as covered.
+    refs.push({
+      host: 'deepseek-harness',
+      compactionId,
+      shadowedRootSeqs: Array.from(new Set(shadowedRootSeqs)).sort((a, b) => a - b),
+      ...(eventSequence(starts.get(compactionId)?.event) === undefined ? {} : { startSeq: eventSequence(starts.get(compactionId)?.event) }),
+      ...(Number.isSafeInteger(summary.data.shadowedRange?.start) && Number.isSafeInteger(summary.data.shadowedRange?.end)
+        ? { shadowedRange: { start: Number(summary.data.shadowedRange.start), end: Number(summary.data.shadowedRange.end) } }
+        : {}),
+      ...(summarySeq === undefined ? {} : { summarySeq }),
+      ...(checkpointSeq === undefined ? {} : { checkpointSeq }),
+      ...(endSeq === undefined ? {} : { endSeq }),
+      committed: checkpointSeq !== undefined && end !== undefined,
+    })
+  }
+  return refs
 }
 
 function activeCondensationEvents(rowEvents, sourceEvents) {
@@ -288,7 +422,13 @@ function activeCondensationEvents(rowEvents, sourceEvents) {
     if (action === 'restore') restored.add(id)
     else if (action === 'apply') applied.add(id)
   }
-  return normalizeCondensationEvents(rowEvents).filter(event => event.status !== 'restored' && applied.has(event.operationId) && !restored.has(event.operationId))
+  const compactions = nativeCompactionEvidence(sourceEvents)
+  return normalizeCondensationEvents(rowEvents)
+    .filter(event => event.status !== 'restored' && applied.has(event.operationId) && !restored.has(event.operationId))
+    .map(event => ({
+      ...event,
+      coverage: deriveCondensationCoverage(event.sourceRootSeqs, compactions),
+    }))
 }
 
 function condensationSnapshot(event, projection) {
@@ -321,6 +461,7 @@ function condensationSnapshot(event, projection) {
     model: event.model,
     createdAt: event.createdAt,
     contextExcluded,
+    ...(event.coverage ? { coverage: event.coverage } : {}),
   }
 }
 
@@ -333,13 +474,17 @@ function eventSequence(event) {
   return Number.isSafeInteger(seq) ? seq : undefined
 }
 
-function messagesBefore(projection, endRoot) {
+export function messagesBefore(projection, endRoot) {
   const messages = []
   const seen = new Set()
   const events = [...(projection.sourceEvents ?? [])].sort((a, b) => (eventSequence(a) ?? 0) - (eventSequence(b) ?? 0))
+  const activeSurface = Array.isArray(projection.activeSurfaceSeqs)
+    ? new Set(projection.activeSurfaceSeqs.map(Number).filter(Number.isSafeInteger))
+    : undefined
   for (const event of events) {
     const root = eventSequence(event)
     if (root === undefined || root > endRoot || seen.has(root)) continue
+    if (activeSurface !== undefined && !activeSurface.has(root)) continue
     const original = messageForRoot(event)
     if (original === undefined) continue
     const overlay = projection.contextOverlays?.get(root)
@@ -1268,6 +1413,19 @@ export class ContextEditorHost extends TypertRemoteService {
       const priorNative = (initial.sourceEvents ?? []).find(event => nativeCondensationOperationId(event) === operationId
         && (asObject(event.data).condensationAction ?? asObject(event.data).condensation?.action) === 'apply')
       if (priorNative !== undefined && sidecarEvent !== undefined) {
+        if (sidecarEvent.status !== 'applied' && sidecarEvent.status !== 'restored') {
+          const healedEvents = row.condensationEvents.map(value => value.operationId === operationId
+            ? { ...value, status: 'applied' }
+            : value)
+          await this.table.put(sessionId, {
+            session: row.session,
+            schemaVersion: 1,
+            storageVersion: 1,
+            events: row.events,
+            replacementEvents: row.replacementEvents,
+            condensationEvents: healedEvents,
+          })
+        }
         return success(this.snapshotOf(initial, false), { operationId, eventId: String(priorNative.seq) })
       }
       const prepared = this.condensationOperations.get(operationId) ?? sidecarEvent
@@ -1397,6 +1555,37 @@ export class ContextEditorHost extends TypertRemoteService {
       if (existingRestore !== undefined) return success(this.snapshotOf(initial, false), { operationId, eventId: String(existingRestore.seq) })
       const expectedRevision = String(request.baseRevision ?? initial.revision)
       if (expectedRevision !== initial.revision) return { ok: false, conflict: true, operationId, snapshot: this.snapshotOf(initial, false) }
+      const derivedCoverage = deriveCondensationCoverage(
+        event.sourceRootSeqs,
+        nativeCompactionEvidence(initial.sourceEvents),
+      )
+      const derivedRequiresRecovery = derivedCoverage.status !== 'none' || derivedCoverage.restoreMode !== 'inline'
+      const coverage = derivedRequiresRecovery
+        ? derivedCoverage
+        : event.coverage?.restoreMode && event.coverage.restoreMode !== 'inline'
+          ? {
+            ...event.coverage,
+            restoreMode: 'unavailable',
+            reason: 'checkpoint-unavailable',
+          }
+          : event.coverage?.status && event.coverage.status !== 'none'
+          ? {
+            ...event.coverage,
+            restoreMode: 'unavailable',
+            reason: 'checkpoint-unavailable',
+          }
+          : derivedCoverage
+      if (coverage.status !== 'none' || coverage.restoreMode !== 'inline') {
+        return {
+          ok: false,
+          restoreRequired: true,
+          restoreMode: coverage.restoreMode,
+          operationId,
+          ...(coverage.checkpointCompactionId ? { checkpointCompactionId: coverage.checkpointCompactionId } : {}),
+          ...(Number.isSafeInteger(coverage.checkpointSeq) ? { checkpointSeq: coverage.checkpointSeq } : {}),
+          snapshot: this.snapshotOf(initial, false),
+        }
+      }
       const roots = event.sourceRootSeqs.map(Number).filter(Number.isSafeInteger)
       if (!roots.length || roots.some(root => !rootEventExists(initial, root))) throw new Error('CONTEXT_EDITOR_CONDENSATION_SOURCE_GONE')
       for (const root of roots) {

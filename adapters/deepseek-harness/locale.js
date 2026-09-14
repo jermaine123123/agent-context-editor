@@ -37,6 +37,14 @@ export function createHarnessText(locale) {
     condensationPrefixNotReused: zh ? '\u5df2\u5207\u6362\u7cbe\u7b80\u6a21\u578b\uff0c\u672c\u6b21\u751f\u6210\u672a\u590d\u7528\u4f1a\u8bdd\u524d\u7f00' : 'The selected model differs; this generation did not reuse the session prefix.',
     condensationAfter: value => zh ? `\u6458\u8981\u4f30\u7b97 token\uff1a${Number(value) || 0}` : `Summary estimate: ${Number(value) || 0} tokens`,
     condensationSaved: (saved, ratio) => zh ? `\u9884\u8ba1\u8282\u7701\uff1a${Number(saved) || 0} token\uff08${Math.round((Number(ratio) || 0) * 100)}%\uff09` : `Estimated savings: ${Number(saved) || 0} tokens (${Math.round((Number(ratio) || 0) * 100)}%)`,
+    condensationCoverage: (status, covered, total) => {
+      const label = status === 'full' ? (zh ? '\u5b8c\u5168\u88ab\u539f\u751f\u538b\u7f29\u8986\u76d6' : 'Fully covered by native compaction')
+        : status === 'partial' ? (zh ? '\u90e8\u5206\u88ab\u539f\u751f\u538b\u7f29\u8986\u76d6' : 'Partially covered by native compaction')
+          : (zh ? '\u5c1a\u672a\u88ab\u539f\u751f\u538b\u7f29\u5438\u6536' : 'Not covered by native compaction')
+      return `${label} (${Number(covered) || 0}/${Number(total) || 0})`
+    },
+    condensationCheckpoint: value => zh ? `\u539f\u751f\u538b\u7f29\u5df2\u66ff\u6362\u539f\u6587\uff0c\u8bf7\u5148\u901a\u8fc7\u5bbf\u4e3b\u7684\u5206\u652f/\u68c0\u67e5\u70b9\u5165\u53e3\u8fd4\u56de\u538b\u7f29\u524d\u68c0\u67e5\u70b9${Number.isSafeInteger(Number(value)) ? `\uff08\u5e8f\u53f7 ${Number(value)}\uff09` : ''}\u540e\u518d\u6062\u590d\u3002` : `Native compaction replaced the original range. Use the host branch/checkpoint entry to return to the pre-compaction checkpoint${Number.isSafeInteger(Number(value)) ? ` (event ${Number(value)})` : ''} before restoring.`,
+    condensationRestoreUnavailable: zh ? '\u539f\u751f\u538b\u7f29\u5df2\u8986\u76d6\u8be5\u8303\u56f4\uff0c\u5f53\u524d\u65e0\u53ef\u8bc1\u660e\u7684\u68c0\u67e5\u70b9\uff0c\u6682\u4e0d\u80fd\u76f4\u63a5\u6062\u590d\u3002' : 'Native compaction covered this range, but no verifiable checkpoint is available for direct restore.',
     condensationLowSaving: zh ? '本次精简收益较小：缩短不足 40% 或节省不足 500 个估算 token，可重新生成或手动删减。' : 'Small reduction: under 40% or fewer than 500 estimated tokens saved. Consider regenerating or editing.',
     condensationRisks: risks => zh ? `\u98ce\u9669\u63d0\u793a\uff1a${risks}` : `Risks: ${risks}`,
     condensationHint: zh ? '\u53ef\u624b\u52a8\u8c03\u6574\u6458\u8981\uff1bCtrl/Cmd+Enter \u5e94\u7528\uff0cEsc \u53d6\u6d88\u3002\u751f\u6210\u6216\u5e94\u7528\u671f\u95f4\u4e3b\u4f1a\u8bdd\u4fdd\u6301\u4e0d\u53d8\u3002' : 'You can edit the summary. Ctrl/Cmd+Enter applies it; Esc cancels. The main session stays unchanged while generating.',

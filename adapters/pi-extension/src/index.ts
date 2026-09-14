@@ -1,13 +1,15 @@
-import type { ContextEvent, ExtensionAPI, ExtensionContext, SessionBeforeCompactEvent, SessionBeforeTreeEvent } from "@earendil-works/pi-coding-agent";
+import { sessionEntryToContextMessages, type ContextEvent, type ExtensionAPI, type ExtensionContext, type FileOperations, type SessionBeforeCompactEvent, type SessionBeforeTreeEvent } from "@earendil-works/pi-coding-agent";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { normalizeSessionEntries } from "./normalize.js";
 import { readLatestState, STATE_ENTRY_TYPE } from "./state.js";
 import { runDesktopContextEditor } from "./desktop-ui.js";
 import { ContextEditorComponent, type ContextEditorExit, type ContextEditorUiState, type ReplacementReview, type CondensationReview } from "./ui.js";
 import { PiContextEditorHost } from "./host.js";
 import type { ContextEditorStateV1 } from "./types.js";
-import { estimateCondensationTokens, frameCondensationSummary, validateCondensationSummary } from "./shared-core/index.js";
+import { estimateCondensationTokens, frameCondensationSummary, validateCondensationSummary, stableFingerprint } from "./shared-core/index.js";
 import { createPiText, detectPiLocale } from "./locale.js";
 import { projectModelContext, projectionOverlapsEntryIds } from "./projection-hook.js";
+import { inferPiShadowedEntryIds, nativeCompactionPreparationId, piCompactionCheckpointEntryId, readNativeCompactionSidecar, reconcileNativeCompactionEntry, upsertNativeCompactionEvidence } from "./native-compaction-sidecar.js";
 
 function sourceLeafId(ctx: ExtensionContext): string | undefined {
   return ctx.sessionManager.getLeafId() ?? undefined;
@@ -21,20 +23,125 @@ function notifyProjectionFailure(ctx: ExtensionContext, error: unknown): void {
 function projectionEntryIdsBeforeFirstKept(
   event: SessionBeforeCompactEvent,
 ): Set<string> {
-  const ids = new Set<string>();
-  const first = event.branchEntries.findIndex((entry) => entry.id === event.preparation.firstKeptEntryId);
-  if (first < 0) return ids;
-  for (let index = 0; index < first; index += 1) {
-    const entry = event.branchEntries[index];
-    if (entry) ids.add(entry.id);
-  }
-  if (event.preparation.turnPrefixMessages.length > 0) {
-    const entry = event.branchEntries[first];
-    if (entry) ids.add(entry.id);
-  }
-  return ids;
+  return new Set(inferPiShadowedEntryIds(
+    event.branchEntries,
+    event.preparation.firstKeptEntryId,
+    event.preparation.turnPrefixMessages.length > 0,
+  ));
 }
 
+function messageMatches(left: AgentMessage, right: AgentMessage): boolean {
+  if (left === right) return true;
+  const a = left as unknown as Record<string, unknown>;
+  const b = right as unknown as Record<string, unknown>;
+  return String(a.role ?? "") === String(b.role ?? "")
+    && JSON.stringify(a.content) === JSON.stringify(b.content)
+    && String(a.toolCallId ?? "") === String(b.toolCallId ?? "")
+    && String(a.toolName ?? "") === String(b.toolName ?? "");
+}
+
+function entryIdsForMessages(messages: readonly AgentMessage[], entries: readonly unknown[]): string[] {
+  const used = new Set<string>();
+  const result: string[] = [];
+  for (const message of messages) {
+    const matches = entries.filter(entry => {
+      const id = String((entry as { id?: unknown }).id ?? "");
+      if (!id || used.has(id)) return false;
+      return sessionEntryToContextMessages(entry as never).some(candidate => messageMatches(message, candidate as AgentMessage));
+    });
+    if (matches.length !== 1) throw new Error("CONTEXT_EDITOR_COMPACTION_ALIGNMENT_UNAVAILABLE");
+    const match = matches[0];
+    const id = String((match as { id?: unknown } | undefined)?.id ?? "");
+    if (id) {
+      used.add(id);
+      result.push(id);
+    }
+  }
+  return result;
+}
+
+function projectCompactionMessages(
+  messages: readonly AgentMessage[],
+  entries: readonly unknown[],
+  atoms: ReturnType<typeof normalizeSessionEntries>,
+  projectionEvents: Parameters<typeof projectModelContext>[0]["projectionEvents"],
+): AgentMessage[] {
+  if (messages.length === 0 || projectionEvents.length === 0) return [...messages];
+  const entryIds = entryIdsForMessages(messages, entries);
+  if (entryIds.length !== messages.length) throw new Error("CONTEXT_EDITOR_COMPACTION_ALIGNMENT_UNAVAILABLE");
+  const selected = entries.filter(entry => entryIds.includes(String((entry as { id?: unknown }).id ?? "")));
+  return projectModelContext({ messages: [...messages], entries: selected, atoms, projectionEvents });
+}
+
+type PiFileOps = { read: Set<string>; written: Set<string>; edited: Set<string> };
+
+function createPiFileOps(): PiFileOps {
+  return { read: new Set<string>(), written: new Set<string>(), edited: new Set<string>() };
+}
+
+function extractPiFileOps(messages: readonly AgentMessage[], fileOps: PiFileOps): void {
+  for (const message of messages) {
+    const row = message as unknown as { role?: unknown; content?: unknown };
+    if (row.role !== "assistant" || !Array.isArray(row.content)) continue;
+    for (const block of row.content) {
+      if (!block || typeof block !== "object") continue;
+      const item = block as { type?: unknown; name?: unknown; arguments?: unknown };
+      if (item.type !== "toolCall" || !item.arguments || typeof item.arguments !== "object") continue;
+      const args = item.arguments as { path?: unknown };
+      const path = typeof args.path === "string" && args.path.length > 0 ? args.path : undefined;
+      if (!path) continue;
+      if (item.name === "read") fileOps.read.add(path);
+      else if (item.name === "write") fileOps.written.add(path);
+      else if (item.name === "edit") fileOps.edited.add(path);
+    }
+  }
+}
+
+function previousPiCompactionFileOps(branchEntries: readonly unknown[], firstKeptEntryId: string): PiFileOps {
+  const result = createPiFileOps();
+  const rows = branchEntries as Array<{ id?: unknown; type?: unknown; fromHook?: unknown; details?: unknown }>;
+  const firstKeptIndex = rows.findIndex(entry => String(entry.id ?? "") === firstKeptEntryId);
+  for (let index = firstKeptIndex - 1; index >= 0; index -= 1) {
+    const entry = rows[index];
+    if (entry?.type !== "compaction" || entry.fromHook === true || !entry.details || typeof entry.details !== "object") continue;
+    const details = entry.details as { readFiles?: unknown; modifiedFiles?: unknown };
+    if (Array.isArray(details.readFiles)) for (const path of details.readFiles) if (typeof path === "string" && path) result.read.add(path);
+    if (Array.isArray(details.modifiedFiles)) for (const path of details.modifiedFiles) if (typeof path === "string" && path) result.edited.add(path);
+    break;
+  }
+  return result;
+}
+
+function projectPreparationFileOps(
+  preparationFileOps: FileOperations,
+  branchEntries: readonly unknown[],
+  firstKeptEntryId: string,
+  beforeMessages: readonly AgentMessage[],
+  beforePrefixMessages: readonly AgentMessage[],
+  afterMessages: readonly AgentMessage[],
+  afterPrefixMessages: readonly AgentMessage[],
+): FileOperations {
+  const before = createPiFileOps();
+  extractPiFileOps(beforeMessages, before);
+  extractPiFileOps(beforePrefixMessages, before);
+  const after = createPiFileOps();
+  extractPiFileOps(afterMessages, after);
+  extractPiFileOps(afterPrefixMessages, after);
+  const previous = previousPiCompactionFileOps(branchEntries, firstKeptEntryId);
+  const result: PiFileOps = {
+    read: new Set(preparationFileOps.read ?? []),
+    written: new Set(preparationFileOps.written ?? []),
+    edited: new Set(preparationFileOps.edited ?? []),
+  };
+  for (const key of ["read", "written", "edited"] as const) {
+    for (const path of before[key]) {
+      if (!after[key].has(path) && !previous[key].has(path)) result[key].delete(path);
+    }
+    for (const path of after[key]) result[key].add(path);
+    for (const path of previous[key]) result[key].add(path);
+  }
+  return result;
+}
 function projectionSummaryOverlap(
   ctx: ExtensionContext,
   entries: readonly unknown[],
@@ -47,6 +154,22 @@ function projectionSummaryOverlap(
   return projectionOverlapsEntryIds(entryIds, atoms, current.projectionEvents ?? []);
 }
 
+function reconcilePendingNativeCompactions(ctx: ExtensionContext): void {
+  const host = new PiContextEditorHost(ctx);
+  const native = readNativeCompactionSidecar(host.sessionFile, host.sessionId);
+  if (native.integrity === "invalid") return;
+  const branchEntries = ctx.sessionManager.getBranch() as unknown[];
+  for (const entry of branchEntries) {
+    if ((entry as { type?: unknown }).type !== "compaction") continue;
+    const compaction = entry as { id?: unknown; firstKeptEntryId?: unknown; parentId?: unknown };
+    const firstKeptEntryId = String(compaction.firstKeptEntryId ?? "");
+    const pending = native.document.events
+      .filter(item => item.firstKeptEntryId === firstKeptEntryId && !item.committed)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+    if (!pending) continue;
+    upsertNativeCompactionEvidence(host.sessionFile, host.sessionId, reconcileNativeCompactionEntry(branchEntries, compaction, pending));
+  }
+}
 function registerProjectionHooks(pi: ExtensionAPI): void {
   pi.on("context", async (event: ContextEvent, ctx) => {
     try {
@@ -72,19 +195,116 @@ function registerProjectionHooks(pi: ExtensionAPI): void {
 
   pi.on("session_before_compact", async (event: SessionBeforeCompactEvent, ctx) => {
     try {
-      const current = new PiContextEditorHost(ctx).read();
+      const host = new PiContextEditorHost(ctx);
+      const current = host.read();
       if (current.projectionAvailable === false) throw new Error(current.projectionError || "CONTEXT_EDITOR_PROJECTION_UNAVAILABLE");
-      const ids = projectionEntryIdsBeforeFirstKept(event);
-      if (ids.size > 0 && projectionSummaryOverlap(ctx, event.branchEntries, ids)) {
-        if (ctx.hasUI) ctx.ui.notify("Compaction cancelled because it would summarize edited or excluded context.", "warning");
-        return { cancel: true };
-      }
+      if (current.nativeCompactionAvailable === false) throw new Error(current.nativeCompactionError || "CONTEXT_EDITOR_NATIVE_COMPACTION_UNAVAILABLE");
+      const projectionEvents = current.projectionEvents ?? [];
+      if (projectionEvents.length === 0) return;
+
+      const shadowedEntryIds = [...projectionEntryIdsBeforeFirstKept(event)];
+      if (shadowedEntryIds.length === 0) throw new Error("CONTEXT_EDITOR_COMPACTION_ALIGNMENT_UNAVAILABLE");
+      const sourceFingerprint = stableFingerprint([
+        event.preparation.firstKeptEntryId,
+        ...shadowedEntryIds,
+        JSON.stringify(event.preparation.messagesToSummarize),
+        JSON.stringify(event.preparation.turnPrefixMessages),
+      ]);
+      const preparedRevision = current.revision;
+      const preparationId = nativeCompactionPreparationId({
+        sessionId: host.sessionId,
+        firstKeptEntryId: event.preparation.firstKeptEntryId,
+        shadowedEntryIds,
+        preparedRevision,
+        sourceFingerprint,
+      });
+      const checkpointEntryId = piCompactionCheckpointEntryId(event.branchEntries);
+      const atoms = normalizeSessionEntries(event.branchEntries);
+      const preparation = event.preparation as typeof event.preparation & {
+        messagesToSummarize: AgentMessage[];
+        turnPrefixMessages: AgentMessage[];
+        fileOps: FileOperations;
+      };
+      const beforeMessages = [...preparation.messagesToSummarize];
+      const beforePrefixMessages = [...preparation.turnPrefixMessages];
+      const projectedMessages = projectCompactionMessages(
+        beforeMessages,
+        event.branchEntries,
+        atoms,
+        projectionEvents,
+      );
+      const projectedPrefixMessages = projectCompactionMessages(
+        beforePrefixMessages,
+        event.branchEntries,
+        atoms,
+        projectionEvents,
+      );
+      preparation.messagesToSummarize = projectedMessages;
+      preparation.turnPrefixMessages = projectedPrefixMessages;
+      preparation.fileOps = projectPreparationFileOps(
+        preparation.fileOps,
+        event.branchEntries,
+        event.preparation.firstKeptEntryId,
+        beforeMessages,
+        beforePrefixMessages,
+        projectedMessages,
+        projectedPrefixMessages,
+      );
+      upsertNativeCompactionEvidence(host.sessionFile, host.sessionId, {
+        schemaVersion: 1,
+        sessionId: host.sessionId,
+        preparationId,
+        firstKeptEntryId: event.preparation.firstKeptEntryId,
+        shadowedEntryIds,
+        ...(checkpointEntryId ? { checkpointEntryId } : {}),
+        preparedRevision,
+        sourceFingerprint,
+        reason: event.reason,
+        committed: false,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
     } catch (error) {
       notifyProjectionFailure(ctx, error);
       return { cancel: true };
     }
   });
 
+  pi.on("session_compact", async (event, ctx) => {
+    try {
+      const host = new PiContextEditorHost(ctx);
+      const native = readNativeCompactionSidecar(host.sessionFile, host.sessionId);
+      if (native.integrity === "invalid") throw new Error(native.error || "CONTEXT_EDITOR_NATIVE_COMPACTION_UNAVAILABLE");
+      const branchEntries = ctx.sessionManager.getBranch() as unknown[];
+      const firstKeptEntryId = String(event.compactionEntry.firstKeptEntryId ?? "");
+      const pending = native.document.events
+        .filter(item => item.firstKeptEntryId === firstKeptEntryId && !item.committed)
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+      if (!pending) return;
+      upsertNativeCompactionEvidence(
+        host.sessionFile,
+        host.sessionId,
+        reconcileNativeCompactionEntry(branchEntries, event.compactionEntry, pending),
+      );
+    } catch (error) {
+      notifyProjectionFailure(ctx, error);
+    }
+  });
+
+  pi.on("session_start", async (_event, ctx) => {
+    try {
+      reconcilePendingNativeCompactions(ctx);
+    } catch (error) {
+      notifyProjectionFailure(ctx, error);
+    }
+  });
+  pi.on("session_tree", async (_event, ctx) => {
+    try {
+      reconcilePendingNativeCompactions(ctx);
+    } catch (error) {
+      notifyProjectionFailure(ctx, error);
+    }
+  });
   pi.on("session_before_tree", async (event: SessionBeforeTreeEvent, ctx) => {
     if (!event.preparation.userWantsSummary) return;
     try {

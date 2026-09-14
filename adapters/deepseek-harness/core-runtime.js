@@ -1,6 +1,6 @@
 /*
  * GENERATED FILE - do not edit directly.
- * Canonical Core source digest: 58a42b438e4197afdf2a1d5c43f68f572bcb98c24756115875d1de10304079ca
+ * Canonical Core source digest: d467cb89a9c9c6860c58d815d8cd3993be5b6a3869a9e4a80d3ecd3ed2fc8d3f
  * Rebuild with: npm run build:deepseek
  */
 //#region packages/context-editor-core/src/projection.ts
@@ -529,6 +529,89 @@ function stableFingerprint(parts) {
 }
 //#endregion
 //#region packages/context-editor-core/src/condensation.ts
+/**
+* Reconcile a selective condensation with successful host-native compactions.
+*
+* Native compaction operates on surface roots, so the relationship is derived
+* from the exact shadowed root set rather than from a positional range. This
+* keeps partial coverage meaningful when a later compaction only absorbs part
+* of an older selective summary.
+*/
+function deriveCondensationCoverage(sourceRootSeqs, nativeCompactions) {
+	if (sourceRootSeqs.some((value) => typeof value === "string")) return deriveCondensationEntryCoverage(sourceRootSeqs.map(String), nativeCompactions);
+	const source = Array.from(new Set((sourceRootSeqs ?? []).map(Number).filter((value) => Number.isSafeInteger(value) && value >= 0))).sort((a, b) => a - b);
+	const relatedRefs = Array.from(new Map((nativeCompactions ?? []).filter((ref) => ref && typeof ref.compactionId === "string" && ref.compactionId.length > 0).map((ref) => [ref.compactionId, {
+		...ref,
+		host: String(ref.host ?? ""),
+		compactionId: String(ref.compactionId),
+		shadowedRootSeqs: Array.from(new Set((ref.shadowedRootSeqs ?? []).map(Number).filter((value) => Number.isSafeInteger(value) && value >= 0))).sort((a, b) => a - b),
+		...Number.isSafeInteger(ref.startSeq) ? { startSeq: Number(ref.startSeq) } : {},
+		...ref.shadowedRange && Number.isSafeInteger(ref.shadowedRange.start) && Number.isSafeInteger(ref.shadowedRange.end) ? { shadowedRange: {
+			start: Number(ref.shadowedRange.start),
+			end: Number(ref.shadowedRange.end)
+		} } : {},
+		...Number.isSafeInteger(ref.summarySeq) ? { summarySeq: Number(ref.summarySeq) } : {},
+		...Number.isSafeInteger(ref.checkpointSeq) ? { checkpointSeq: Number(ref.checkpointSeq) } : {},
+		...Number.isSafeInteger(ref.endSeq) ? { endSeq: Number(ref.endSeq) } : {},
+		committed: ref.committed !== false
+	}])).values()).filter((ref) => ref.shadowedRootSeqs.length > 0).sort((left, right) => (right.checkpointSeq ?? right.endSeq ?? right.summarySeq ?? -1) - (left.checkpointSeq ?? left.endSeq ?? left.summarySeq ?? -1)).filter((ref) => source.some((root) => ref.shadowedRootSeqs.includes(root)));
+	const verifiedRefs = relatedRefs.filter((ref) => ref.committed !== false);
+	const covered = source.filter((root) => verifiedRefs.some((ref) => ref.shadowedRootSeqs.includes(root)));
+	const uncertainRefs = relatedRefs.filter((ref) => ref.committed === false && ref.shadowedRootSeqs.some((root) => source.includes(root) && !covered.includes(root)));
+	const outputRefs = [...verifiedRefs, ...uncertainRefs];
+	const uncertain = uncertainRefs.length > 0;
+	const uncovered = source.filter((root) => !covered.includes(root));
+	const status = covered.length === 0 ? "none" : uncovered.length === 0 ? "full" : "partial";
+	const checkpoint = verifiedRefs.find((ref) => Number.isSafeInteger(ref.checkpointSeq));
+	const restoreMode = uncertain ? "unavailable" : status === "none" ? "inline" : checkpoint ? "checkpoint" : "unavailable";
+	return {
+		status,
+		restoreMode,
+		coveredSourceRootSeqs: covered,
+		uncoveredSourceRootSeqs: uncovered,
+		nativeCompactions: outputRefs,
+		...checkpoint ? {
+			checkpointCompactionId: checkpoint.compactionId,
+			checkpointSeq: checkpoint.checkpointSeq
+		} : {},
+		...restoreMode === "inline" ? {} : { reason: restoreMode === "checkpoint" ? "native-compaction-absorbed-source" : "checkpoint-unavailable" }
+	};
+}
+/** Derive coverage for hosts whose durable surface uses opaque entry IDs (Pi). */
+function deriveCondensationEntryCoverage(sourceEntryIds, nativeCompactions) {
+	const source = Array.from(new Set(sourceEntryIds.map(String).filter(Boolean)));
+	const relatedRefs = Array.from(new Map((nativeCompactions ?? []).filter((ref) => ref && typeof ref.compactionId === "string" && ref.compactionId.length > 0).map((ref) => [ref.compactionId, {
+		...ref,
+		host: String(ref.host ?? ""),
+		compactionId: String(ref.compactionId),
+		shadowedRootSeqs: Array.from(new Set((ref.shadowedRootSeqs ?? []).map(Number).filter((value) => Number.isSafeInteger(value) && value >= 0))).sort((a, b) => a - b),
+		shadowedEntryIds: Array.from(new Set((ref.shadowedEntryIds ?? []).map(String).filter(Boolean))),
+		...typeof ref.checkpointEntryId === "string" && ref.checkpointEntryId.length > 0 ? { checkpointEntryId: ref.checkpointEntryId } : {},
+		committed: ref.committed !== false
+	}])).values()).filter((ref) => ref.shadowedEntryIds.length > 0).sort((left, right) => (right.checkpointSeq ?? right.endSeq ?? right.summarySeq ?? -1) - (left.checkpointSeq ?? left.endSeq ?? left.summarySeq ?? -1)).filter((ref) => source.some((entryId) => ref.shadowedEntryIds?.includes(entryId)));
+	const verifiedRefs = relatedRefs.filter((ref) => ref.committed !== false);
+	const covered = source.filter((entryId) => verifiedRefs.some((ref) => ref.shadowedEntryIds?.includes(entryId)));
+	const uncertainRefs = relatedRefs.filter((ref) => ref.committed === false && ref.shadowedEntryIds?.some((entryId) => source.includes(entryId) && !covered.includes(entryId)));
+	const uncovered = source.filter((entryId) => !covered.includes(entryId));
+	const status = covered.length === 0 ? "none" : uncovered.length === 0 ? "full" : "partial";
+	const checkpoint = verifiedRefs.find((ref) => typeof ref.checkpointEntryId === "string" && ref.checkpointEntryId.length > 0);
+	const restoreMode = uncertainRefs.length > 0 ? "unavailable" : status === "none" ? "inline" : checkpoint ? "checkpoint" : "unavailable";
+	return {
+		status,
+		restoreMode,
+		coveredSourceRootSeqs: [],
+		uncoveredSourceRootSeqs: [],
+		coveredSourceEntryIds: covered,
+		uncoveredSourceEntryIds: uncovered,
+		nativeCompactions: [...verifiedRefs, ...uncertainRefs],
+		...checkpoint ? {
+			checkpointCompactionId: checkpoint.compactionId,
+			...checkpoint.checkpointSeq === void 0 ? {} : { checkpointSeq: checkpoint.checkpointSeq },
+			...checkpoint.checkpointEntryId === void 0 ? {} : { checkpointEntryId: checkpoint.checkpointEntryId }
+		} : {},
+		...restoreMode === "inline" ? {} : { reason: restoreMode === "checkpoint" ? "native-compaction-absorbed-source" : "checkpoint-unavailable" }
+	};
+}
 function textOfAtom(atom) {
 	return [atom.toolName ?? "", atom.text].filter(Boolean).join(": ");
 }
@@ -721,4 +804,4 @@ function estimateCondensationTokens(value) {
 	return estimateTextTokens(value);
 }
 //#endregion
-export { atomMatchesSearchScope, estimateCondensationTokens, frameCondensationSummary, projectRecords, reduceProjectionStates, reduceReplacementStates, searchRecords, selectAssociatedReasoningTargets, selectCondensationRange, selectProjectionTargets, validateCondensationSummary };
+export { atomMatchesSearchScope, deriveCondensationCoverage, estimateCondensationTokens, frameCondensationSummary, projectRecords, reduceProjectionStates, reduceReplacementStates, searchRecords, selectAssociatedReasoningTargets, selectCondensationRange, selectProjectionTargets, validateCondensationSummary };

@@ -26,4 +26,34 @@ export declare class ContextEditorHost extends TypertRemoteService {
 
 export declare const inject: readonly ['storageDomain', 'sessionPersistence', 'sessions', 'agents', 'llm']
 export declare const contextEditorDomainSpec: unknown
+export declare function nativeCompactionRefs(sourceEvents: readonly unknown[]): Array<{
+  host: string
+  compactionId: string
+  shadowedRootSeqs: number[]
+  startSeq?: number
+  shadowedRange?: { start: number; end: number }
+  summarySeq?: number
+  checkpointSeq?: number
+  endSeq?: number
+  committed?: boolean
+}>
+export declare function nativeCompactionEvidence(sourceEvents: readonly unknown[]): Array<{
+  host: string
+  compactionId: string
+  shadowedRootSeqs: number[]
+  startSeq?: number
+  shadowedRange?: { start: number; end: number }
+  summarySeq?: number
+  checkpointSeq?: number
+  endSeq?: number
+  committed?: boolean
+}>
+export declare function messagesBefore(projection: {
+  sourceEvents?: readonly unknown[]
+  activeSurfaceSeqs?: readonly number[]
+  atoms?: readonly unknown[]
+  records?: readonly unknown[]
+  replacementStates?: ReadonlyMap<string, unknown>
+  contextOverlays?: ReadonlyMap<number, unknown>
+}, endRoot: number): Array<{ content?: Array<{ text?: string }> }>
 export declare function apply(ctx: unknown): Promise<void>

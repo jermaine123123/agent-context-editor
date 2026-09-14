@@ -1,6 +1,6 @@
 /*
  * GENERATED FILE - do not edit directly.
- * Canonical Core source digest: 58a42b438e4197afdf2a1d5c43f68f572bcb98c24756115875d1de10304079ca
+ * Canonical Core source digest: d467cb89a9c9c6860c58d815d8cd3993be5b6a3869a9e4a80d3ecd3ed2fc8d3f
  * Rebuild with: npm run build:deepseek
  */
 export const HOST_ID: string
@@ -74,6 +74,29 @@ export interface ContextEditableUnit {
 
 export type ContextReplacementProjectionState = 'original' | 'replaced' | 'unavailable'
 export type ContextReplacementDisabledReason = 'unsupported-unit-kind' | 'structured-user-content' | 'signed-content' | 'projection-unavailable' | 'invalid-target' | 'associated-reasoning-unavailable' | 'condensation-active'
+export type ContextCondensationCoverageStatus = 'none' | 'partial' | 'full'
+export type ContextCondensationRestoreMode = 'inline' | 'checkpoint' | 'unavailable'
+export interface ContextNativeCompactionRef {
+  host: string
+  compactionId: string
+  shadowedRootSeqs: number[]
+  startSeq?: number
+  shadowedRange?: { start: number; end: number }
+  summarySeq?: number
+  checkpointSeq?: number
+  endSeq?: number
+  committed?: boolean
+}
+export interface ContextCondensationCoverage {
+  status: ContextCondensationCoverageStatus
+  restoreMode: ContextCondensationRestoreMode
+  coveredSourceRootSeqs: number[]
+  uncoveredSourceRootSeqs: number[]
+  nativeCompactions: ContextNativeCompactionRef[]
+  checkpointCompactionId?: string
+  checkpointSeq?: number
+  reason?: 'native-compaction-absorbed-source' | 'checkpoint-unavailable'
+}
 export interface ContextReplacementAtomRef {
   atomId: string
   sourceRef: { entryId: string; blockIndex: number }
@@ -169,6 +192,7 @@ export function buildProjection(identity: unknown, events: readonly unknown[], r
   states: Map<string, string>
   records: ContextRecord[]
   sourceEvents: unknown[]
+  activeSurfaceSeqs?: number[]
   projectionStates: Map<string, ContextEditableUnitProjectionState | 'unavailable'>
   contextOverlays: Map<number, unknown>
   replacementEvents: ContextReplacementEventV1[]
@@ -185,6 +209,7 @@ export interface CondensationSourceUnit {
   recordId: string
   kind: ContextEditableUnitKind
   atomIds: string[]
+  sourceEntryIds?: string[]
   sourceRootSeqs: number[]
   text: string
   approxTokens: number
@@ -256,6 +281,7 @@ export interface CondensationEvent {
   beforeChanges: CondensationChange[]
   afterChanges: CondensationChange[]
   restoreEventSeq?: number
+  coverage?: ContextCondensationCoverage
 }
 export interface CondensationValidation { ok: boolean; summary: string; metrics: CondensationMetrics; warnings: string[]; error?: 'empty-summary' | 'truncated-summary' | 'not-smaller' }
 export function condensationUnitText(unit: ContextEditableUnit, projectionStates?: ReadonlyMap<string, ContextEditableUnitProjectionState | 'unavailable'>): string
@@ -263,3 +289,4 @@ export function selectCondensationRange(records: readonly ContextRecord[], reque
 export function validateCondensationSummary(summary: string, beforeTokens: number, options?: { summaryTokens?: number; truncated?: boolean }): CondensationValidation
 export function frameCondensationSummary(summary: string): string
 export function estimateCondensationTokens(value: string): number
+export function deriveCondensationCoverage(sourceRootSeqs: readonly number[], nativeCompactions: readonly ContextNativeCompactionRef[]): ContextCondensationCoverage

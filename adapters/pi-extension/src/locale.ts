@@ -1,4 +1,4 @@
-﻿import type { AtomKind, ViewState } from "./types.js";
+import type { AtomKind, ViewState } from "./types.js";
 
 type PiSearchScope = "dialogue" | "all";
 
@@ -128,6 +128,8 @@ export interface PiText {
   condensationCardActive(): string;
   condensationCardExcluded(): string;
   condensationCardMetrics(saved: number, ratio: number): string;
+  condensationCoverage(status: string, restoreMode: string): string;
+  condensationRestoreRequired(restoreMode: string, checkpointEntryId?: string): string;
   condensationCovered(index: number): string;
   condensationSourceList(index: number, count: number): string;
   condensationCardSources(ids: readonly string[]): string;
@@ -340,6 +342,10 @@ export function createPiText(locale: PiLocale): PiText {
     condensationCardActive: () => zh ? "生效" : "active",
     condensationCardExcluded: () => zh ? "摘要已排除" : "summary excluded",
     condensationCardMetrics: (saved, ratio) => zh ? `预计节省 ${saved} tokens（${Math.round(ratio * 100)}%）· C 排除/恢复摘要 · D 恢复精简前内容 · O 展开来源` : `Estimated saving ${saved} tokens (${Math.round(ratio * 100)}%) · C exclude/restore summary · D restore pre-condensation content · O expand sources`,
+    condensationCoverage: (status, restoreMode) => zh ? `原生压缩覆盖：${status} · 恢复方式：${restoreMode}` : `Native compaction coverage: ${status} · restore: ${restoreMode}`,
+    condensationRestoreRequired: (restoreMode, checkpointEntryId) => zh
+      ? `原生压缩已吸收来源；请先通过 /tree 返回压缩前检查点${checkpointEntryId ? `（${checkpointEntryId}）` : ""}，再恢复。`
+      : `Native compaction absorbed this source; use /tree to return to the pre-compaction checkpoint${checkpointEntryId ? ` (${checkpointEntryId})` : ""} before restoring.`,
     condensationCovered: (index) => zh ? `已由摘要 #${index} 替换` : `Replaced by summary #${index}`,
     condensationSourceList: (index, count) => zh ? `摘要 #${index} 来源 ${count} 条 · O 展开/收起原文 · PgUp/PgDn 滚动` : `Summary #${index}: ${count} sources · O expand/collapse originals · PgUp/PgDn scroll`,
     condensationCardSources: (ids) => zh ? `来源单元：${ids.length ? ids.join("、") : "无"}` : `Source units: ${ids.length ? ids.join(", ") : "none"}`,

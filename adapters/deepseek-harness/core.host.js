@@ -527,6 +527,9 @@ export function buildProjection(identity, events, row, options = {}) {
   return {
     ...normalized,
     sourceEvents: Array.isArray(events) ? events : [],
+    activeSurfaceSeqs: Array.isArray(options.activeSurfaceSeqs)
+      ? options.activeSurfaceSeqs.map(Number).filter(value => Number.isSafeInteger(value) && value >= 0)
+      : undefined,
     events: viewEvents,
     replacementEvents: matched,
     activeReplacementEvents,

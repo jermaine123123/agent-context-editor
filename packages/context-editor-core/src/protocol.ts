@@ -161,6 +161,12 @@ export interface ContextMutationResult {
   readonly conflict?: boolean
   readonly operationId?: string
   readonly eventId?: string
+  /** The operation is still valid, but native compaction requires a checkpoint return first. */
+  readonly restoreRequired?: boolean
+  readonly restoreMode?: 'inline' | 'checkpoint' | 'unavailable'
+  readonly checkpointCompactionId?: string
+  readonly checkpointSeq?: number
+  readonly checkpointEntryId?: string
   readonly snapshot: ContextEditorSnapshot
 }
 
