@@ -966,7 +966,17 @@ export class ContextEditorHost extends TypertRemoteService {
 
   async inspect(sessionId) {
     if (!sessionId) throw new Error('CONTEXT_EDITOR_SESSION_REQUIRED')
-    return this.ctx.sessionPersistence.inspect(sessionId)
+    const persistence = this.ctx.sessionPersistence
+    if (typeof persistence.inspect === 'function') return persistence.inspect(sessionId)
+    // Newer hosts expose reads through a non-owning handle. Always release it,
+    // including when validation or log reading fails; never claim write access.
+    const handle = await persistence.open(sessionId, 'read')
+    try {
+      const { events } = await handle.read()
+      return { meta: handle.header, inheritedEventCount: handle.inheritedEventCount, events }
+    } finally {
+      await handle.close()
+    }
   }
 
   rowFor(identity) {

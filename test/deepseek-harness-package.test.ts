@@ -14,7 +14,7 @@ describe('DeepSeek Harness installable bundle', () => {
       dsh?: { bundle?: { patch?: string }; client?: { platform?: string } }
     }
     expect(manifest.name).toBe('context-editor-deepseek-harness')
-    expect(manifest.version).toBe('0.4.1')
+    expect(manifest.version).toBe('0.4.2')
     expect(manifest.dsh?.bundle?.patch).toBe('./cordis.patch.yml')
     expect(manifest.dsh?.client?.platform).toBe('web')
     expect(readFileSync(resolve(root, 'cordis.patch.yml'), 'utf8')).toContain('id: context-editor')
@@ -44,6 +44,17 @@ describe('DeepSeek Harness installable bundle', () => {
     expect(clientEntry).toContain("export const inject = ['remote']")
     expect(clientEntry).toContain("ctx.inject(['slots', 'remote', 'remote.contextEditor']")
     expect(clientEntry).not.toContain('export default apply')
+  })
+
+  it('provides callable codecs for new gateways and preserves rc.8 schema consumers', () => {
+    const request = { sessionId: 'compat-session', pageSize: 20 }
+    for (const descriptor of descriptors) {
+      for (const codec of [descriptor.parameters[0].codec, descriptor.result]) {
+        const current = codec.create()
+        expect(current.parse(request)).toEqual(request)
+        expect((codec.schema as { parse(value: unknown): unknown }).parse(request)).toEqual(current.parse(request))
+      }
+    }
   })
 
   it('exports the direct Remote surface with context replacement methods', () => {

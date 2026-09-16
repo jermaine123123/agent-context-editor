@@ -35,13 +35,17 @@ export const descriptors = Object.freeze(methods.map(method => {
       codec: {
         mode: 'strict',
         typeSymbol: requestType,
+        // rc.8 reads schema; 0.1.6+ instantiates codecs through create().
         schema: z.unknown(),
+        create: () => z.unknown(),
       },
     }],
     result: {
       mode: 'strict',
       typeSymbol: resultType,
+      // rc.8 reads schema; 0.1.6+ instantiates codecs through create().
       schema: z.unknown(),
+      create: () => z.unknown(),
     },
   }
 }))

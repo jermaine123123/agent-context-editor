@@ -2002,13 +2002,15 @@ window.__ModuleLoader__.load({
     			codec: {
     				mode: "strict",
     				typeSymbol: requestType,
-    				schema: unknown()
+    				schema: unknown(),
+    				create: () => unknown()
     			}
     		}],
     		result: {
     			mode: "strict",
     			typeSymbol: resultType,
-    			schema: unknown()
+    			schema: unknown(),
+    			create: () => unknown()
     		}
     	};
     }));

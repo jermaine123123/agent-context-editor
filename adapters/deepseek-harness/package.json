@@ -1,6 +1,6 @@
 {
   "name": "context-editor-deepseek-harness",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Context Editor view and native context projection for DeepSeek Harness",
   "type": "module",
   "engines": { "node": ">=22.19.0" },

@@ -6,8 +6,8 @@ export interface ContextEditorInvocation {
   readonly namespace: 'contextEditor'
   readonly method: string
   readonly invocation: { readonly kind: 'direct' }
-  readonly parameters: readonly [{ readonly name: 'request'; readonly wire: 'request'; readonly source: 'json'; readonly codec: { readonly mode: 'strict'; readonly typeSymbol: string; readonly schema: unknown } }]
-  readonly result: { readonly mode: 'strict'; readonly typeSymbol: string; readonly schema: unknown }
+  readonly parameters: readonly [{ readonly name: 'request'; readonly wire: 'request'; readonly source: 'json'; readonly codec: { readonly mode: 'strict'; readonly typeSymbol: string; readonly schema: unknown; readonly create: () => { parse(value: unknown): unknown } } }]
+  readonly result: { readonly mode: 'strict'; readonly typeSymbol: string; readonly schema: unknown; readonly create: () => { parse(value: unknown): unknown } }
 }
 export declare const descriptors: readonly ContextEditorInvocation[]
 export declare const TYPERT: {
