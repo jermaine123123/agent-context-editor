@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
+import { resolve } from 'node:path'
 import { ContextEditorHost } from '../adapters/deepseek-harness/index.js'
 
 function fixture(modern: boolean) {
-  const header = { id: 'history-compat', createdAt: 123, cwd: 'D:/fixture' }
+  const header = { id: 'history-compat', createdAt: 123, cwd: resolve('fixture') }
   const events = [{ seq: 0, time: 123, type: 'assistant/message', surfaceOp: 'append', data: { turn: 1, message: {
     id: 'answer', role: 'assistant', source: { kind: 'model', provider: 'test', model: 'test-model' }, content: [{ type: 'text', text: 'Preserve the important configuration and result. '.repeat(80) }],
   } } }]

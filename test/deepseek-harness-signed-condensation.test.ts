@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
+import { resolve } from 'node:path'
 import { Session } from '@deepseek-ai/dsh-session'
 import { ContextEditorHost } from '../adapters/deepseek-harness/index.js'
 
 function fixture() {
-  const header = { version: 0, id: 'signed-condensation', createdAt: 10, cwd: 'D:/fixture' }
+  const header = { version: 0, id: 'signed-condensation', createdAt: 10, cwd: resolve('fixture') }
   const events: any[] = [
     { seq: 0, time: 10, type: 'assistant/message', surfaceOp: 'append', data: { turn: 1, message: {
       id: 'assistant-original', role: 'assistant', source: { kind: 'model', provider: 'test', model: 'test-model', replayState: {
