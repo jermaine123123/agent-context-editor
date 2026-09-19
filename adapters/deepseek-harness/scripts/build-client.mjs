@@ -45,7 +45,7 @@ const wrapped = [
   '  factory: (require) => {',
   '    var module = { exports: {} };',
   '    var exports = module.exports;',
-  chunk.code.split('\n').map(line => `    ${line}`).join('\n'),
+  chunk.code.split('\n').map(line => line.length === 0 ? '' : `\t\t${line}`).join('\n'),
   '    return module.exports;',
   '  },',
   '});',

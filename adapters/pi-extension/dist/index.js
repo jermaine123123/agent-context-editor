@@ -1,5 +1,5 @@
 /* GENERATED FILE - rebuild with npm run build:pi. */
-/* Canonical Core source digest: 5fbf9432539f4794c97cdb65a5ebb8564a14e376cecb530b5ca01c2058998e7b */
+/* Canonical Core source digest: a5863cd4f2fb50293cef118d75dab72084150dcb132f7813ec1f84326b7bbbb9 */
 import { sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
 import { decodeKittyPrintable, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -293,7 +293,7 @@ function selectAssociatedReasoningTargets(records, answerUnitId, projectionState
 		disabledReason
 	};
 }
-function selectProjectionTargets(records, unitIds, recordIds) {
+function selectProjectionTargets(records, unitIds, recordIds, options = {}) {
 	const units = records.flatMap((record) => record.units.map((unit) => ({
 		record,
 		unit
@@ -313,7 +313,7 @@ function selectProjectionTargets(records, unitIds, recordIds) {
 	const selectedTurns = new Set(selectedUnits.flatMap((unit) => unit.atoms.map((atom) => atom.turnId)));
 	const selectedTool = selectedUnits.some((unit) => unit.kind === "tool");
 	const selectedSignedReasoning = selectedUnits.some(unitHasSignedReasoning);
-	if (selectedTool || selectedSignedReasoning) {
+	if (selectedTool && !options.preserveSignedReasoning || selectedSignedReasoning) {
 		const hasSignedReasoning = units.some((item) => unitHasSignedReasoning(item.unit) && item.unit.atoms.some((atom) => selectedTurns.has(atom.turnId)));
 		const hasTool = units.some((item) => item.unit.kind === "tool" && item.unit.atoms.some((atom) => selectedTurns.has(atom.turnId)));
 		if (hasSignedReasoning && hasTool) {

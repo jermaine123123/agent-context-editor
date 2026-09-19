@@ -294,6 +294,7 @@ export function selectProjectionTargets(
   records: readonly ContextRecord[],
   unitIds?: readonly string[],
   recordIds?: readonly string[],
+  options: { preserveSignedReasoning?: boolean } = {},
 ): ProjectionSelection {
   const units = records.flatMap((record) => record.units.map((unit) => ({ record, unit })))
   const requested = new Set<string>()
@@ -311,7 +312,7 @@ export function selectProjectionTargets(
   const selectedTurns = new Set(selectedUnits.flatMap((unit) => unit.atoms.map((atom) => atom.turnId)))
   const selectedTool = selectedUnits.some((unit) => unit.kind === 'tool')
   const selectedSignedReasoning = selectedUnits.some(unitHasSignedReasoning)
-  if (selectedTool || selectedSignedReasoning) {
+  if ((selectedTool && !options.preserveSignedReasoning) || selectedSignedReasoning) {
     const hasSignedReasoning = units.some((item) => unitHasSignedReasoning(item.unit) && item.unit.atoms.some((atom) => selectedTurns.has(atom.turnId)))
     const hasTool = units.some((item) => item.unit.kind === 'tool' && item.unit.atoms.some((atom) => selectedTurns.has(atom.turnId)))
     if (hasSignedReasoning && hasTool) {

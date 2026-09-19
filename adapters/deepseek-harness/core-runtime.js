@@ -1,6 +1,6 @@
 /*
  * GENERATED FILE - do not edit directly.
- * Canonical Core source digest: d467cb89a9c9c6860c58d815d8cd3993be5b6a3869a9e4a80d3ecd3ed2fc8d3f
+ * Canonical Core source digest: fbe593c146890700434ebd0da5029d5337677db1fa8663cc2495ad358a9f7acc
  * Rebuild with: npm run build:deepseek
  */
 //#region packages/context-editor-core/src/projection.ts
@@ -254,7 +254,7 @@ function selectAssociatedReasoningTargets(records, answerUnitId, projectionState
 		disabledReason
 	};
 }
-function selectProjectionTargets(records, unitIds, recordIds) {
+function selectProjectionTargets(records, unitIds, recordIds, options = {}) {
 	const units = records.flatMap((record) => record.units.map((unit) => ({
 		record,
 		unit
@@ -274,7 +274,7 @@ function selectProjectionTargets(records, unitIds, recordIds) {
 	const selectedTurns = new Set(selectedUnits.flatMap((unit) => unit.atoms.map((atom) => atom.turnId)));
 	const selectedTool = selectedUnits.some((unit) => unit.kind === "tool");
 	const selectedSignedReasoning = selectedUnits.some(unitHasSignedReasoning);
-	if (selectedTool || selectedSignedReasoning) {
+	if (selectedTool && !options.preserveSignedReasoning || selectedSignedReasoning) {
 		const hasSignedReasoning = units.some((item) => unitHasSignedReasoning(item.unit) && item.unit.atoms.some((atom) => selectedTurns.has(atom.turnId)));
 		const hasTool = units.some((item) => item.unit.kind === "tool" && item.unit.atoms.some((atom) => selectedTurns.has(atom.turnId)));
 		if (hasSignedReasoning && hasTool) {

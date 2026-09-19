@@ -26,7 +26,42 @@ export type ContextReplacementDisabledReason =
   | 'projection-unavailable'
   | 'invalid-target'
   | 'condensation-active'
+  | 'host-surface-contract'
 
+export type CompatibilityState = 'available' | 'unsupported' | 'self-test-passed' | 'formally-accepted' | 'unknown'
+export type CompatibilityVerificationLevel = 'interface-recognized' | 'isolated-self-test' | 'formal-acceptance' | 'none'
+export interface HostIdentity {
+  host: string
+  version?: string
+  components: Record<string, string>
+  buildFingerprint: string
+  pluginVersion: string
+  pluginBuildFingerprint?: string
+  adapter: string
+  runtime: string
+  storageBackend: string
+}
+export interface CompatibilityFeatureResult {
+  available: boolean
+  status: CompatibilityState
+  verificationLevel: CompatibilityVerificationLevel
+  reason?: string
+  scope?: string
+  evidence?: string[]
+}
+export interface CompatibilityReport {
+  schemaVersion: 1
+  hostIdentity: HostIdentity
+  checkedAt: string
+  features: Record<string, CompatibilityFeatureResult>
+  selfTest?: {
+    status: 'passed' | 'partial' | 'failed'
+    usedSyntheticData: true
+    persistenceTested: false
+    cases: Record<string, boolean>
+    diagnostics: string[]
+  }
+}
 /** The revision type is string in Pi, while small in-memory hosts often use a number. */
 export type ContextRevision = string | number
 
@@ -164,6 +199,9 @@ export interface ContextEditableUnit {
 
 export interface ContextEditorSnapshot {
   revision: string
+  contextRevision?: string
+  historyCursor?: string
+  compatibility?: CompatibilityReport
   sourceLeafId: string | null
   records: Array<Pick<ContextRecord, 'id' | 'kind' | 'viewState' | 'mutable' | 'entryId' | 'entryIds' | 'anchorEntryId' | 'toolCallId'> & { projectionState?: ContextEditableUnitProjectionState; units: Array<Pick<ContextEditableUnit, 'id' | 'recordId' | 'kind' | 'atomIds' | 'viewState' | 'mutable'> & { projectionState?: ContextEditableUnitProjectionState; effectiveText?: string; replacementState?: ContextReplacementProjectionState; replacementSupported?: boolean; replacementDisabledReason?: ContextReplacementDisabledReason; canRestoreReplacement?: boolean; canUndoReplacement?: boolean; associatedReasoningUnitIds?: string[] }> }>
   canUndo: boolean
@@ -179,6 +217,8 @@ export interface ContextEditorSnapshot {
     contextExclusion: boolean
     contextReplacement: boolean
     contextCondensation?: boolean
+    contextReplacementScope?: string
+    nativeCompaction?: boolean
   }
   /** Applied AI condensation summaries currently visible in the model projection. */
   condensations?: ContextCondensationSnapshot[]

@@ -1,4 +1,5 @@
 export const HOST_ID: string
+export function parseContextEditorSurfaceMarker(value: unknown): { sessionId: string; rootEventSeq: number; operationId: string } | undefined
 export const VIEW_SCHEMA_VERSION: number
 export const STORAGE_SCHEMA_VERSION: number
 export const RECORD_KINDS: readonly string[]
@@ -65,6 +66,7 @@ export interface ContextEditableUnit {
   canRestoreReplacement: boolean
   canUndoReplacement: boolean
   associatedReasoningUnitIds?: string[]
+  operations?: Partial<Record<'edit' | 'exclude' | 'condense' | 'restore', { available: boolean; reason?: string }>>
 }
 
 export type ContextReplacementProjectionState = 'original' | 'replaced' | 'unavailable'
@@ -140,7 +142,7 @@ export function sameSessionLifecycle(left: unknown, right: unknown): boolean
 export function normalizeSessionEvents(session: unknown, events: readonly unknown[]): { identity: SessionIdentity; atoms: ContextAtom[]; sourceRevision: number }
 export function projectRecords(atoms: readonly ContextAtom[], states?: ReadonlyMap<string, string>, projectionStates?: ReadonlyMap<string, ContextEditableUnitProjectionState | 'unavailable'>, replacementStates?: ReadonlyMap<string, unknown>): ContextRecord[]
 export function selectAssociatedReasoningTargets(records: readonly ContextRecord[], answerUnitId: string, projectionStates?: ReadonlyMap<string, string>): unknown
-export function selectProjectionTargets(records: readonly ContextRecord[], unitIds?: readonly string[], recordIds?: readonly string[]): { requestedUnitIds: string[]; effectiveUnitIds: string[]; autoExpandedUnitIds: string[]; requestedAtomIds: string[]; effectiveAtomIds: string[]; unavailableUnitIds: string[]; touchesRecentTurn: boolean }
+export function selectProjectionTargets(records: readonly ContextRecord[], unitIds?: readonly string[], recordIds?: readonly string[], options?: { preserveSignedReasoning?: boolean }): { requestedUnitIds: string[]; effectiveUnitIds: string[]; autoExpandedUnitIds: string[]; requestedAtomIds: string[]; effectiveAtomIds: string[]; unavailableUnitIds: string[]; touchesRecentTurn: boolean }
 export function atomMatchesSearchScope(kind: string, scope?: ContextSearchScope): boolean
 export function searchRecords(records: readonly ContextRecord[], query: string, enabledKinds?: readonly string[], scope?: ContextSearchScope, enabledUnitKinds?: readonly ContextEditableUnitKind[] | ReadonlySet<ContextEditableUnitKind>): Array<{
   index: number
@@ -179,7 +181,7 @@ export function buildViewEvent(options: {
   now?: Date
   baseRevision?: string
 }): ViewEvent
-export function buildProjection(identity: unknown, events: readonly unknown[], row?: { session?: unknown; schemaVersion?: number; storageVersion?: number; events?: readonly unknown[]; replacementEvents?: readonly ContextReplacementEventV1[] }, options?: { activeSurfaceSeqs?: readonly number[]; preparedReplacementEvents?: readonly ContextReplacementEventV1[]; projectionAvailable?: boolean }): {
+export function buildProjection(identity: unknown, events: readonly unknown[], row?: { session?: unknown; schemaVersion?: number; storageVersion?: number; events?: readonly unknown[]; replacementEvents?: readonly ContextReplacementEventV1[] }, options?: { activeSurfaceSeqs?: readonly number[]; preparedReplacementEvents?: readonly ContextReplacementEventV1[]; committedReplacementEvents?: readonly ContextReplacementEventV1[]; requestOverlays?: readonly { rootEventSeq: number; mode: 'remove' | 'replace'; message?: unknown }[]; projectionAvailable?: boolean }): {
   identity: SessionIdentity
   atoms: ContextAtom[]
   sourceRevision: number
@@ -281,7 +283,12 @@ export interface CondensationEvent {
 export interface CondensationValidation { ok: boolean; summary: string; metrics: CondensationMetrics; warnings: string[]; error?: 'empty-summary' | 'truncated-summary' | 'not-smaller' }
 export function condensationUnitText(unit: ContextEditableUnit, projectionStates?: ReadonlyMap<string, ContextEditableUnitProjectionState | 'unavailable'>): string
 export function selectCondensationRange(records: readonly ContextRecord[], requestedUnitIds: readonly string[], projectionStates?: ReadonlyMap<string, ContextEditableUnitProjectionState | 'unavailable'>, options?: { expandRelated?: boolean }): CondensationRange
+export function selectCheckpointCondensationRange(projection: { records: readonly ContextRecord[]; activeSurfaceSeqs?: readonly number[]; projectionStates?: ReadonlyMap<string, ContextEditableUnitProjectionState | 'unavailable'> }, requestedUnitIds: readonly string[]): CondensationRange
 export function validateCondensationSummary(summary: string, beforeTokens: number, options?: { summaryTokens?: number; truncated?: boolean }): CondensationValidation
 export function frameCondensationSummary(summary: string): string
 export function estimateCondensationTokens(value: string): number
 export function deriveCondensationCoverage(sourceRootSeqs: readonly number[], nativeCompactions: readonly ContextNativeCompactionRef[]): ContextCondensationCoverage
+
+export function projectedMessageSource(original: { source?: unknown; content: readonly unknown[] }, content: readonly unknown[]): Record<string, unknown>
+
+export function canCondenseReasoningBlock(message: unknown, blockIndex: number): boolean

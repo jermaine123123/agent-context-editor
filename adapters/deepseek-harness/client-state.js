@@ -51,6 +51,82 @@ export function nextSearchIndex(currentIndex, delta, total) {
   return (current + delta + total) % total
 }
 
+export async function listContextRecordPage(call, cursor, expectedRevision, pageSize = 100) {
+  const page = await call('listRecords', {
+    pageSize,
+    ...(cursor === undefined || cursor === null ? {} : { cursor }),
+  })
+  if (expectedRevision !== undefined && String(page.revision) !== String(expectedRevision)) {
+    throw new Error('CONTEXT_EDITOR_HISTORY_CHANGED_DURING_READ')
+  }
+  const startIndex = Math.max(0, Number.parseInt(String(cursor ?? 0), 10) || 0)
+  return {
+    ...page,
+    records: (page.records ?? []).map((record, index) => record && typeof record === 'object'
+      ? { ...record, historyIndex: Number.isSafeInteger(record.historyIndex) ? record.historyIndex : startIndex + index }
+      : record),
+  }
+}
+
+export async function loadContextRecord(call, recordId, expectedRevision) {
+  let value
+  try {
+    value = await call('getRecord', { recordId })
+  } catch (error) {
+    if (/Remote method ['"].*getRecord.*unavailable/iu.test(String(error?.message ?? error))) return null
+    throw error
+  }
+  if (value?.record == null) return { found: false, record: null, total: value?.total ?? 0 }
+  if (typeof value.revision !== 'string' || !Number.isSafeInteger(value.recordIndex)) return null
+  if (expectedRevision !== undefined && String(value.revision) !== String(expectedRevision)) {
+    throw new Error('CONTEXT_EDITOR_HISTORY_CHANGED_DURING_READ')
+  }
+  return {
+    found: true,
+    record: { ...value.record, historyIndex: Number.isSafeInteger(value.record.historyIndex) ? value.record.historyIndex : value.recordIndex },
+    recordIndex: value.recordIndex,
+    total: value.total ?? 0,
+    revision: value.revision,
+  }
+}
+
+export async function loadInitialContextRecords(call, attempt = 0) {
+  const snapshot = await call('getSnapshot', { includeRecords: false })
+  // Older plugin builds ignore includeRecords and return a complete snapshot.
+  if (snapshot?.recordsIncluded !== false && Array.isArray(snapshot?.records)) {
+    return { snapshot, records: snapshot.records, nextCursor: null, total: snapshot.records.length }
+  }
+  try {
+    const page = await listContextRecordPage(call, undefined, snapshot.revision)
+    return {
+      snapshot,
+      records: page.records ?? [],
+      nextCursor: page.nextCursor ?? null,
+      total: page.total ?? snapshot.recordCount ?? 0,
+    }
+  } catch (error) {
+    if (error?.message === 'CONTEXT_EDITOR_HISTORY_CHANGED_DURING_READ' && attempt < 2) {
+      return loadInitialContextRecords(call, attempt + 1)
+    }
+    throw error
+  }
+}
+
+export async function loadContextRecordsThrough(call, recordId, cursor, expectedRevision, initialRecords = []) {
+  const records = [...initialRecords]
+  let nextCursor = cursor ?? null
+  let total = records.length
+  for (let page = 0; nextCursor !== null && !records.some(record => record.id === recordId); page += 1) {
+    if (page >= 100_000) throw new Error('CONTEXT_EDITOR_HISTORY_PAGE_LIMIT')
+    const value = await listContextRecordPage(call, nextCursor, expectedRevision)
+    records.push(...(value.records ?? []))
+    nextCursor = value.nextCursor ?? null
+    total = value.total ?? total
+    if (!(value.records ?? []).length && nextCursor !== null) throw new Error('CONTEXT_EDITOR_HISTORY_PAGE_EMPTY')
+  }
+  return { records, nextCursor, total, found: records.some(record => record.id === recordId) }
+}
+
 function finiteNumber(value, fallback = 0) {
   return Number.isFinite(Number(value)) ? Number(value) : fallback
 }

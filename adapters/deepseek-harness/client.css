@@ -3,12 +3,15 @@
   flex-direction: column;
   gap: 0.65rem;
   height: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
   min-height: 0;
   padding: 0.85rem 1rem 1.25rem;
   color: var(--dsh-fg, var(--foreground, inherit));
 }
 
 .context-editor__controls {
+  flex-shrink: 0;
   position: sticky;
   top: 0;
   z-index: 10;
@@ -22,7 +25,8 @@
 
 .context-editor__toolbar,
 .context-editor__searchbar,
-.context-editor__actions {
+.context-editor__actions,
+.context-editor__compatibility {
   display: flex;
   align-items: center;
   gap: 0.45rem;
@@ -34,6 +38,7 @@
 .context-editor__subfilters { display: inline-flex; gap: 0.25rem; padding-top: 0.1rem; }
 .context-editor__filter,
 .context-editor__actions button,
+.context-editor__compatibility button,
 .context-editor__searchbar button,
 .context-editor__row button {
   border: 1px solid var(--dsh-border, var(--border, #d7dbe2));
@@ -50,10 +55,13 @@
 .context-editor__toggle { display: inline-flex; align-items: center; gap: 0.3rem; margin-left: auto; }
 .context-editor__searchbar input { flex: 1 1 20rem; min-width: 12rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.38rem 0.55rem; background: var(--dsh-input-bg, transparent); color: inherit; }
 .context-editor__search-summary { color: var(--dsh-muted, #687386); font-size: 0.82rem; }
+.context-editor__compatibility { align-items: flex-start; color: var(--dsh-muted, #687386); font-size: 0.78rem; }
+.context-editor__compatibility span:first-child { flex: 1 1 28rem; overflow-wrap: anywhere; }
 .context-editor__actions { padding-bottom: 0.15rem; }
 .context-editor__running { color: var(--dsh-muted, #687386); font-size: 0.82rem; }
 .context-editor__error { color: var(--dsh-danger, #b42318); font-size: 0.82rem; }
-.context-editor__list { overflow: visible; min-height: 0; display: flex; flex-direction: column; gap: 0.5rem; padding-right: 0.2rem; }
+.context-editor__list { overflow: auto; flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; gap: 0.5rem; padding-right: 0.2rem; padding-bottom: 12rem; }
+.context-editor__list > * { flex-shrink: 0; }
 .context-editor__row { display: flex; align-items: flex-start; gap: 0.6rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.55rem; padding: 0.65rem; background: var(--dsh-card-bg, transparent); }
 .context-editor__row.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }
 .context-editor__row.is-hidden { opacity: 0.82; }
@@ -75,7 +83,7 @@
 .context-editor__unit { border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; padding: 0.45rem 0.55rem; }
 .context-editor__unit.is-focused { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 1px; }
 .context-editor__unit.is-hidden { opacity: 0.82; }
-.context-editor__unit-header { display: flex; align-items: center; gap: 0.45rem; min-height: 1.65rem; color: var(--dsh-muted, #687386); font-size: 0.78rem; }
+.context-editor__unit-header { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; min-height: 1.65rem; color: var(--dsh-muted, #687386); font-size: 0.78rem; }
 .context-editor__unit-select { display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer; }
 .context-editor__unit-kind { font-weight: 600; }
 .context-editor__unit-header button { margin-left: auto; }
@@ -88,6 +96,8 @@
 .context-editor__tool-name { font-weight: 600; }
 .context-editor__hit { border-radius: 0.18rem; background: var(--dsh-highlight, #ffe28a); color: inherit; padding: 0 0.08rem; }
 .context-editor__state { color: var(--dsh-muted, #687386); padding: 2rem 0; text-align: center; }
+.context-editor__history-load-more { align-self: center; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; background: var(--dsh-control-bg, var(--background, transparent)); color: inherit; padding: 0.4rem 0.8rem; cursor: pointer; }
+.context-editor__history-gap { padding: 8px 12px; color: var(--dsh-muted, var(--muted, #7a7a7a)); text-align: center; font-size: 0.82em; border-block: 1px dashed var(--dsh-border, var(--border, #d7dbe2)); }
 .context-editor__empty { color: var(--dsh-muted, #687386); }
 .context-editor__notice { color: var(--dsh-warning, #996b00); font-size: 0.82rem; }
 .context-editor__dialog-backdrop {
@@ -147,6 +157,7 @@
 .context-editor__condensation-risks { display: flex; gap: 0.65rem; flex-wrap: wrap; color: var(--dsh-muted, #687386); font-size: 0.8rem; }
 .context-editor__condensation-risks { color: var(--dsh-warning, #996b00); }
 .context-editor__condensation-source { border-top: 1px solid var(--dsh-border, var(--border, #d7dbe2)); padding-top: 0.4rem; }
+.context-editor__condensation-expansion ul { max-height: 8rem; overflow: auto; overflow-wrap: anywhere; margin: 0.4rem 0; }
 .context-editor__condensation-source article { margin-top: 0.45rem; }
 .context-editor__condensation-source pre { margin: 0.25rem 0 0; max-height: 8rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
 
@@ -160,3 +171,10 @@
 .context-editor__replacement-link-hint { color: var(--dsh-muted, #687386); font-size: 0.75rem; }
 .context-editor__replacement-impact { display: grid; gap: 0.3rem; padding: 0.6rem; border: 1px solid var(--dsh-border, var(--border, #d7dbe2)); border-radius: 0.45rem; font-size: 0.82rem; }
 .context-editor__replacement-impact.is-error { border-color: var(--dsh-danger, #b42318); }
+.context-editor__more, .context-editor__details, .context-editor__restriction, .context-editor__recovery-list { font-size: .8rem; min-width: 0; overflow-wrap: anywhere; }
+.context-editor summary { cursor: pointer; color: var(--dsh-muted, #687386); }
+.context-editor summary:focus-visible { outline: 2px solid var(--dsh-accent, #7190e8); outline-offset: 2px; }
+.context-editor__restriction[open] { flex-basis: 100%; }
+.context-editor__compatibility { padding: .45rem; max-height: 16rem; overflow: auto; }
+.context-editor__notice { display: inline-flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+.context-editor__recovery-list > article { margin-top: .5rem; }

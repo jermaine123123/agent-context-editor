@@ -14,6 +14,10 @@ import {
   CLIENT_KINDS,
   CLIENT_UNIT_KINDS,
   computeCenteredScrollTop,
+  listContextRecordPage,
+  loadContextRecord,
+  loadContextRecordsThrough,
+  loadInitialContextRecords,
   migrateEnabledKindsToUnits,
   nextSearchIndex,
   normalizeEnabledUnitKinds,
@@ -29,6 +33,44 @@ const ALL_UNIT_KINDS = CLIENT_UNIT_KINDS
 const condensationModelKey = model => `${model?.provider ?? ''}:${model?.id ?? ''}`
 const PREFS_KEY_V1 = 'dsh-context-editor:prefs:v1'
 const PREFS_KEY_V2 = 'dsh-context-editor:prefs:v2'
+const PENDING_REPLACEMENT_KEY = 'dsh-context-editor:pending-replacement:v1'
+
+function pendingReplacementStorageKey(sessionId) {
+  return `${PENDING_REPLACEMENT_KEY}:${encodeURIComponent(String(sessionId))}`
+}
+
+function readPendingReplacement(sessionId) {
+  try {
+    const value = JSON.parse(globalThis.localStorage?.getItem(pendingReplacementStorageKey(sessionId)) ?? 'null')
+    if (!value || typeof value.operationId !== 'string' || typeof value.unitId !== 'string'
+      || !['replace', 'restore', 'undo', 'exclude'].includes(value.action)) return null
+    return { operationId: value.operationId, unitId: value.unitId, action: value.action }
+  } catch {
+    return null
+  }
+}
+
+function writePendingReplacement(sessionId, value) {
+  try {
+    globalThis.localStorage?.setItem(pendingReplacementStorageKey(sessionId), JSON.stringify({
+      operationId: String(value.operationId),
+      unitId: String(value.unitId),
+      action: value.action,
+    }))
+  } catch {
+    // Storage-disabled pages still keep the operation in the live controller.
+  }
+}
+
+function clearPendingReplacement(sessionId, operationId) {
+  try {
+    const key = pendingReplacementStorageKey(sessionId)
+    const current = readPendingReplacement(sessionId)
+    if (operationId === undefined || current?.operationId === String(operationId)) globalThis.localStorage?.removeItem(key)
+  } catch {
+    // Storage-disabled pages have no persisted client operation to clear.
+  }
+}
 
 function unwrap(value) {
   if (value && value.ok === false && value.error !== undefined) {
@@ -224,12 +266,26 @@ export class ContextEditorController {
     this.remote = remote
     this.sessionId = String(sessionId)
     this.disposed = false
-    this.sequence = 0
+    this.listeners = new Set()
   }
 
   dispose() {
     this.disposed = true
-    this.sequence += 1
+    this.listeners.clear()
+  }
+
+  subscribe(listener) {
+    if (typeof listener !== 'function') throw new TypeError('Context Editor listener must be a function')
+    this.listeners.add(listener)
+    return () => this.listeners.delete(listener)
+  }
+
+  async callMutation(method, payload = {}) {
+    const value = await this.call(method, payload)
+    if (value?.ok !== false && value?.conflict !== true) {
+      for (const listener of [...this.listeners]) listener({ method, value })
+    }
+    return value
   }
 
   async call(method, payload = {}) {
@@ -244,25 +300,20 @@ export class ContextEditorController {
     return unwrap(response)
   }
 
-  async load() {
-    const ticket = ++this.sequence
-    const snapshot = await this.call('getSnapshot')
-    const records = []
-    let cursor = undefined
-    for (let page = 0; page < 512; page += 1) {
-      const value = await this.call('listRecords', { pageSize: 100, ...(cursor === undefined ? {} : { cursor }) })
-      if (value.revision !== snapshot.revision) {
-        // The source log or sidecar changed between the snapshot and page
-        // read; restart once from the new revision rather than mixing pages.
-        if (ticket !== this.sequence) return null
-        return this.load()
-      }
-      records.push(...(value.records ?? []))
-      if (value.nextCursor === null || value.nextCursor === undefined) break
-      cursor = value.nextCursor
-    }
-    if (ticket !== this.sequence) return null
-    return { snapshot, records }
+  async load(attempt = 0) {
+    return loadInitialContextRecords((method, payload) => this.call(method, payload), attempt)
+  }
+
+  async loadRecordsPage(cursor, expectedRevision) {
+    return listContextRecordPage((method, payload) => this.call(method, payload), cursor, expectedRevision)
+  }
+
+  async loadRecord(recordId, expectedRevision) {
+    return loadContextRecord((method, payload) => this.call(method, payload), recordId, expectedRevision)
+  }
+
+  async loadUntilRecord(recordId, cursor, expectedRevision, initialRecords = []) {
+    return loadContextRecordsThrough((method, payload) => this.call(method, payload), recordId, cursor, expectedRevision, initialRecords)
   }
 
   async search(query, enabledKinds, scope = 'dialogue', enabledUnitKinds) {
@@ -279,8 +330,12 @@ export class ContextEditorController {
     return this.call('getSearchMatch', { searchId, index, revision })
   }
 
+  async getOperation(operationId) {
+    return this.call('getOperation', { operationId })
+  }
+
   async commit(action, baseRevision, unitIds) {
-    return this.call('commitView', {
+    return this.callMutation('commitView', {
       action,
       baseRevision,
       ...(unitIds === undefined ? {} : { unitIds }),
@@ -288,7 +343,7 @@ export class ContextEditorController {
   }
 
   async undo(baseRevision) {
-    return this.call('undoView', { baseRevision })
+    return this.callMutation('undoView', { baseRevision })
   }
 
   async previewContext(action, expectedRevision, unitIds, options = {}) {
@@ -301,10 +356,11 @@ export class ContextEditorController {
   }
 
   async commitContext(operationId, action, expectedRevision, unitIds, options = {}) {
-    return this.call('commitContext', {
+    return this.callMutation('commitContext', {
       operationId,
       action,
       expectedRevision,
+      ...(options.selectionFingerprint ? { selectionFingerprint: options.selectionFingerprint } : {}),
       ...(unitIds === undefined ? {} : { unitIds }),
       ...(options.condensationOperationId ? { condensationOperationId: options.condensationOperationId } : {}),
     })
@@ -318,6 +374,7 @@ export class ContextEditorController {
     return this.call('previewContext', {
       action: 'condense',
       unitIds,
+      baseContextRevision: baseRevision,
       baseRevision,
       ...(options.operationId ? { operationId: options.operationId } : {}),
       ...(options.provider ? { provider: options.provider } : {}),
@@ -332,42 +389,60 @@ export class ContextEditorController {
   }
 
   async commitCondensation(proposal, summary) {
-    return this.call('commitContext', {
+    return this.callMutation('commitContext', {
       action: 'condense',
       operationId: proposal.operationId,
-      baseRevision: proposal.baseRevision,
+      baseContextRevision: proposal.baseContextRevision ?? proposal.baseRevision,
       unitIds: proposal.requestedUnitIds,
       summary,
     })
   }
 
   async restoreCondensation(operationId, baseRevision) {
-    return this.call('commitContext', {
+    return this.callMutation('commitContext', {
       action: 'restore-condensation',
       operationId,
       baseRevision,
     })
   }
 
+  async previewRecovery(request) {
+    return this.call('previewRecovery', request)
+  }
+
+  async createRecoveryBranch(request) {
+    return this.callMutation('createRecoveryBranch', request)
+  }
+
   replacementOperationId(action, unitId) {
     return `context-replacement-${action}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}-${String(unitId).slice(-12)}`
   }
 
-  async previewReplacement(unitId, baseRevision, text, excludeAssociatedReasoning = false) {
-    return this.call('previewReplacement', { unitId, baseRevision, text, excludeAssociatedReasoning })
+  async previewReplacement(unitId, baseContextRevision, text, excludeAssociatedReasoning = false) {
+    return this.call('previewReplacement', { unitId, baseContextRevision, baseRevision: baseContextRevision, text, excludeAssociatedReasoning })
   }
 
-  async commitReplacement(unitId, baseRevision, text, options = {}) {
+  async commitReplacement(unitId, baseContextRevision, text, options = {}) {
     const operationId = options.operationId ?? this.replacementOperationId('replace', unitId)
-    return this.call('commitReplacement', { operationId, unitId, baseRevision, text, ...(options.excludeAssociatedReasoning ? { excludeAssociatedReasoning: true } : {}), ...(options.confirmedUnitIds?.length ? { confirmedUnitIds: options.confirmedUnitIds } : {}) })
+    return this.callMutation('commitReplacement', { operationId, unitId, baseContextRevision, baseRevision: baseContextRevision, text, ...(options.excludeAssociatedReasoning ? { excludeAssociatedReasoning: true } : {}), ...(options.confirmedUnitIds?.length ? { confirmedUnitIds: options.confirmedUnitIds } : {}) })
   }
 
-  async restoreReplacement(unitId, baseRevision) {
-    return this.call('restoreReplacement', { operationId: this.replacementOperationId('restore', unitId), unitId, baseRevision })
+  async restoreReplacement(unitId, baseContextRevision, options = {}) {
+    const operationId = options.operationId ?? this.replacementOperationId('restore', unitId)
+    return this.callMutation('restoreReplacement', { operationId, unitId, baseContextRevision, baseRevision: baseContextRevision })
   }
 
-  async undoReplacement(unitId, baseRevision) {
-    return this.call('undoReplacement', { operationId: this.replacementOperationId('undo', unitId), unitId, baseRevision })
+  async undoReplacement(unitId, baseContextRevision, options = {}) {
+    const operationId = options.operationId ?? this.replacementOperationId('undo', unitId)
+    return this.callMutation('undoReplacement', { operationId, unitId, baseContextRevision, baseRevision: baseContextRevision })
+  }
+
+  async getCompatibility() {
+    return this.call('getCompatibility')
+  }
+
+  async runCompatibilityCheck() {
+    return this.call('runCompatibilityCheck')
   }
 }
 
@@ -413,7 +488,7 @@ function UnitBody({ unit, match, text, showOriginal = false }) {
 
 function EditDialog({ unit, initialText, text, onCancel, onSave }) {
   const [value, setValue] = useState(initialText)
-  const [linkReasoning, setLinkReasoning] = useState(unit.kind === 'answer' && (unit.associatedReasoningUnitIds?.length ?? 0) > 0)
+  const [linkReasoning, setLinkReasoning] = useState(false)
   const [impact, setImpact] = useState(null)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
@@ -421,7 +496,7 @@ function EditDialog({ unit, initialText, text, onCancel, onSave }) {
 
   useEffect(() => {
     setValue(initialText)
-    setLinkReasoning(unit.kind === 'answer' && (unit.associatedReasoningUnitIds?.length ?? 0) > 0)
+    setLinkReasoning(false)
     setImpact(null)
     setError('')
     const timer = globalThis.setTimeout?.(() => textarea.current?.focus?.(), 0)
@@ -468,7 +543,7 @@ function EditDialog({ unit, initialText, text, onCancel, onSave }) {
     }
   }
 
-  const hasReasoning = unit.kind === 'answer' && (unit.associatedReasoningUnitIds?.length ?? 0) > 0
+  const hasReasoning = !unit.operations && unit.kind === 'answer' && (unit.associatedReasoningUnitIds?.length ?? 0) > 0
   return h('div', { className: 'context-editor__dialog-backdrop' },
     h('div', {
       className: 'context-editor__dialog',
@@ -518,7 +593,7 @@ function EditDialog({ unit, initialText, text, onCancel, onSave }) {
   )
 }
 
-function CondensationDialog({ proposal, text, onCancel, onRegenerate, onApply, saving, error }) {
+function CondensationDialog({ proposal, text, onCancel, onRegenerate, onApply, saving, generating, error }) {
   const [value, setValue] = useState(String(proposal?.summary ?? ''))
   const [expandRelated, setExpandRelated] = useState(proposal?.expandRelated === true)
   const scopeChanged = expandRelated !== (proposal?.expandRelated === true)
@@ -541,38 +616,47 @@ function CondensationDialog({ proposal, text, onCancel, onRegenerate, onApply, s
     ...(editedRatio < 0.4 ? ['savings-below-40-percent'] : []),
     ...(editedSaved < 500 ? ['savings-below-500-tokens'] : []),
   ]))
+  const canCancel = !saving || generating
   const submit = () => {
     if (saving || needsGeneration || !value.trim()) return
     void onApply(value)
   }
   const onKeyDown = event => {
-    if (event.key === 'Escape' && !saving) { event.preventDefault(); onCancel(); return }
+    if (event.key === 'Escape' && canCancel) { event.preventDefault(); onCancel(); return }
     if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); submit() }
   }
   return h('div', { className: 'context-editor__dialog-backdrop' },
     h('div', { className: 'context-editor__dialog context-editor__condensation-dialog', role: 'dialog', 'aria-modal': 'true', 'aria-label': text.condensationTitle, onKeyDown },
       h('div', { className: 'context-editor__dialog-header' },
         h('h2', null, text.condensationTitle),
-        h('button', { type: 'button', className: 'context-editor__dialog-close', disabled: saving, onClick: onCancel, 'aria-label': text.cancel }, '×'),
+        h('button', { type: 'button', className: 'context-editor__dialog-close', disabled: !canCancel, onClick: onCancel, 'aria-label': text.cancel }, '×'),
       ),
       h('label', { className: 'context-editor__replacement-link-option' },
         h('input', { type: 'checkbox', checked: expandRelated, disabled: saving || proposal?.canExpandRelated !== true, onChange: event => setExpandRelated(event.target.checked) }),
         h('span', { style: proposal?.canExpandRelated === true ? undefined : { opacity: 0.45 } }, text.condensationExpandRelated),
       ),
-      !needsGeneration ? h('div', { className: 'context-editor__condensation-meta' },
-        h('span', null, text.condensationSource(proposal?.effectiveUnitIds?.length ?? 0, 0)),
+      !needsGeneration && proposal?.autoExpandedUnitIds?.length ? h('div', { className: 'context-editor__condensation-expansion', role: 'status' },
+        h('div', null, text.condensationExpandedNotice(proposal.autoExpandedUnitIds.length)),
+        h('ul', null, (proposal.sourceUnits ?? []).filter(source => proposal.autoExpandedUnitIds.includes(source.id)).map(source =>
+          h('li', { key: source.id }, `${text.unitKind(source.kind)}: ${String(source.text ?? '').slice(0, 120)}`),
+        )),
+      ) : null,
+      !needsGeneration ? h('details', { className: 'context-editor__details' },
+      h('summary', null, text.details),
+      h('div', { className: 'context-editor__condensation-meta' },
+        h('span', null, text.condensationSource(proposal?.effectiveUnitIds?.length ?? 0, proposal?.autoExpandedUnitIds?.length ?? 0)),
         h('span', null, text.condensationFirstChange(proposal?.sourceRootSeqs?.[0] ?? '—')),
         h('span', null, text.condensationModel(proposal?.provider, proposal?.model)),
-      ) : null,
-      !needsGeneration ? h('div', { className: 'context-editor__condensation-metrics', role: 'status' },
+      ),
+      h('div', { className: 'context-editor__condensation-metrics' },
         h('span', null, text.condensationBefore(metrics.beforeTokens)),
         h('span', null, text.condensationAfter(editedAfter)),
         h('span', null, text.condensationPrefix(proposal?.prefixTokens)),
         h('strong', null, text.condensationSaved(editedSaved, editedRatio)),
+      ),
+      (editedRatio < 0.4 || editedSaved < 500) ? h('div', null, text.condensationLowSaving) : null,
+      warnings.includes('prefix-not-reused') ? h('div', null, text.condensationPrefixNotReused) : null,
       ) : null,
-      !needsGeneration && (editedRatio < 0.4 || editedSaved < 500) ? h('div', { className: 'context-editor__condensation-risks' }, text.condensationLowSaving) : null,
-      !needsGeneration && warnings.includes('prefix-not-reused') ? h('div', { className: 'context-editor__condensation-risks' }, text.condensationPrefixNotReused) : null,
-      !needsGeneration && editedRisks.length ? h('div', { className: 'context-editor__condensation-risks' }, text.condensationRisks(editedRisks.join(', '))) : null,
       !needsGeneration ? h('details', { className: 'context-editor__condensation-source' },
         h('summary', null, text.condensationOriginal),
         h('div', null, (proposal?.sourceUnits ?? []).filter(source => source.included).map(source => h('article', { key: source.id },
@@ -581,23 +665,24 @@ function CondensationDialog({ proposal, text, onCancel, onRegenerate, onApply, s
         ))),
       ) : null,
       !needsGeneration ? h('textarea', { ref: textarea, className: 'context-editor__dialog-input', value, onChange: event => setValue(event.target.value), spellCheck: false, disabled: saving, 'aria-label': text.condensationSummary }) : null,
-      h('div', { className: 'context-editor__dialog-hint' }, text.condensationHint),
+      generating ? h('div', { role: 'status', 'aria-live': 'polite', className: 'context-editor__condensation-progress' }, text.condensationGenerating) : null,
+      h('div', { className: 'context-editor__dialog-hint', role: 'status' }, needsGeneration ? text.condensationHint : text.condensationPending),
       error ? h('div', { className: 'context-editor__dialog-error', role: 'alert' }, error) : null,
       h('div', { className: 'context-editor__dialog-actions' },
-        h('button', { type: 'button', disabled: saving, onClick: onCancel }, text.cancel),
-        h('button', { type: 'button', disabled: saving, onClick: () => onRegenerate(expandRelated) }, needsGeneration ? text.generateCondensation : text.regenerateCondensation),
+        h('button', { type: 'button', disabled: !canCancel, onClick: onCancel }, text.cancel),
+        h('button', { type: 'button', disabled: saving, onClick: () => onRegenerate(expandRelated) }, generating ? text.condensationGenerating : needsGeneration ? text.generateCondensation : text.regenerateCondensation),
         h('button', { type: 'button', disabled: saving || needsGeneration || !value.trim(), onClick: submit }, saving ? text.loading : text.applyCondensation),
       ),
     ),
   )
 }
 
-function UnitSection({ unit, selected, onSelect, focused, showHidden, showOriginal, match, disabled, onRestore, onContextToggle, onEdit, onRestoreReplacement, onUndoReplacement, onCompareOriginal, replacementAvailable, registerNode, text }) {
+function UnitSection({ unit, selected, onSelect, focused, showHidden, showOriginal, match, disabled, onRestore, onContextToggle, onEdit, onRestoreReplacement, onUndoReplacement, onCompareOriginal, replacementAvailable, contextAvailable, contextUnavailableReason, registerNode, text }) {
   const hidden = unit.viewState === 'hide' || unit.viewState === 'mixed'
   const mixed = unit.viewState === 'mixed'
   const projectionState = unit.projectionState ?? 'include'
   const contextExcluded = projectionState === 'exclude' || projectionState === 'mixed'
-  const contextUnavailable = projectionState === 'unavailable'
+  const contextUnavailable = projectionState === 'unavailable' || Boolean(unit.contextMutationDisabledReason)
   const isEditableKind = unit.kind === 'user' || unit.kind === 'answer'
   const replacementSupported = unit.replacementSupported === true
   const replacementTitle = !replacementAvailable
@@ -621,13 +706,17 @@ function UnitSection({ unit, selected, onSelect, focused, showHidden, showOrigin
     mixed ? h('span', { className: 'context-editor__hidden-badge' }, text.partiallyHidden) : null,
     hidden && !mixed ? h('span', { className: 'context-editor__hidden-badge' }, text.hidden) : null,
     contextExcluded ? h('span', { className: 'context-editor__context-badge' }, text.contextState(projectionState)) : null,
-    contextUnavailable ? h('span', { className: 'context-editor__context-badge is-unavailable' }, text.contextState(projectionState)) : null,
     hidden ? h('button', { type: 'button', disabled, onClick: onRestore }, text.restore) : null,
     isEditableKind && unit.replacementState === 'replaced'
       ? h('span', { className: 'context-editor__replacement-badge', title: text.edited }, text.edited)
       : null,
-    isEditableKind && !replacementSupported
-      ? h('span', { className: 'context-editor__replacement-reason', title: replacementTitle }, replacementTitle)
+    (contextUnavailable || (isEditableKind && !replacementSupported))
+      ? h('details', { className: 'context-editor__restriction' },
+        h('summary', { title: replacementSupported ? text.featureUnavailable(unit.contextMutationDisabledReason) : replacementTitle }, text.actionDetails),
+        h('div', null, [...new Set([
+          ...(contextUnavailable ? [text.featureUnavailable(unit.contextMutationDisabledReason)] : []),
+          ...(isEditableKind && !replacementSupported ? [replacementTitle] : []),
+        ])].join(' ')))
       : null,
     isEditableKind && replacementSupported
       ? h('div', { className: 'context-editor__replacement-actions' },
@@ -651,15 +740,16 @@ function UnitSection({ unit, selected, onSelect, focused, showHidden, showOrigin
     h('button', {
       type: 'button',
       className: 'context-editor__context-toggle',
-      disabled: disabled || contextUnavailable,
+      disabled: disabled || contextUnavailable || !contextAvailable,
       onClick: onContextToggle,
+      title: unit.contextMutationDisabledReason ? text.featureUnavailable(unit.contextMutationDisabledReason) : !contextAvailable ? text.featureUnavailable(contextUnavailableReason) : undefined,
     }, contextExcluded ? text.restoreContext : text.excludeContext),
   ),
   h('div', { className: 'context-editor__unit-body' }, body),
   )
 }
 
-function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, showOriginalUnitId, match, disabled, disabledUnitIds, onRestore, onContextToggle, onEdit, onRestoreReplacement, onUndoReplacement, onCompareOriginal, replacementAvailable, registerNode, text }) {
+function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, showOriginalUnitId, match, disabled, disabledUnitIds, onRestore, onContextToggle, onEdit, onRestoreReplacement, onUndoReplacement, onCompareOriginal, replacementAvailable, contextAvailable, contextUnavailableReason, registerNode, text }) {
   const units = unitsForRecord(record)
   const focused = units.some(unit => unit.id === focusedUnitId)
   return h('article', {
@@ -688,6 +778,8 @@ function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, show
       onUndoReplacement: () => onUndoReplacement(unit),
       onCompareOriginal: () => onCompareOriginal(unit),
       replacementAvailable,
+      contextAvailable,
+      contextUnavailableReason,
       registerNode,
       text,
     }))),
@@ -696,12 +788,13 @@ function RecordRow({ record, selected, onSelect, focusedUnitId, showHidden, show
 }
 
 /** Context Editor tab body.  The parent ConversationSession keeps the shared composer. */
-export function ContextEditorView({ sessionId, controller, useSession }) {
+export function ContextEditorView({ sessionId, controller, useSession, openSession }) {
   const [locale] = useState(() => detectHarnessLocale())
   const text = useMemo(() => createHarnessText(locale), [locale])
   const running = useSession(snapshot => Boolean(snapshot?.running))
   const [prefs, setPrefs] = useState(safePreferences)
-  const [loaded, setLoaded] = useState({ status: 'loading', snapshot: null, records: [], error: null })
+  const [loaded, setLoaded] = useState({ status: 'loading', snapshot: null, records: [], nextCursor: null, total: 0, error: null })
+  const [historyLoading, setHistoryLoading] = useState(false)
   const [query, setQuery] = useState('')
   const [searchScope, setSearchScope] = useState('dialogue')
   const [search, setSearch] = useState(null)
@@ -714,13 +807,26 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
   const [comparisonUnitId, setComparisonUnitId] = useState(null)
   const [condensation, setCondensation] = useState(null)
   const [condensationLoading, setCondensationLoading] = useState(false)
+  const [generatingCondensation, setGeneratingCondensation] = useState(false)
+  const condensationGeneration = useRef(0)
   const [condensationError, setCondensationError] = useState('')
   const [condensationModels, setCondensationModels] = useState([])
   const [condensationModel, setCondensationModel] = useState('')
   const [condensationOperationId, setCondensationOperationId] = useState('')
   const [notice, setNotice] = useState('')
+  const [operationRecoveryPending, setOperationRecoveryPending] = useState(() => Boolean(readPendingReplacement(sessionId)))
+  const [operationUnverified, setOperationUnverified] = useState(false)
+  const [compatibilityCheckLoading, setCompatibilityCheckLoading] = useState(false)
+  const [compatibilityCheckError, setCompatibilityCheckError] = useState('')
+  const currentSessionIdRef = useRef(String(sessionId))
+  currentSessionIdRef.current = String(sessionId)
   const lastSelectedIndex = useRef(null)
   const loadSequence = useRef(0)
+  const historyPageGeneration = useRef(0)
+  const historyLoadingRef = useRef(false)
+  const historyRecordsRef = useRef([])
+  const historyCursorRef = useRef(null)
+  const historyRevisionRef = useRef(null)
   const searchSequence = useRef(0)
   const matchSequence = useRef(0)
   const navigationIndexRef = useRef(0)
@@ -730,6 +836,17 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
   const searchInput = useRef(null)
   const controlsNode = useRef(null)
   const editFocus = useRef(null)
+  const replacementOperationIds = useRef(new Map())
+  const activeCondensationRef = useRef(null)
+
+  useEffect(() => () => {
+    ++condensationGeneration.current
+    const active = activeCondensationRef.current
+    if (active?.controller === controller) {
+      activeCondensationRef.current = null
+      void controller.cancelCondensation(active.operationId).catch(() => {})
+    }
+  }, [controller, sessionId])
 
   useEffect(() => {
     // Search scope is deliberately window-local. A reused tab that switches
@@ -742,11 +859,22 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
     setComparisonUnitId(null)
     setCondensation(null)
     setCondensationLoading(false)
+    setGeneratingCondensation(false)
     setCondensationError('')
     setCondensationModels([])
     setCondensationModel('')
     setCondensationOperationId('')
     setNotice('')
+    historyPageGeneration.current += 1
+    historyLoadingRef.current = false
+    historyRecordsRef.current = []
+    historyCursorRef.current = null
+    historyRevisionRef.current = null
+    setHistoryLoading(false)
+    replacementOperationIds.current.clear()
+    setOperationRecoveryPending(Boolean(readPendingReplacement(sessionId)))
+    setOperationUnverified(false)
+    setCompatibilityCheckError('')
   }, [sessionId])
 
   const registerUnitNode = useCallback((unitId, node) => {
@@ -781,18 +909,25 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
   }, [enabledRecordKinds, loaded.records, loaded.snapshot?.condensations, prefs.enabledUnitKinds])
   const visibleUnits = useMemo(() => visibleRecords.filter(record => !record.condensation).flatMap(record => unitsForRecord(record)), [visibleRecords])
   const selectedCount = selected.size
-  const readOnly = running || loaded.status === 'loading' || loaded.status === 'refreshing' || contextMutating || condensationLoading
+  const readOnly = running || loaded.status === 'loading' || loaded.status === 'refreshing' || contextMutating || condensationLoading || operationRecoveryPending || operationUnverified
   const contextAvailable = loaded.snapshot?.capabilities?.contextExclusion === true
   const replacementAvailable = loaded.snapshot?.capabilities?.contextReplacement === true
   const condensationAvailable = loaded.snapshot?.capabilities?.contextCondensation === true
+  const contextUnavailableReason = loaded.snapshot?.contextMutationUnavailableReason
   const condensedUnitIds = useMemo(() => new Set((loaded.snapshot?.condensations ?? []).flatMap(item => item.effectiveUnitIds ?? [])), [loaded.snapshot?.condensations])
 
   const refresh = useCallback(async (preserveSelection = false) => {
     const ticket = ++loadSequence.current
+    historyPageGeneration.current += 1
+    historyLoadingRef.current = false
+    setHistoryLoading(false)
     setLoaded(current => ({ ...current, status: current.snapshot ? 'refreshing' : 'loading', error: null }))
     try {
       const value = await controller.load()
       if (value === null || ticket !== loadSequence.current) return
+      historyRecordsRef.current = value.records
+      historyCursorRef.current = value.nextCursor ?? null
+      historyRevisionRef.current = value.snapshot.revision
       setLoaded({ status: 'ready', ...value, error: null })
       if (!preserveSelection) {
         setSelected(new Set())
@@ -803,9 +938,79 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
     }
   }, [controller])
 
+  const loadHistory = useCallback(async (targetRecordId) => {
+    const currentRecords = historyRecordsRef.current
+    if (targetRecordId && currentRecords.some(record => record.id === targetRecordId)) return true
+    if (historyLoadingRef.current || historyCursorRef.current === null || historyRevisionRef.current === null) return false
+    const generation = historyPageGeneration.current
+    const expectedRevision = historyRevisionRef.current
+    historyLoadingRef.current = true
+    setHistoryLoading(true)
+    try {
+      let page
+      if (targetRecordId) {
+        const direct = await controller.loadRecord(targetRecordId, expectedRevision)
+        if (direct === null) {
+          page = await controller.loadUntilRecord(targetRecordId, historyCursorRef.current, expectedRevision, currentRecords)
+        } else if (!direct.found || direct.record === null) {
+          return false
+        } else {
+          page = { records: [direct.record], nextCursor: historyCursorRef.current, total: direct.total, found: true }
+        }
+      } else {
+        page = await controller.loadRecordsPage(historyCursorRef.current, expectedRevision)
+      }
+      if (generation !== historyPageGeneration.current || currentSessionIdRef.current !== String(sessionId)) return false
+      const records = [...currentRecords, ...(page.records ?? [])]
+      const orderedRecords = [...new Map(records.map(record => [record.id, record])).values()]
+        .sort((left, right) => Number(left.historyIndex ?? Number.MAX_SAFE_INTEGER) - Number(right.historyIndex ?? Number.MAX_SAFE_INTEGER))
+      const uniqueRecords = orderedRecords.map((record, index) => {
+        const currentIndex = Number(record.historyIndex)
+        const previousIndex = index === 0 ? -1 : Number(orderedRecords[index - 1].historyIndex)
+        const historyGapBefore = Number.isSafeInteger(currentIndex) && Number.isSafeInteger(previousIndex)
+          ? Math.max(0, currentIndex - previousIndex - 1)
+          : 0
+        return historyGapBefore > 0 ? { ...record, historyGapBefore } : record
+      })
+      historyRecordsRef.current = uniqueRecords
+      const nextCursor = targetRecordId ? historyCursorRef.current : page.nextCursor ?? null
+      if (!targetRecordId) historyCursorRef.current = nextCursor
+      setLoaded(current => {
+        if (current.snapshot?.sessionId !== String(sessionId) || current.snapshot?.revision !== expectedRevision) return current
+        return {
+          ...current,
+          records: uniqueRecords,
+          nextCursor,
+          total: page.total ?? current.total ?? uniqueRecords.length,
+        }
+      })
+      return targetRecordId ? page.found : true
+    } finally {
+      if (generation === historyPageGeneration.current) {
+        historyLoadingRef.current = false
+        setHistoryLoading(false)
+      }
+    }
+  }, [controller, sessionId])
+
+  const recheckCompatibility = useCallback(async () => {
+    setCompatibilityCheckLoading(true)
+    setCompatibilityCheckError('')
+    try {
+      await controller.runCompatibilityCheck()
+      await refresh(true)
+    } catch (error) {
+      setCompatibilityCheckError(text.compatibilityCheckFailed(errorText(error)))
+    } finally {
+      setCompatibilityCheckLoading(false)
+    }
+  }, [controller, refresh, text])
+
   useEffect(() => {
     void refresh()
   }, [controller, refresh])
+
+  useEffect(() => controller.subscribe?.(() => { void refresh(true) }), [controller, refresh])
 
   // Running is read-only: the next settled edge refreshes the durable log and
   // re-enables view mutations without fabricating a partial record.
@@ -880,6 +1085,9 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
             return
           }
           const first = await controller.match(value.searchId, 0, value.revision)
+          if (first?.recordId && !(await loadHistory(first.recordId))) {
+            throw new Error('CONTEXT_EDITOR_SEARCH_RESULT_NOT_IN_HISTORY')
+          }
           if (ticket === searchSequence.current && matchTicket === matchSequence.current) {
             navigationIndexRef.current = 0
             requestedIndexRef.current = 0
@@ -897,7 +1105,7 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
       })()
     }, 120)
     return () => clearTimeout(timer)
-  }, [controller, enabledRecordKinds, prefs.enabledUnitKinds, query, searchScope])
+  }, [controller, enabledRecordKinds, loadHistory, prefs.enabledUnitKinds, query, searchScope])
 
   useEffect(() => {
     const ticket = ++scrollSequence.current
@@ -1012,10 +1220,10 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
     try {
       const value = await controller.commit(action, loaded.snapshot.revision, unitIds)
       if (value?.conflict) {
-        await refresh()
+        await refresh(true)
         return
       }
-      await refresh()
+      await refresh(true)
     } catch (error) {
       setLoaded(current => ({ ...current, status: 'error', error }))
     }
@@ -1024,33 +1232,52 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
   const mutateContext = async (action, unitIds, options = {}) => {
     if (readOnly || !contextAvailable || loaded.snapshot === null) return
     setContextMutating(true)
+    let operationId
     try {
-      const preview = await controller.previewContext(action, loaded.snapshot.revision, unitIds, options)
+      const preview = await controller.previewContext(action, loaded.snapshot.contextRevision ?? loaded.snapshot.revision, unitIds, options)
+      if (preview?.canCommit === false) {
+        setNotice(text.featureUnavailable(preview.disabledReason))
+        return
+      }
       if (preview?.conflict) {
-        await refresh()
+        await refresh(true)
         return
       }
       const estimate = preview?.tokenEstimate ?? {}
       const closureCount = Math.max(0, (preview?.effectiveTargets?.length ?? 0) - (preview?.normalizedTargets?.length ?? 0))
       const warning = text.contextPreview(estimate.before, estimate.after, estimate.delta, closureCount)
+        + (closureCount ? '\n\n' + (preview.effectiveSelection ?? []).map(unit => `${text.unitKind(unit.kind)}: ${unit.preview}`).join('\n') : '')
       let confirmed = true
       if (typeof globalThis.confirm === 'function') {
         try { confirmed = globalThis.confirm(warning) } catch { confirmed = true }
       }
       if (!confirmed) return
+      operationId = preview.operationId
+      rememberPendingReplacement(action, unitIds.join(','), preview.operationId)
       const value = await controller.commitContext(
         preview.operationId,
         action,
         preview.expectedRevision ?? loaded.snapshot.revision,
         unitIds,
-        options,
+        { ...options, selectionFingerprint: preview.selectionFingerprint },
       )
       if (value?.conflict) {
-        await refresh()
+        clearTrackedReplacement(preview.operationId)
+        await refresh(true)
         return
       }
-      await refresh()
+      if (value?.commit?.status === 'unverified' || value?.ok === false) {
+        setOperationUnverified(true)
+        setNotice(text.operationUnverified)
+        return
+      }
+      clearTrackedReplacement(preview.operationId)
+      await refresh(true)
     } catch (error) {
+      if (operationId) {
+        const status = await resolvePendingReplacement(operationId)
+        if (['persisted-and-verified', 'pending', 'unverified', 'stale'].includes(status)) return
+      }
       setLoaded(current => ({ ...current, status: 'error', error }))
     } finally {
       setContextMutating(false)
@@ -1065,19 +1292,24 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
 
   const startCondensation = async (expandRelated = false) => {
     if (readOnly || !condensationAvailable || selectedCount === 0 || loaded.snapshot === null) return
+    const generation = ++condensationGeneration.current
+    setGeneratingCondensation(true)
     setCondensationLoading(true)
     setCondensationError('')
     const operationId = `condensation-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
     setCondensationOperationId(operationId)
+    activeCondensationRef.current = { controller, operationId }
     try {
       const selectedModel = condensationModels.find(value => condensationModelKey(value) === condensationModel)
-      const proposal = await controller.generateCondensation([...selected], loaded.snapshot.revision, {
+      const proposal = await controller.generateCondensation([...selected], loaded.snapshot.contextRevision ?? loaded.snapshot.revision, {
         operationId,
         expandRelated,
         ...(selectedModel?.provider ? { provider: selectedModel.provider } : {}),
         ...(selectedModel?.id ? { model: selectedModel.id } : {}),
       })
+      if (generation !== condensationGeneration.current) return
       if (proposal?.conflict) {
+        setCondensationError(text.condensationConflict)
         setCondensationOperationId('')
         await refresh(true)
         return
@@ -1085,16 +1317,27 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
       setCondensation(proposal)
       setCondensationOperationId(String(proposal?.operationId ?? operationId))
     } catch (error) {
+      if (generation !== condensationGeneration.current) return
       setCondensationOperationId('')
       if (!String(error?.message ?? error).includes('CANCELLED')) setCondensationError(text.condensationFailed(errorText(error)))
     } finally {
-      setCondensationLoading(false)
+      if (generation === condensationGeneration.current) {
+        setGeneratingCondensation(false)
+        setCondensationLoading(false)
+      }
     }
   }
 
   const cancelCondensation = async () => {
     if (!condensationOperationId) return
-    try { await controller.cancelCondensation(condensationOperationId) } catch { /* the stream will settle and clear its state */ }
+    try {
+      await controller.cancelCondensation(condensationOperationId)
+      ++condensationGeneration.current
+      setGeneratingCondensation(false)
+      setCondensationLoading(false)
+      setCondensationOperationId('')
+      setCondensation(null)
+    } catch (error) { setCondensationError(text.condensationFailed(errorText(error))) }
   }
 
   const applyCondensation = async summary => {
@@ -1103,16 +1346,18 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
     setCondensationError('')
     try {
       const result = await controller.commitCondensation(condensation, summary)
+      if (currentSessionIdRef.current !== String(sessionId)) return
       if (result?.conflict) {
-        setCondensation(null)
-        setCondensationOperationId('')
+        setCondensationError(text.condensationConflict)
         await refresh(true)
         return
       }
+      if (result?.ok !== true) throw new Error('CONTEXT_EDITOR_CONDENSATION_COMMIT_FAILED')
       setCondensation(null)
+      activeCondensationRef.current = null
       setCondensationOperationId('')
       setSelected(new Set())
-      await refresh()
+      await refresh(true)
     } catch (error) {
       setCondensationError(text.condensationFailed(errorText(error)))
     } finally {
@@ -1138,26 +1383,40 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
     await startCondensation(expandRelated)
   }
 
-  const restoreCondensation = async operationId => {
+  const createRecovery = async option => {
     if (readOnly || loaded.snapshot === null) return
+    const sourceSessionId = String(sessionId)
     setContextMutating(true)
-    setCondensationError('')
+    setNotice('')
     try {
-      const result = await controller.restoreCondensation(operationId, loaded.snapshot.revision)
-      if (result?.restoreRequired) {
-        setCondensationError(result.restoreMode === 'checkpoint'
-          ? text.condensationCheckpoint(result.checkpointSeq)
-          : text.condensationRestoreUnavailable)
-        await refresh(true)
-        return
+      const request = {
+        kind: option.kind,
+        ...(option.kind === 'native-compaction' ? { compactionId: option.compactionId } : { operationId: option.operationId }),
       }
+      const preview = await controller.previewRecovery(request)
+      if (preview?.ok !== true) throw new Error(preview?.reason ?? 'recovery-preview-unavailable')
+      let confirmed = true
+      if (typeof globalThis.confirm === 'function') {
+        try { confirmed = globalThis.confirm(text.recoveryPreview(preview.messageCount, preview.retainedMessageCount) + '\n\n' + (preview.conversationPreview ?? '')) } catch { confirmed = false }
+      }
+      if (!confirmed) return
+      const result = await controller.createRecoveryBranch({ ...request, previewFingerprint: preview.prefixFingerprint })
+      if (currentSessionIdRef.current !== sourceSessionId) return
       if (result?.conflict) {
+        setNotice(text.recoveryUnavailable(result.reason ?? 'recovery-prefix-changed'))
         await refresh(true)
         return
       }
+      if (result?.ok !== true || result?.commit?.status !== 'persisted-and-verified' || !result.targetSessionId) {
+        throw new Error(result?.commit?.status ?? 'recovery-result-unverified')
+      }
+      setNotice('')
       await refresh(true)
+      if (currentSessionIdRef.current === sourceSessionId && typeof openSession === 'function') {
+        openSession(result.targetSessionId)
+      }
     } catch (error) {
-      setCondensationError(text.condensationFailed(errorText(error)))
+      setNotice(text.recoveryUnavailable(errorText(error)))
     } finally {
       setContextMutating(false)
     }
@@ -1184,20 +1443,109 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
     setNotice('')
     setComparisonUnitId(null)
     setEditing({
+      id: unit.id,
       unitId: unit.id,
       kind: unit.kind,
+      operations: unit.operations,
       associatedReasoningUnitIds: unit.associatedReasoningUnitIds ?? [],
       text: String(unit.effectiveText ?? unit.atoms?.map(atom => atom.text ?? '').join('\n') ?? ''),
     })
   }
 
+  const replacementOperationId = (action, unitId, payload = '') => {
+    const key = `${action}:${unitId}`
+    const current = replacementOperationIds.current.get(key)
+    const fingerprint = String(payload)
+    if (current?.fingerprint === fingerprint) return current.id
+    const id = controller.replacementOperationId(action, unitId)
+    replacementOperationIds.current.set(key, { id, fingerprint })
+    return id
+  }
+
+  const rememberPendingReplacement = (action, unitId, operationId) => {
+    writePendingReplacement(sessionId, { action, unitId, operationId })
+    setOperationRecoveryPending(true)
+    setOperationUnverified(false)
+  }
+
+  const clearTrackedReplacement = operationId => {
+    clearPendingReplacement(sessionId, operationId)
+    setOperationRecoveryPending(false)
+    setOperationUnverified(false)
+  }
+
+  const resolvePendingReplacement = useCallback(async operationId => {
+    let operation
+    try {
+      operation = await controller.getOperation(operationId)
+    } catch {
+      if (currentSessionIdRef.current !== String(sessionId)) return 'stale'
+      setOperationRecoveryPending(false)
+      setOperationUnverified(true)
+      setNotice(text.operationUnverified)
+      return 'unverified'
+    }
+    if (currentSessionIdRef.current !== String(sessionId)) return 'stale'
+    if (!operation) {
+      clearPendingReplacement(sessionId, operationId)
+      setOperationRecoveryPending(false)
+      setOperationUnverified(false)
+      return 'missing'
+    }
+    const status = operation.status ?? operation.commit?.status
+    if (status === 'persisted-and-verified') {
+      clearPendingReplacement(sessionId, operationId)
+      replacementOperationIds.current.delete(`${operation.action}:${operation.unitId}`)
+      setOperationRecoveryPending(false)
+      setOperationUnverified(false)
+      setNotice('')
+      await refresh(true)
+      return status
+    }
+    if (status === 'pending') {
+      if (operation.unitId && ['replace', 'restore', 'undo'].includes(operation.action)) {
+        replacementOperationIds.current.set(`${operation.action}:${operation.unitId}`, {
+          id: String(operation.operationId ?? operationId),
+          fingerprint: operation.action === 'replace' ? String(operation.afterText ?? '') : '',
+        })
+      }
+      setOperationRecoveryPending(false)
+      setOperationUnverified(false)
+      setNotice(text.operationPending)
+      return status
+    }
+    if (status === 'failed') {
+      clearPendingReplacement(sessionId, operationId)
+      setOperationRecoveryPending(false)
+      setOperationUnverified(false)
+      setNotice(text.operationFailed)
+      return status
+    }
+    setOperationRecoveryPending(false)
+    setOperationUnverified(true)
+    setNotice(text.operationUnverified)
+    return 'unverified'
+  }, [controller, refresh, sessionId, text])
+
+  useEffect(() => {
+    const pending = readPendingReplacement(sessionId)
+    setOperationRecoveryPending(Boolean(pending))
+    setOperationUnverified(false)
+    if (!pending) return undefined
+    void resolvePendingReplacement(pending.operationId)
+    return undefined
+  }, [resolvePendingReplacement, sessionId])
+
   const saveReplacement = async (value, options = {}) => {
     if (!editing || loaded.snapshot === null) return
     if (running) throw new Error('CONTEXT_EDITOR_BUSY')
     setContextMutating(true)
+    let operationId
     try {
-      const preview = await controller.previewReplacement(editing.unitId, loaded.snapshot.revision, value, options.excludeAssociatedReasoning === true)
+      const contextRevision = loaded.snapshot.contextRevision ?? loaded.snapshot.revision
+      const preview = await controller.previewReplacement(editing.unitId, contextRevision, value, options.excludeAssociatedReasoning === true)
       if (preview?.conflict) {
+        replacementOperationIds.current.delete(`replace:${editing.unitId}`)
         setNotice(text.replacementConflict)
         closeReplacementDialog()
         await refresh(true)
@@ -1213,20 +1561,48 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
         failure.preview = preview
         throw failure
       }
-      const result = await controller.commitReplacement(editing.unitId, loaded.snapshot.revision, value, {
+      operationId = replacementOperationId('replace', editing.unitId, value)
+      rememberPendingReplacement('replace', editing.unitId, operationId)
+      const result = await controller.commitReplacement(editing.unitId, contextRevision, value, {
+        operationId,
         excludeAssociatedReasoning: options.excludeAssociatedReasoning === true,
         confirmedUnitIds: options.confirmedUnitIds,
       })
       if (result?.conflict) {
+        replacementOperationIds.current.delete(`replace:${editing.unitId}`)
+        clearTrackedReplacement(operationId)
         setNotice(text.replacementConflict)
         closeReplacementDialog()
         await refresh(true)
         return
       }
+      if (result?.ok !== true || result?.commit?.status !== 'persisted-and-verified') {
+        setOperationRecoveryPending(false)
+        if (result?.commit?.status === 'pending') setNotice(text.operationPending)
+        else {
+          setOperationUnverified(true)
+          setNotice(text.operationUnverified)
+          closeReplacementDialog()
+        }
+        return
+      }
       closeReplacementDialog()
+      replacementOperationIds.current.delete(`replace:${editing.unitId}`)
+      clearTrackedReplacement(operationId)
       setNotice('')
       await refresh(true)
     } catch (error) {
+      if (operationId) {
+        const status = await resolvePendingReplacement(operationId)
+        if (status === 'persisted-and-verified') {
+          closeReplacementDialog()
+          return
+        }
+        if (status === 'pending' || status === 'unverified' || status === 'stale') {
+          if (status === 'unverified') closeReplacementDialog()
+          return
+        }
+      }
       if (!error?.preview) setNotice(text.editFailed(errorText(error)))
       throw error
     } finally {
@@ -1241,17 +1617,37 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
       if (!confirmed) return
     }
     setContextMutating(true)
+    let operationId
     try {
       const method = action === 'restore' ? 'restoreReplacement' : 'undoReplacement'
-      const result = await controller[method](unit.id, loaded.snapshot.revision)
+      operationId = replacementOperationId(action, unit.id)
+      rememberPendingReplacement(action, unit.id, operationId)
+      const result = await controller[method](unit.id, loaded.snapshot.contextRevision ?? loaded.snapshot.revision, { operationId })
       if (result?.conflict) {
+        replacementOperationIds.current.delete(`${action}:${unit.id}`)
+        clearTrackedReplacement(operationId)
         setNotice(text.replacementConflict)
         await refresh(true)
         return
       }
+      if (result?.ok !== true || result?.commit?.status !== 'persisted-and-verified') {
+        setOperationRecoveryPending(false)
+        if (result?.commit?.status === 'pending') setNotice(text.operationPending)
+        else {
+          setOperationUnverified(true)
+          setNotice(text.operationUnverified)
+        }
+        return
+      }
+      replacementOperationIds.current.delete(`${action}:${unit.id}`)
+      clearTrackedReplacement(operationId)
       setNotice('')
       await refresh(true)
     } catch (error) {
+      if (operationId) {
+        const status = await resolvePendingReplacement(operationId)
+        if (status === 'persisted-and-verified' || status === 'pending' || status === 'unverified' || status === 'stale') return
+      }
       setNotice(text.editFailed(errorText(error)))
     } finally {
       setContextMutating(false)
@@ -1267,8 +1663,8 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
     if (readOnly || loaded.snapshot === null || !loaded.snapshot.canUndo) return
     try {
       const value = await controller.undo(loaded.snapshot.revision)
-      if (value?.conflict) await refresh()
-      else await refresh()
+      if (value?.conflict) await refresh(true)
+      else await refresh(true)
     } catch (error) {
       setLoaded(current => ({ ...current, status: 'error', error }))
     }
@@ -1282,6 +1678,9 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
     setMatching(true)
     try {
       const value = await controller.match(search.searchId, nextIndex, search.revision)
+      if (value?.recordId && !(await loadHistory(value.recordId))) {
+        throw new Error('CONTEXT_EDITOR_SEARCH_RESULT_NOT_IN_HISTORY')
+      }
       if (ticket === matchSequence.current) {
         navigationIndexRef.current = nextIndex
         setSearchIndex(nextIndex)
@@ -1297,21 +1696,28 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
     }
   }
 
+  const loadMoreHistory = () => {
+    void loadHistory().catch(error => {
+      setLoaded(current => ({ ...current, status: 'error', error }))
+    })
+  }
+
   const matchUnitId = match?.unitId
   const aiState = aiFilterState(prefs.enabledUnitKinds)
   const renderCondensation = item => {
     const coverage = item.coverage ?? { status: 'none', restoreMode: 'inline', coveredSourceRootSeqs: [], uncoveredSourceRootSeqs: [] }
     const coveredCount = coverage.coveredSourceRootSeqs?.length ?? 0
     const totalCount = (coverage.coveredSourceRootSeqs?.length ?? 0) + (coverage.uncoveredSourceRootSeqs?.length ?? 0)
-    const restoreBlocked = coverage.restoreMode !== 'inline'
+    const restoreBlocked = item.recovery?.available !== true
     return h('article', { key: item.operationId, className: 'context-editor__condensation-card', 'data-condensation-operation-id': item.operationId },
       h('div', { className: 'context-editor__condensation-card-header' },
         h('strong', null, text.activeCondensation),
-        h('span', null, text.condensationModel(item.provider, item.model)),
-        h('button', { type: 'button', disabled: readOnly, onClick: () => void toggleCondensationContext(item) }, item.contextExcluded === true ? text.restoreContext : text.excludeContext),
-        h('button', { type: 'button', disabled: readOnly || restoreBlocked, onClick: () => void restoreCondensation(item.operationId) }, text.restoreCondensation),
+        h('button', { type: 'button', disabled: readOnly || !contextAvailable, title: !contextAvailable ? text.featureUnavailable(contextUnavailableReason) : undefined, onClick: () => void toggleCondensationContext(item) }, item.contextExcluded === true ? text.restoreContext : text.excludeContext),
+        h('button', { type: 'button', disabled: readOnly || !item.recovery?.available, title: restoreBlocked ? text.recoveryUnavailable(item.recovery?.reason ?? 'recovery-boundary-unavailable') : undefined, onClick: () => void createRecovery({ kind: 'condensation', operationId: item.operationId }) }, text.restoreCondensation),
       ),
       h('pre', { className: 'context-editor__condensation-summary' }, item.summary),
+      h('details', { className: 'context-editor__details' }, h('summary', null, text.details),
+      h('span', null, text.condensationModel(item.provider, item.model)),
       h('div', { className: 'context-editor__condensation-risks', role: 'status' }, text.condensationCoverage(coverage.status, coveredCount, totalCount)),
       coverage.restoreMode === 'checkpoint' ? h('div', { className: 'context-editor__condensation-risks' }, text.condensationCheckpoint(coverage.checkpointSeq)) : null,
       coverage.restoreMode === 'unavailable' ? h('div', { className: 'context-editor__condensation-risks' }, text.condensationRestoreUnavailable) : null,
@@ -1320,6 +1726,7 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
         h('span', null, text.condensationAfter(item.metrics?.afterTokens)),
         h('strong', null, ' · ' + text.condensationSaved(item.metrics?.savedTokens, item.metrics?.savingsRatio))),
       item.metrics?.belowRecommendedThreshold ? h('div', { className: 'context-editor__condensation-risks' }, text.condensationLowSaving) : null,
+      ),
       h('details', { className: 'context-editor__condensation-source' },
         h('summary', null, text.condensationOriginal),
         h('div', null, (item.sourceUnits ?? []).filter(source => source.included).map(source => h('article', { key: source.id },
@@ -1330,7 +1737,7 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
     )
   }
 
-  return h('section', { className: 'context-editor', 'aria-label': 'Context Editor' },
+  return h('section', { className: 'context-editor', 'aria-label': 'Context Editor', 'data-conversation-composer-overlay': '' },
     h('div', { className: 'context-editor__controls', ref: controlsNode },
       h('div', { className: 'context-editor__toolbar' },
         h('div', { className: 'context-editor__filters' },
@@ -1400,30 +1807,49 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
         h('button', { type: 'button', disabled: !search || search.error || search.total < 1 || matching, onClick: () => void moveMatch(-1) }, text.previous),
         h('button', { type: 'button', disabled: !search || search.error || search.total < 1 || matching, onClick: () => void moveMatch(1) }, text.next),
       ),
+      loaded.snapshot?.compatibility
+        ? h('details', { className: 'context-editor__more' },
+          h('summary', null, text.more),
+          h('details', { className: 'context-editor__compatibility' },
+          h('summary', null, text.diagnostics),
+          h('span', null, text.compatibilitySummary(loaded.snapshot.compatibility)),
+          loaded.snapshot.requestRouting ? h('pre', null, JSON.stringify(loaded.snapshot.requestRouting, null, 2)) : null,
+          h('button', { type: 'button', disabled: compatibilityCheckLoading, onClick: () => void recheckCompatibility() }, compatibilityCheckLoading ? text.compatibilityChecking : text.runCompatibilityCheck),
+          compatibilityCheckError ? h('span', { className: 'context-editor__error' }, compatibilityCheckError) : null,
+        ))
+        : null,
       h('div', { className: 'context-editor__actions' },
         h('button', { type: 'button', disabled: readOnly || selectedCount === 0, onClick: () => void mutate('hide', [...selected]) }, text.hideSelected(selectedCount)),
         h('button', { type: 'button', disabled: readOnly || selectedCount === 0, onClick: () => void mutate('restore', [...selected]) }, text.restoreSelected),
         h('button', { type: 'button', disabled: readOnly, onClick: () => void mutate('reset') }, text.restoreAll),
-         h('button', { type: 'button', disabled: readOnly || !contextAvailable || selectedCount === 0, onClick: () => void mutateContext('exclude', [...selected]) }, text.excludeSelected(selectedCount)),
-         h('button', { type: 'button', disabled: readOnly || !contextAvailable || selectedCount === 0, onClick: () => void mutateContext('restore', [...selected]) }, text.restoreContextSelected),
+         h('button', { type: 'button', disabled: readOnly || !contextAvailable || selectedCount === 0, title: !contextAvailable ? text.featureUnavailable(contextUnavailableReason) : undefined, onClick: () => void mutateContext('exclude', [...selected]) }, text.excludeSelected(selectedCount)),
+         h('button', { type: 'button', disabled: readOnly || !contextAvailable || selectedCount === 0, title: !contextAvailable ? text.featureUnavailable(contextUnavailableReason) : undefined, onClick: () => void mutateContext('restore', [...selected]) }, text.restoreContextSelected),
          condensationModels.length > 0
            ? h('label', { className: 'context-editor__condensation-model' },
              h('span', null, text.condensationModelPicker),
-             h('select', { value: condensationModel, disabled: readOnly, onChange: event => setCondensationModel(event.target.value), 'aria-label': text.condensationModelPicker }, condensationModels.map(model => h('option', { key: condensationModelKey(model), value: condensationModelKey(model) }, `${model.name ?? model.id}`))),
+             h('select', { value: condensationModel, disabled: readOnly || !condensationAvailable, title: !condensationAvailable ? text.featureUnavailable(loaded.snapshot?.contextCondensationUnavailableReason) : undefined, onChange: event => setCondensationModel(event.target.value), 'aria-label': text.condensationModelPicker }, condensationModels.map(model => h('option', { key: condensationModelKey(model), value: condensationModelKey(model) }, `${model.name ?? model.id}`))),
            )
            : null,
-         h('button', { type: 'button', className: 'context-editor__condensation-action', disabled: readOnly || !condensationAvailable || selectedCount === 0, onClick: openCondensation }, condensationLoading ? text.condensationGenerating : text.condenseSelected(selectedCount)),
+         h('button', { type: 'button', className: 'context-editor__condensation-action', disabled: readOnly || !condensationAvailable || selectedCount === 0, title: !condensationAvailable ? text.featureUnavailable(loaded.snapshot?.contextCondensationUnavailableReason) : undefined, onClick: openCondensation }, condensationLoading ? text.condensationGenerating : text.condenseSelected(selectedCount)),
          condensationLoading && condensationOperationId
            ? h('button', { type: 'button', onClick: () => void cancelCondensation() }, text.cancelCondensation)
            : null,
          h('button', { type: 'button', disabled: readOnly || !loaded.snapshot?.canUndo, onClick: () => void undo() }, text.undo),
         running ? h('span', { className: 'context-editor__running' }, text.running) : null,
-        loaded.status === 'error' ? h('span', { className: 'context-editor__error' }, errorText(loaded.error)) : null,
-         notice ? h('span', { className: 'context-editor__notice', role: 'status' }, notice) : null,
-         condensationError ? h('span', { className: 'context-editor__error', role: 'alert' }, condensationError) : null,
+        loaded.status === 'error' ? h('span', { className: 'context-editor__error', role: 'alert' }, errorText(loaded.error), h('button', { type: 'button', 'aria-label': text.dismiss, onClick: () => setLoaded(current => ({ ...current, status: 'ready', error: null })) }, '×')) : null,
+         notice ? h('span', { className: 'context-editor__notice', role: 'status' }, notice,
+           operationUnverified ? h('button', { type: 'button', onClick: () => { const pending = readPendingReplacement(sessionId); if (pending) void resolvePendingReplacement(pending.operationId) } }, text.verifyOperation) : null,
+           !operationUnverified ? h('button', { type: 'button', onClick: () => setNotice(''), 'aria-label': text.dismiss }, '×') : null) : null,
+         condensationError ? h('span', { className: 'context-editor__error', role: 'alert' }, condensationError,
+           h('button', { type: 'button', onClick: () => setCondensationError(''), 'aria-label': text.dismiss }, '×')) : null,
        ),
      ),
-     h('div', { className: 'context-editor__list' }, visibleRecords.map(record => record.condensation ? renderCondensation(record.condensation) : h(RecordRow, {
+     h('div', { className: 'context-editor__list' }, [
+        ...visibleRecords.flatMap(record => [
+          Number(record.historyGapBefore) > 0
+            ? h('div', { key: 'history-gap-' + record.id, className: 'context-editor__history-gap', role: 'separator' }, text.unloadedHistory(record.historyGapBefore))
+            : null,
+          record.condensation ? renderCondensation(record.condensation) : h(RecordRow, {
       key: record.id,
       record,
       selected,
@@ -1441,9 +1867,31 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
       onUndoReplacement: unit => void mutateReplacement('undo', unit),
       onCompareOriginal: compareOriginal,
       replacementAvailable,
+      contextAvailable,
+      contextUnavailableReason,
       registerNode: registerUnitNode,
       text,
-    }))),
+          }),
+        ]),
+       loaded.snapshot?.recoveryOptions?.length ? h('details', { className: 'context-editor__recovery-list' },
+         h('summary', null, text.nativeCompactionRecovery),
+         ...(loaded.snapshot.recoveryOptions).map(option => h('article', { key: 'native-recovery-' + option.compactionId, className: 'context-editor__condensation-card', 'data-recovery-operation-id': option.compactionId },
+         h('div', { className: 'context-editor__condensation-card-header' },
+           h('strong', null, text.nativeCompactionRecovery),
+           h('span', null, text.nativeCompactionCheckpoint(option.checkpointSeq)),
+           h('button', { type: 'button', disabled: readOnly || !option.available || loaded.snapshot?.capabilities?.nativeCompactionRecovery !== true, title: !option.available ? text.recoveryUnavailable(option.reason ?? 'recovery-boundary-unavailable') : loaded.snapshot?.capabilities?.nativeCompactionRecovery !== true ? text.featureUnavailable('host-capability-not-confirmed') : undefined, onClick: () => void createRecovery({ kind: 'native-compaction', compactionId: option.compactionId }) }, text.createRecoveryBranch),
+         ),
+         option.summary ? h('pre', { className: 'context-editor__condensation-summary' }, option.summary) : null,
+       ))) : null,
+       loaded.nextCursor !== null && loaded.nextCursor !== undefined
+         ? h('button', {
+           type: 'button',
+           className: 'context-editor__history-load-more',
+           disabled: historyLoading || loaded.status !== 'ready',
+           onClick: loadMoreHistory,
+         }, historyLoading ? text.loadingMore : text.loadMoreHistory(loaded.records.length, loaded.total))
+         : null,
+     ]),
     loaded.status === 'loading' ? h('div', { className: 'context-editor__state' }, text.loading) : null,
     loaded.status !== 'loading' && visibleRecords.length === 0 ? h('div', { className: 'context-editor__state' }, text.noRecords) : null,
      editing
@@ -1460,8 +1908,9 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
          proposal: condensation,
          text,
          saving: condensationLoading,
+         generating: generatingCondensation,
          error: condensationError,
-         onCancel: () => { if (!condensationLoading) void discardCondensation() },
+         onCancel: () => { if (generatingCondensation) void cancelCondensation(); else if (!condensationLoading) void discardCondensation() },
          onRegenerate: expandRelated => { if (!condensationLoading) void regenerateCondensation(expandRelated) },
          onApply: applyCondensation,
        })
@@ -1471,7 +1920,7 @@ export function ContextEditorView({ sessionId, controller, useSession }) {
 
 export async function apply(ctx) {
   const disposeRemote = await ctx.remote.$mount(contextEditorRemote)
-  ctx.inject(['slots', 'remote', 'remote.contextEditor'], scopedCtx => {
+  ctx.inject(['slots', 'remote', 'remote.contextEditor', 'uiWorkspace'], scopedCtx => {
     const controllers = new Map()
     const controllerFor = sessionId => {
       const key = String(sessionId)
@@ -1493,7 +1942,10 @@ export async function apply(ctx) {
       id: 'context-editor',
       order: 20,
       label: () => 'Context Editor',
-      inject: sessionId => ({ controller: controllerFor(sessionId) }),
+      inject: sessionId => ({
+        controller: controllerFor(sessionId),
+        openSession: target => scopedCtx.uiWorkspace.openSession(target),
+      }),
     }, ContextEditorView))
   })
 

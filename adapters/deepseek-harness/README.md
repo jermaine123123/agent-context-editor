@@ -1,119 +1,103 @@
 # Context Editor for DeepSeek Harness
 
-Agent Context Editor first provides two model-context controls: exclude selected
-units from subsequent provider input, and manually edit eligible plain-text User
-or complete unsigned Answer units with restore, undo and original-text
-comparison. It also adds a searchable, hideable, and reversible management view
-while preserving the original Session. Reasoning, older answers, and tool output
-remain available through search, filters, selection, hide, restore, and undo in
-the separate Context Editor tab.
+Context Editor adds a searchable view for the current Harness session. Each open view keeps its own search, selection, and summary draft. Views of the same session share committed edits and refresh after a write.
 
-This adapter targets the official DeepSeek Harness Developer Preview commit
-`141eb6fef83422698aef7a981029e843e8161534` and installs as one bundle. The
-package adds a `Context Editor` tab beside the normal `Chat` view for the same
-Session; it never creates a second conversation.
+## 0.4.10: interrupted-turn checkpoint selection
 
-Version `0.4.0` targets Harness rc.8 and adds reversible AI condensation for selected context alongside the existing User/Answer replacement path. When an Answer has same-turn reasoning, the edit dialog defaults to linked exclusion of that reasoning; signed reasoning may expand the confirmed impact to its paired tool chain. The replacement and linked exclusion are one operation with one `operationId`, so whole-operation undo restores only exclusions introduced by that edit. Plain-text User messages and complete unsigned Answers expose a multiline editor; replacement, restore, and per-unit LIFO undo events are persisted in the `context_editor` sidecar and materialized as matching native `context/projection` events. The original Surface nodes and history remain unchanged. Reasoning, Tool, structured User content, signed Answers, and batch replacement remain unsupported.
+Checkpoint ranges follow active Surface order and close over complete turn/tool identities. A plugin or user message inserted during a long AI turn no longer stops discovery of the remaining tool results. Intervening messages appear in the expanded-source confirmation, with a scrollable list for long tool chains. Generation and commit use the same closure algorithm; old incomplete drafts must be regenerated.
 
-The replacement path is enabled in the 0.4.0 release for the tested rc.8
-boundary. Automated Core/Host fixtures, isolated package installation, local
-provider-payload composition, and rc.8 web profile startup checks passed. The
-Harness host itself remains a Developer Preview; later Harness commits require
-a fresh acceptance run.
+## 0.4.9: answer/thought checkpoint selection
 
-The browser view resolves `navigator.languages` when it opens: `zh-*` locales
-use Chinese labels and all other locales use English. Only editor controls and
-status messages are translated; Session content remains unchanged.
+Checkpoint previews close selected answers/thoughts over their complete turn and tool chain before calling the summary model. Extra units are listed in the dialog and confirmed by Apply. This fixes the late non-contiguous Surface error when the displayed answer/thought spans tool steps; unselected neighboring turns remain intact. Legacy projection selection behavior is unchanged.
 
-Search defaults to User messages and AI final answers. Use the scope button
-beside the search box to temporarily include reasoning, Tool Call and Tool
-Output atoms. The scope is window-local and is not written to localStorage or
-the `context_editor` sidecar; User/AI/Tool type filters remain the upper bound.
+## 0.4.8: official 0.1.5-rc.1 adapter
 
-To condense a range, select one or more units and choose **AI-condense
-selected**. Selecting exactly one Answer enables an optional checkbox to include same-turn
-reasoning and tool output; it is off by default and disabled for other
-selections. The Host sends the effective selected content to the configured
-model and shows the original range, candidate summary, estimated savings, and
-risks.
-Edit the candidate before applying it. Apply writes one native
-`context/projection` event whose first root contains a fixed
-`<condensed-context>` summary (a single plain User/Answer keeps its role;
-complex ranges use a user summary) and whose remaining roots are removed.
-The active summary card can restore the saved effective source. A stale
-revision, changed source fingerprint, active native compaction, or an
-overlapping summary rejects the operation without a partial projection.
+The standard Surface/request adapter also supports the official 0.1.5-rc.1 package set. Optional message-projection registration is no longer a prerequisite for the standard-event path. The history reader handles both the older standalone message projection/replace generation and the newer Surface instance API. Actual contracts select the path; version numbers are diagnostic.
 
-## Install the tarball
+The rc.1 target uses its official Chat Completions adapter. User/Assistant edits, exclusion, complete-turn checkpoints, restart, native compaction and recovery branches are exercised with local fixed responses. Known reasoning, closed tool groups and image text are tested with that protocol; this is not acceptance of Messages signed-thinking support on rc.1. Existing alpha.1 receives separate regression coverage. P4 remains deferred.
 
-From this directory, create the package and install the resulting file into a
-Harness profile:
+## Everyday use and mixed messages
 
-```sh
-node ./scripts/build-core.mjs
-node ./scripts/build-client.mjs
-npm pack --ignore-scripts
-dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.4.0.tgz
-```
+The existing layout is retained. Technical status lives under **More → Diagnostics**, repeated limitations are collapsed, and recovery explains the new branch at confirmation. The panel owns its scroll area so host resize handles cannot cover its buttons.
 
-On Windows, `dsh` may not be on `PATH` even when Harness is installed.  Use
-the profile's bundled launcher explicitly from PowerShell:
+The request adapter supports User text, Assistant answer text with unchanged known signed reasoning, complete tool pairs, and the text of image-bearing User messages. Image attachments stay intact; visual condensation is excluded. Checkpoint condensation and native-compaction recovery retain their branch semantics. Editing a thought or unknown replay format directly remains restricted.
+
+Normal model selection preserves committed changes. Recognized official title requests are rebuilt from effective input. Fully excluded or unknown title input sends no model request; the title provider may report an auxiliary no-output result, without failing the chat. After full restoration, the route is released only when there is no remaining replay dependency. Explicitly choosing another Provider with the plugin absent is still outside plugin control.
+
+New immutable request profiles use format 2; format 1 from 0.4.5 is still read without rewriting it. Keep session logs and both plugin storage domains together. Never downgrade an active format-2 session to 0.4.5. Roll back using a complete pre-upgrade profile backup in a separate directory.
+
+Windows targets and evidence scopes are recorded in [COMPATIBILITY.md](./COMPATIBILITY.md). `scripts/accept-deepseek-current.ps1` retains the pinned alpha.1 regression; the published-host runner additionally verifies the explicitly requested rc.1 package set. These isolated runs capture official Provider requests and exercise restarts and fault recovery. Automatic isolation checks (P4) remain deferred.
+
+## Historical 0.4.5 repair scope on alpha.1
+
+The plugin now implements whole plain-text User/Assistant exclusion and text replacement through a registered **Context Editor Provider**, without modifying Harness. It keeps the original messages and roles in the session log. An ordinary persisted model selection references an immutable plugin profile; requests forwarded to the original Provider contain the edited messages. Restore selects another persisted profile.
+
+The candidate has passed isolated packed-plugin Web RPC checks for Assistant replacement, User exclusion, process restart, actual official-Provider HTTP requests, restore, and a second restart. Separate real-Agent tests cover default native compaction, complete-turn checkpoint condensation, and recovery branches retaining the pre-compaction edits. Responses are local fixed fixtures, not external model outputs. See [COMPATIBILITY.md](./COMPATIBILITY.md) for the precise evidence boundary.
+
+This first repair supports complete **plain-text messages only**. A message containing reasoning, tool calls, images, or signed blocks is not editable through this path. Unselected structured messages remain unchanged. Default native compaction must inherit the session model; custom compaction Providers/policies are unsupported. The host's raw Surface and token estimate still describe the original messages; the transformed downstream request is the behavior being verified.
+
+Keep the plugin and its `context_editor_requests` storage installed while these sessions are in use. In the tested Web restore flow, disabling the plugin causes the stored Context Editor model route to reject requests instead of sending original context. Explicitly selecting another Provider while the plugin is absent is outside that protection. The profile route remains necessary even after restoring edits, and model switching plus automatic title generation are limited in this candidate. Do not remove the storage domain or downgrade to 0.4.4 while continuing a session that references these profiles. Back up the complete profile before upgrading; to roll back, keep the new profile intact and use a separate profile containing the pre-upgrade backup.
+
+## Recorded 0.4.3 scope on alpha.2
+
+The historical acceptance below used the official `@deepseek-ai/dsh@0.1.6-alpha.2` prerelease and plugin 0.4.3. It does not certify 0.4.5 on alpha.2. The adapter selects behavior from detected contracts; the version string is diagnostic and does not enable a capability by itself.
+
+- History, search, and record paging are available. The client loads an initial page, offers a load-more action, and retrieves an unloaded search result by indexed single-record lookup while marking the skipped history gap. It keeps sequential paging as a fallback for older hosts.
+- Hide, restore, and undo change the Context Editor view state. They do not remove content from model context.
+- A single plain-text User message can be edited, restored, or undone. The plugin appends a standard Surface replacement, waits for persistence, and reads the durable session back before reporting success. The alpha.2 acceptance also captures a normal Agent request after the edit.
+- `getOperation` can reconstruct the User edit's commit status from the plugin operation record and the durable Surface event after a disconnect or host restart.
+- Before an edit, restore, or undo write, the panel saves only the operation ID and target in session-scoped local storage. On reopen it queries `getOperation`; verified results are cleared, pending writes can reuse the same operation ID, and unverified results pause further context writes.
+- In 0.4.3, context exclusion and Assistant replacement were disabled because the tested Surface projection path could not persist them. This did not establish that every pure-plugin approach was impossible; 0.4.5 uses the different Provider path described above.
+- Multi-message condensation uses a standard User checkpoint to replace contiguous complete plain-text turns. Original events remain in the log. Restore creates a new branch at the exact pre-checkpoint boundary; later messages stay in the original session.
+- The native-compaction recovery action creates a branch from a verified pre-compaction boundary. The original session remains available.
+
+The currently exercised condensation fixture selects two complete User/Assistant turns, preserves an earlier unselected turn, and verifies the exact-prefix recovery branch. Tool-chain selections still need acceptance. The exact package test covers recovery RPCs and persisted branch contents; browser-driven navigation and continuing an Agent request on a recovery branch remain outstanding.
+
+## Compatibility report
+
+The **Recheck host capabilities** control runs a synthetic in-memory contract check. It does not touch user conversations or credentials, and it does not prove persistence. Only operations that have an implemented adapter path are exposed. Unsupported exclusion and Assistant replacement cannot become enabled just because a future host happens to expose a matching method.
+
+The packed alpha.2 acceptance uses synthetic sessions and a local fixed-response Provider endpoint. It verifies the actual User edit in a normal Agent request, plus durable checkpoint and recovery behavior. No external-model call has been made; a real-model smoke remains unrun unless a separate synthetic-session credential is supplied.
+
+## Build and install
+
+From the repository root:
 
 ```powershell
-$env:DSH_HOME = '<harness-root>\.dsh'
-& '<harness-root>\node_modules\.bin\dsh.cmd' plugin --profile web add '<package-path>\context-editor-deepseek-harness-0.4.0.tgz'
+npm run build:deepseek
+npm run build:client
+New-Item -ItemType Directory -Force .\release | Out-Null
+npm pack --workspace adapters/deepseek-harness --pack-destination .\release
 ```
 
-On Windows, if either the repository path or Harness path contains spaces and
-the CLI reports `ENOENT` for a truncated `editor\adapters\...` path, first
-copy the tarball to a path without spaces (for example
-`D:\context-editor-deepseek-harness-0.4.0.tgz`) and pass that path to the same
-command. The package itself remains installed in the selected Harness profile.
+Install the generated `context-editor-deepseek-harness-0.4.5.tgz` into a disposable profile for host acceptance:
 
-If the launcher reports that `pnpm` is missing, add the Harness-provided pnpm
-directory to `PATH` for that PowerShell process, or install pnpm before running
-the official `dsh plugin` command.  For a same-version replacement, remove the
-existing package from the profile before adding the new tarball so pnpm does
-not retain an old hard-linked copy.
+```powershell
+$env:DSH_HOME = '<isolated-harness-home>'
+& '<harness-root>\node_modules\.bin\dsh.cmd' plugin --profile <profile> add '<absolute-path-to-tarball>'
+```
 
-The supported acceptance command is the official `dsh plugin --profile
-<profile> add <package>` flow.  During local iteration, a profile may instead
-use the package's `cordis.patch.yml` through the Harness `--patch` option.
+## Architecture and history loading
 
-## Host boundary
+The shared Core owns search, selection rules, summary validation, and view state. The Harness adapter owns Session discovery, async history reads, Surface writes, persistence checks, recovery branches, and client view registration.
 
-The Host reads complete persisted Session history and projects:
+New clients request snapshot metadata without an embedded record list and fetch records through `listRecords`. Older clients that omit `includeRecords: false` keep receiving the complete snapshot. Search retrieves a distant matched record through indexed `getRecord` and leaves the intervening history unloaded; older host pairings can fall back to sequential pages. The host currently builds its session projection from the cached event history; it reads the initial log in pages and fetches only a new tail after that cache is established. A 100,000-event host benchmark remains to be run.
 
-- `user/message` → `user`;
-- reasoning and answer blocks from one turn → one `ai` record with separate
-  `#reasoning` and `#answer` editable units;
-- `tool/call` + `tool/result` by `callId` → one `tool` record.
+Session history stays append-only. A successful User edit or checkpoint is reported as applied only after persistence readback matches the effective model projection. View-state operations are stored separately and are not described as model-context writes.
 
-Stream chunks, system/request headers, summaries and compaction events do not
-become editable records in this phase.  Reasoning and answer units can be
-selected and hidden independently; old record-level view events remain
-compatible. Hide/restore/reset/undo events are
-stored in the `context_editor` storage-domain sidecar, fenced by Session
-`createdAt`/`cwd`. Session event logs remain append-only; model requests use the projected history.
+## Verification
 
-## Current scope
+Run project checks with `npm run verify`. The following is the historical 0.4.3 alpha.2 acceptance command; its direct-Surface assumptions do not certify the 0.4.5 Provider path. For 0.4.5 use the request-profile scripts in [COMPATIBILITY.md](./COMPATIBILITY.md).
 
-Search (dialogue scope by default, with temporary full-scope toggle), literal
-match counts, navigation, filters, placeholders, selection,
-Shift-selection, persistence and CAS/revision handling are included.  While a
-Session is running the Host remains readable/searchable, while mutations are
-rejected until the settled log can be projected again. Native context exclusion
-previews closure expansion and token deltas, rechecks the rc.8 revision in Agent
-maintenance, appends one atomic `context/projection` event, and flushes before
-success. Compressed or inactive roots are unavailable; visual hiding remains
-independent. Replacement uses the same canonical-message composer as exclusion,
-so the provider order is always original text → replacement → exclusion
-(exclusion wins). Search and preview use `effectiveText`; restoring an exclusion
-later reveals the edited text. The native path is enabled with
-`contextExclusion: true` and `contextReplacement: true` for eligible
-User/Answer units. Keep this adapter on the pinned rc.8 commit; older rc.6
-readers do not understand `context/projection`.
+```powershell
+npm run verify
+$env:DSH_HOST_ROOT = '<path-to-official-alpha.2-installation>'
+$env:DSH_EXPECTED_HOST_VERSION = '0.1.6-alpha.2'
+$env:DSH_PLUGIN_TARBALL = (Resolve-Path .\release\context-editor-deepseek-harness-0.4.3.tgz).Path
+node .\scripts\accept-deepseek-harness-alpha2.mjs
+npm test -- test/deepseek-harness-alpha2.test.ts
+```
 
-The generated `core-runtime.js` is bundled from the canonical Core sources in
-`packages/context-editor-core`. Rebuild it after changing Core and run the root
-verification command before publishing.
+The host script installs the exact packed artifact in an isolated profile, rejects a different host version, tests metadata-only snapshots, record pages, indexed single-record lookup, starts the packaged panel/RPC host, captures the official Session Agent's request through a local fixed-response Provider, and verifies edit, restore, condensation, and recovery behavior across process restarts. It also verifies that unsupported exclusion and Assistant replacement do not alter the source session. It does not contact an external model or test other Harness releases.
+
+The remaining acceptance list and evidence levels are in [COMPATIBILITY.md](./COMPATIBILITY.md).

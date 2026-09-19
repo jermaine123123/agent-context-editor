@@ -1,17 +1,50 @@
 /*
  * GENERATED FILE - do not edit directly.
- * Canonical Core source digest: d467cb89a9c9c6860c58d815d8cd3993be5b6a3869a9e4a80d3ecd3ed2fc8d3f
+ * Canonical Core source digest: fbe593c146890700434ebd0da5029d5337677db1fa8663cc2495ad358a9f7acc
  * Rebuild with: npm run build:deepseek
  */
 import {
   atomMatchesSearchScope as atomMatchesSharedSearchScope,
   projectRecords as projectSharedRecords,
   reduceReplacementStates,
+  selectCondensationRange,
   selectAssociatedReasoningTargets,
   searchRecords as searchSharedRecords,
 } from './core-runtime.js'
 
 export { selectCondensationRange, validateCondensationSummary, frameCondensationSummary, estimateCondensationTokens } from './core-runtime.js'
+
+/** Close a checkpoint in Surface order, not in the UI's grouped-record order. */
+export function selectCheckpointCondensationRange(projection, requestedUnitIds) {
+  const units = projection.records.flatMap(record => record.units ?? [])
+  const requested = [...new Set(requestedUnitIds.map(String))]
+  const selected = new Set(requested)
+  const positions = new Map((projection.activeSurfaceSeqs ?? []).map((root, index) => [Number(root), index]))
+  const entries = units.map(unit => ({
+    unit,
+    positions: unit.atoms.map(atom => positions.get(Number(atom.sourceRef?.entryId))).filter(index => index !== undefined),
+    links: unit.atoms.flatMap(atom => [atom.turnId ? `turn:${atom.turnId}` : '', atom.toolCallId ? `call:${atom.toolCallId}` : ''].filter(Boolean)),
+  }))
+  let changed = true
+  while (changed) {
+    changed = false
+    let first = Infinity, last = -1
+    const links = new Set()
+    for (const entry of entries) if (selected.has(entry.unit.id)) {
+      for (const position of entry.positions) { first = Math.min(first, position); last = Math.max(last, position) }
+      for (const link of entry.links) links.add(link)
+    }
+    for (const entry of entries) {
+      if (selected.has(entry.unit.id)) continue
+      if (entry.positions.some(position => position >= first && position <= last) || entry.links.some(link => links.has(link))) {
+        selected.add(entry.unit.id)
+        changed = true
+      }
+    }
+  }
+  const range = selectCondensationRange(projection.records, [...selected], projection.projectionStates, { expandRelated: false })
+  return { ...range, requestedUnitIds: requested, autoExpandedUnitIds: range.effectiveUnitIds.filter(id => !requested.includes(id)) }
+}
 
 export { reduceReplacementStates, selectAssociatedReasoningTargets, selectProjectionTargets } from './core-runtime.js'
 
@@ -27,6 +60,21 @@ function asObject(value) {
 
 function encodePart(value) {
   return encodeURIComponent(String(value ?? ''))
+}
+
+const SURFACE_REPLACEMENT_PREFIX = 'context-editor-surface-v1:'
+export function parseContextEditorSurfaceMarker(value) {
+  const id = String(value ?? '')
+  if (!id.startsWith(SURFACE_REPLACEMENT_PREFIX)) return undefined
+  const parts = id.slice(SURFACE_REPLACEMENT_PREFIX.length).split(':')
+  if (parts.length !== 3 || !/^\d+$/.test(parts[1])) return undefined
+  const rootEventSeq = Number(parts[1])
+  if (!Number.isSafeInteger(rootEventSeq) || rootEventSeq < 0) return undefined
+  try {
+    return { sessionId: decodeURIComponent(parts[0]), rootEventSeq, operationId: decodeURIComponent(parts[2]) }
+  } catch {
+    return undefined
+  }
 }
 
 /** A small deterministic hash used for fingerprints, not for security. */
@@ -137,25 +185,83 @@ function toolCallIdFromResult(data) {
   return value.callId ?? message.callId ?? source.callId ?? first.toolCallId
 }
 
+/** Recognize the block-aligned DeepSeek Messages v1 contract; other replay formats stay opaque. */
+function deepseekReplay(message) {
+  const source = asObject(message.source)
+  const replay = asObject(source.replayState)
+  const response = asObject(replay.response)
+  const blocks = message.content
+  const wrappedModel = source.provider === 'context-editor' && /^ce[12]-[a-f0-9]{64}$/.test(source.model)
+  if (source.kind !== 'model' || response.kind !== 'deepseek-messages' || response.version !== 1 || (!wrappedModel && response.model !== source.model)) return undefined
+  if (!Array.isArray(blocks) || !Array.isArray(replay.blocks) || replay.blocks.length !== blocks.length) return undefined
+  if (!replay.blocks.every((value, index) => {
+    const block = asObject(value)
+    return block.type === blocks[index]?.type && ['text', 'reasoning', 'tool-call'].includes(block.type)
+      && (block.signature === undefined || (block.type === 'reasoning' && typeof block.signature === 'string'))
+  })) return undefined
+  return replay
+}
+
+/** A recognized signed thought may be removed whole and replaced with unsigned text. */
+export function canCondenseReasoningBlock(message, blockIndex) {
+  const source = asObject(message?.source)
+  const block = asObject(message?.content?.[blockIndex])
+  return block.type === 'reasoning' && typeof block.text === 'string'
+    && block.signature === undefined && block.signed !== true
+    && source.signed !== true && source.replayBound !== true
+    && deepseekReplay(message) !== undefined
+}
+
+/** Keep native signatures only for unchanged blocks and realign metadata after projection. */
+export function projectedMessageSource(original, content) {
+  const source = asObject(original.source)
+  if (source.kind !== 'model') return structuredClone(source)
+  const { replayState: _replayState, ...plainSource } = source
+  const replay = deepseekReplay(original)
+  if (!replay) return structuredClone(plainSource)
+  const used = new Set()
+  const blocks = content.map(block => {
+    const index = original.content.findIndex((candidate, i) => !used.has(i) && JSON.stringify(candidate) === JSON.stringify(block))
+    if (index >= 0) {
+      used.add(index)
+      return structuredClone(replay.blocks[index])
+    }
+    // The editor may synthesize text, but cannot synthesize signed reasoning or tool calls.
+    if (block.type !== 'text') throw new Error('CONTEXT_EDITOR_REPLAY_BLOCK_CHANGED')
+    return { type: 'text' }
+  })
+  return { ...structuredClone(plainSource), replayState: { ...structuredClone(replay), blocks } }
+}
+
 /**
  * Convert the complete persisted event log into finalized ContextAtoms.
  * `assistant/chunk` and other live/structural events are intentionally ignored.
  */
-export function normalizeSessionEvents(session, events) {
+export function normalizeSessionEvents(session, events, options = {}) {
   const identity = sessionIdentity(session)
   const atoms = []
   let sourceRevision = 0
+  const modelToolCalls = new Set(options.modelToolCalls ?? [])
+  for (const event of events ?? []) if (event.type === 'assistant/message') {
+    for (const block of event.data?.message?.content ?? []) if (block.type === 'tool-call') modelToolCalls.add(String(block.id ?? block.callId))
+  }
   for (const event of Array.isArray(events) ? events : []) {
     const value = asObject(event)
     const seq = Number.isSafeInteger(value.seq) ? value.seq : sourceRevision
-    sourceRevision = Math.max(sourceRevision, seq)
+    // Delivery acknowledgements do not change model input or plugin selection.
+    if (value.type !== 'session-log-deepseek/delivery-accepted') sourceRevision = Math.max(sourceRevision, seq)
     const type = value.type
     const data = asObject(value.data)
+    // Surface replacement events are durable model-input nodes, but the
+    // original event remains the editor's canonical identity and source text.
+    if (type === 'user/message' && (parseContextEditorSurfaceMarker(data.id) !== undefined
+      || String(data.id ?? '').startsWith('context-editor-condensation-v1:'))) continue
     if (type === 'user/message') {
       const recordId = `user:${stableRecord(identity, 'user', seq)}`
       const text = contentOf(data)
       const blocks = Array.isArray(data.content) ? data.content : []
-      const plainBlocks = blocks.length > 0 && blocks.every(block => asObject(block).type === 'text' && typeof asObject(block).text === 'string')
+      const plainBlocks = blocks.some(block => block?.type === 'text' && typeof block.text === 'string')
+        && blocks.every(block => (block?.type === 'text' && typeof block.text === 'string' && !block.signature && !block.signed) || block?.type === 'image')
       const structured = typeof data.content === 'string'
         ? data.content.trim().length === 0
         : !plainBlocks
@@ -169,7 +275,8 @@ export function normalizeSessionEvents(session, events) {
       const message = asObject(data.message)
       const blocks = Array.isArray(message.content) ? message.content : []
       const source = asObject(message.source)
-      const replayBound = source.replayState !== undefined || source.replayBound === true || source.signed === true
+      const replay = deepseekReplay(message)
+      const replayBound = (source.replayState !== undefined && replay === undefined) || source.replayBound === true || source.signed === true
       blocks.forEach((block, blockIndex) => {
         const candidate = asObject(block)
         if (candidate.type === 'text' || candidate.type === 'reasoning') {
@@ -177,7 +284,7 @@ export function normalizeSessionEvents(session, events) {
           atoms.push(atom(identity, value, blockIndex, kind, candidate.text, {
             recordId: `ai-turn:${stableRecord(identity, 'ai-turn', turnId)}`,
             turnId,
-            hasSignature: candidate.signature !== undefined || candidate.signed === true || replayBound,
+            hasSignature: candidate.signature !== undefined || candidate.signed === true || replayBound || replay?.blocks[blockIndex]?.signature !== undefined,
           }))
         } else if (candidate.type === 'tool-call') {
           const callId = String(candidate.id ?? candidate.callId ?? `seq-${seq}-block-${blockIndex}`)
@@ -194,6 +301,9 @@ export function normalizeSessionEvents(session, events) {
       continue
     }
     if (type === 'tool/call') {
+      // The model-visible call already lives in assistant/message. This record
+      // only traces execution and must not become an unavailable duplicate.
+      if (modelToolCalls.has(String(data.callId))) continue
       const callId = String(data.callId ?? `seq-${seq}`)
       const recordId = `tool:${stableRecord(identity, 'tool', callId)}`
       const text = [data.name, data.arguments].filter(item => typeof item === 'string').join('\n')
@@ -390,6 +500,11 @@ function nativeProjectionEvents(events) {
 
 function matchedReplacementEvents(rowEvents, events, prepared = []) {
   const nativeIds = new Set(nativeProjectionEvents(events).filter(event => event?.data?.owner === CONTEXT_PROJECTION_OWNER).map(event => String(event?.data?.operationId ?? '')).filter(Boolean))
+  for (const event of Array.isArray(events) ? events : []) {
+    if (event?.type !== 'user/message') continue
+    const marker = parseContextEditorSurfaceMarker(event?.data?.id)
+    if (marker?.operationId) nativeIds.add(marker.operationId)
+  }
   const preparedIds = new Set((Array.isArray(prepared) ? prepared : []).map(event => String(event.eventId)))
   return normalizeReplacementEvents(rowEvents).filter(event => nativeIds.has(event.eventId) || preparedIds.has(event.eventId))
 }
@@ -501,10 +616,10 @@ export function buildViewEvent(options) {
 
 /** Build an adapter snapshot from a normalized event log and sidecar row. */
 export function buildProjection(identity, events, row, options = {}) {
-  const normalized = normalizeSessionEvents(identity, events)
+  const normalized = options.normalized ?? normalizeSessionEvents(identity, events)
   const viewEvents = normalizeViewEvents(row?.events)
-  const replacementEvents = normalizeReplacementEvents(row?.replacementEvents)
-  const activeReplacementEvents = matchedReplacementEvents(replacementEvents, events, options.preparedReplacementEvents)
+  const replacementEvents = normalizeReplacementEvents([...(row?.replacementEvents ?? []), ...(options.committedReplacementEvents ?? [])])
+  const activeReplacementEvents = matchedReplacementEvents(replacementEvents, events, [...(options.preparedReplacementEvents ?? []), ...(options.committedReplacementEvents ?? [])])
   const states = reduceViewStates(normalized.atoms, viewEvents)
   const baseRecords = projectRecords(normalized.atoms, states, new Map())
   const replacementStates = reduceReplacementStates(
@@ -515,9 +630,10 @@ export function buildProjection(identity, events, row, options = {}) {
   const contextProjection = reduceContextProjectionStates(events, normalized.atoms, options.activeSurfaceSeqs, {
     records: baseRecords,
     replacementStates,
+    requestOverlays: options.requestOverlays,
   })
   const records = projectRecords(normalized.atoms, states, contextProjection.states, replacementStates)
-  const matched = matchedReplacementEvents(replacementEvents, events)
+  const matched = matchedReplacementEvents(replacementEvents, events, options.committedReplacementEvents)
   const revision = revisionFor(normalized.identity, normalized.sourceRevision, viewEvents, matched, events)
   return {
     ...normalized,
@@ -557,9 +673,11 @@ export function recordSnapshot(record) {
       effectiveText: unit.effectiveText,
       replacementState: unit.replacementState,
       replacementSupported: unit.replacementSupported,
+      ...(unit.contextMutationDisabledReason ? { contextMutationDisabledReason: unit.contextMutationDisabledReason } : {}),
       ...(unit.replacementDisabledReason ? { replacementDisabledReason: unit.replacementDisabledReason } : {}),
       canRestoreReplacement: unit.canRestoreReplacement,
       canUndoReplacement: unit.canUndoReplacement,
+      ...(unit.operations ? { operations: unit.operations } : {}),
       ...(unit.associatedReasoningUnitIds?.length ? { associatedReasoningUnitIds: unit.associatedReasoningUnitIds } : {}),
     })),
     searchableText: record.searchableText,
@@ -591,8 +709,7 @@ function cloneContextMessage(original, pairs, replacementId, changed) {
   copy.content = pairs.map(pair => pair.block)
   if (replacementId !== undefined) copy.id = replacementId
   if (changed && copy.role === 'assistant' && copy.source?.kind === 'model') {
-    const { replayState: _replayState, ...safeSource } = asObject(copy.source)
-    copy.source = safeSource
+    copy.source = projectedMessageSource(original, copy.content)
   }
   return copy
 }
@@ -604,7 +721,9 @@ function composedRoot(projection, root, replacementStates = projection.replaceme
   const rootAtoms = projection.atoms.filter(atom => Number(atom.sourceRef?.entryId) === root)
   const lookup = replacementLookup(records, replacementStates)
   let pairs = sourceBlocks.map((block, index) => {
-    const atom = rootAtoms.find(candidate => candidate.sourceRef.blockIndex === index)
+    const atom = original?.role === 'user' && original.source?.kind !== 'tool'
+      ? (block.type === 'text' ? rootAtoms.find(candidate => candidate.kind === 'user') : undefined)
+      : rootAtoms.find(candidate => candidate.sourceRef.blockIndex === index)
     const item = atom ? lookup.byAtom.get(atom.id) : undefined
     return { block, atomId: atom?.id, unitId: item?.unit.id, synthetic: false }
   })
@@ -619,9 +738,9 @@ function composedRoot(projection, root, replacementStates = projection.replaceme
         // A plain User message may be represented by several text blocks but
         // is one editable atom. Remove every canonical block from that root,
         // then inject the replacement exactly once at the first block position.
-        const preserved = pairs.filter(candidate => candidate.atomId && candidate.atomId !== unitAtoms[0]?.id)
+        const preserved = pairs.filter(candidate => candidate.atomId !== unitAtoms[0]?.id)
         const insertionOffset = pairs.slice(0, firstIndex)
-          .filter(candidate => candidate.atomId && candidate.atomId !== unitAtoms[0]?.id).length
+          .filter(candidate => candidate.atomId !== unitAtoms[0]?.id).length
         pairs = preserved
         pairs.splice(insertionOffset, 0, {
           block: { type: 'text', text: item.state.effectiveText },
@@ -695,7 +814,22 @@ function reduceContextProjectionStates(events, atoms, activeSurfaceSeqs, options
       }
     }
   }
+  for (const change of options.requestOverlays ?? []) {
+    overlays.set(change.rootEventSeq, { ...change, owner: CONTEXT_PROJECTION_OWNER })
+  }
   const active = Array.isArray(activeSurfaceSeqs) ? new Set(activeSurfaceSeqs) : undefined
+  // One Answer can span several Assistant messages. Its edited text lives at the
+  // final block; earlier blocks removed by composition are not user exclusions.
+  const includedReplacementAtoms = new Set()
+  for (const record of options.records ?? []) for (const unit of record.units ?? []) {
+    const replacement = options.replacementStates?.get(unit.id)
+    if (replacement?.replacementState !== 'replaced') continue
+    const roots = new Set(unit.atoms.map(atom => Number(atom.sourceRef?.entryId)))
+    if ([...roots].some(root => overlays.get(root)?.mode === 'replace'
+      && overlays.get(root).message?.content?.some(block => block.type === 'text' && block.text === replacement.effectiveText))) {
+      for (const id of unit.atomIds) includedReplacementAtoms.add(id)
+    }
+  }
   const states = new Map()
   for (const value of atoms) {
     const root = Number(value.sourceRef?.entryId)
@@ -704,6 +838,7 @@ function reduceContextProjectionStates(events, atoms, activeSurfaceSeqs, options
       continue
     }
     const overlay = overlays.get(root)
+    if (includedReplacementAtoms.has(value.id)) { states.set(value.id, 'include'); continue }
     if (overlay === undefined || overlay.mode === 'clear') {
       states.set(value.id, 'include')
       continue

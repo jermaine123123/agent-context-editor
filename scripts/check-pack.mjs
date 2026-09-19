@@ -17,7 +17,7 @@ const expected = {
     forbidden: ['core.js', 'pi-app/'],
   },
   'adapters/deepseek-harness': {
-    required: ['core.js', 'core-runtime.js', 'core.d.ts', 'client.bundle.js', 'cordis.patch.yml'],
+    required: ['core.js', 'core-runtime.js', 'core.d.ts', 'client.bundle.js', 'cordis.patch.yml', 'request-transform.js'],
     forbidden: ['core.host.js', 'core.d.ts.template', 'runtime-entry.js'],
   },
 }

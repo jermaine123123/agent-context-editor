@@ -5,6 +5,11 @@ import { z } from 'zod'
 export const PACKAGE_NAME = 'context-editor-deepseek-harness'
 export const methods = Object.freeze([
   'getSnapshot',
+  'getCompatibility',
+  'runCompatibilityCheck',
+  'getOperation',
+  'previewRecovery',
+  'createRecoveryBranch',
   'listRecords',
   'getRecord',
   'searchRecords',

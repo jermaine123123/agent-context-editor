@@ -51,7 +51,7 @@ describe('DeepSeek Harness Context Editor core', () => {
       `${records[1]!.id}#reasoning`,
       `${records[1]!.id}#answer`,
     ])
-    expect(records[2]?.atoms.map(atom => atom.kind)).toEqual(['tool_call', 'tool_call', 'tool_output'])
+    expect(records[2]?.atoms.map(atom => atom.kind)).toEqual(['tool_call', 'tool_output'])
     expect(records[2]?.toolCallId).toBe('call-1')
     expect(records.some(record => record.searchableText.includes('未完成'))).toBe(false)
   })

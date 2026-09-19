@@ -14,8 +14,59 @@ export function createHarnessText(locale) {
   const unitKind = value => zh
     ? value === 'reasoning' ? '思考' : value === 'answer' ? '回答' : value === 'tool' ? '工具' : '用户'
     : value === 'reasoning' ? 'Reasoning' : value === 'answer' ? 'Answer' : value === 'tool' ? 'Tool' : 'User'
+  const featureUnavailable = reason => {
+    const messages = {
+      'request-transform-unsupported-block': zh ? '所选内容包含尚不支持的格式。其他消息仍可操作。' : 'This selection contains an unsupported format. Other messages remain available.',
+      'signed-content': zh ? '这段思考带有签名，需要保留原样。' : 'This signed reasoning must remain unchanged.',
+      'official-surface-has-no-lossless-message-removal': zh ? '此宿主接口不能无损移除模型消息，无法排除上下文。' : 'This host API cannot remove model messages losslessly, so context exclusion is unavailable.',
+      'assistant-message-surface-replacement-rejected-by-source-reference-contract': zh ? '此宿主不接受 Assistant 消息替换；目前仅支持单条纯文本 User 消息。' : 'This host rejects Assistant message replacement; only one plain text User message is supported.',
+      'multi-message-summary-restore-not-proven-for-standard-surface': zh ? '尚未验证多消息精简与恢复契约，精简入口已停用。' : 'Multi-message condensation and restore are unverified, so condensation is disabled.',
+      'host-surface-contract': zh ? '当前宿主只确认单条纯文本 User 消息可替换、恢复和撤销。' : 'This host only supports replacing, restoring, and undoing a single plain text User message.',
+      'request-transform-plain-text-only': zh ? '目前仅支持完整的纯文本 User 或 Assistant 消息；含思考、工具、图片或签名的消息暂不支持。' : 'Only complete plain text User or Assistant messages are supported; reasoning, tools, images, and signatures are not supported.',
+      'request-transform-compaction-route': zh ? '请求修改目前需要默认原生压缩，并继承当前会话模型；自定义压缩模型暂不支持。' : 'Request editing requires default native compaction inheriting the session model; custom compaction models are not supported.',
+      'compaction-behavior-not-included-in-the-synthetic-self-test': zh ? '尚未核验原生压缩的覆盖与恢复行为。' : 'Native compaction coverage and restore behavior have not been verified.',
+      'host-capability-not-confirmed': zh ? '宿主尚未确认此功能。' : 'The host has not confirmed this feature.',
+    }
+    return messages[reason] ?? (reason || (zh ? '宿主尚未确认此功能。' : 'The host has not confirmed this feature.'))
+  }
+  const compatibilitySummary = report => {
+    const identity = report?.hostIdentity ?? {}
+    const features = report?.features ?? {}
+    const labels = {
+      historyRead: zh ? '历史读取' : 'history read',
+      search: zh ? '搜索' : 'search',
+      viewMutation: zh ? '视图状态' : 'view state',
+      contextExclusion: zh ? '上下文排除' : 'context exclusion',
+      contextReplacement: zh ? 'User 文本替换' : 'User text replacement',
+      assistantReplacement: zh ? 'Assistant 替换' : 'Assistant replacement',
+      contextCondensation: zh ? '上下文精简' : 'context condensation',
+      nativeCompaction: zh ? '原生压缩' : 'native compaction',
+    }
+    const available = Object.entries(features).filter(([, feature]) => feature?.available === true).map(([name]) => labels[name] ?? name)
+    const gated = Object.entries(features).filter(([, feature]) => feature?.available !== true).map(([name, feature]) => `${labels[name] ?? name}: ${featureUnavailable(feature?.reason)}`)
+    const version = identity.components?.['@deepseek-ai/dsh-session'] ?? identity.version ?? 'unknown'
+    const test = report?.selfTest?.status ?? 'not run'
+    return zh
+      ? `Harness ${version} · 合成接口自检：${test}（未写入会话）· 可用：${available.join('、') || '无'} · 受限：${gated.join('；') || '无'}`
+      : `Harness ${version} · synthetic API check: ${test} (no session writes) · available: ${available.join(', ') || 'none'} · gated: ${gated.join('; ') || 'none'}`
+  }
   return {
+    more: zh ? '更多' : 'More',
+    diagnostics: zh ? '诊断' : 'Diagnostics',
+    details: zh ? '详情' : 'Details',
+    actionDetails: zh ? '操作说明' : 'Action details',
+    dismiss: zh ? '关闭提示' : 'Dismiss',
+    verifyOperation: zh ? '核实状态' : 'Verify status',
+    nativeProjectionUnsupported: zh ? '当前 Harness 接口限制了部分上下文操作。' : 'Some context actions are limited by the current Harness API.',
+    featureUnavailable,
+    compatibilitySummary,
+    runCompatibilityCheck: zh ? '重新检查宿主能力' : 'Recheck host capabilities',
+    compatibilityChecking: zh ? '正在检查…' : 'Checking…',
+    compatibilityCheckFailed: error => zh ? `能力检查失败：${error}` : `Compatibility check failed: ${error}`,
+    condensationPending: zh ? '摘要已生成，尚未应用。点击“应用精简”后，列表才会显示“已应用精简”。' : 'Summary generated, not applied yet. Click Apply condensation to show it as applied in the list.',
+    condensationConflict: zh ? '上下文已变化，已刷新。请确认选区后重新生成精简。' : 'The context changed and has been refreshed. Check your selection and generate again.',
     condensationExpandRelated: zh ? '同步精简 AI 思考和工具输出' : 'Also condense AI reasoning and tool outputs',
+    condensationExpandedNotice: count => zh ? `为保留完整回合，本次精简还包含以下 ${count} 项。应用即确认此范围。` : `To keep complete turns, this summary also includes the following ${count} items. Apply confirms this range.`,
     generateCondensation: zh ? '生成精简' : 'Generate summary',
     condensationModelPicker: zh ? '\u7cbe\u7b80\u6a21\u578b' : 'Condensation model',
     condenseSelected: count => zh ? `AI \u7cbe\u7b80${count ? `\uff08${count}\uff09` : ''}` : `AI condense${count ? ` (${count})` : ''}`,
@@ -26,7 +77,15 @@ export function createHarnessText(locale) {
     condensationSummary: zh ? '\u7cbe\u7b80\u6458\u8981' : 'Condensation summary',
     condensationOriginal: zh ? '\u5c55\u5f00\u539f\u6587\u8303\u56f4' : 'Show original selected range',
     applyCondensation: zh ? '\u5e94\u7528\u7cbe\u7b80' : 'Apply condensation',
-    restoreCondensation: zh ? '\u6062\u590d\u7cbe\u7b80\u524d\u5185\u5bb9' : 'Restore before condensation',
+    restoreCondensation: zh ? '\u6062\u590d\u5230\u7cbe\u7b80\u524d\u7684\u65b0\u5206\u652f' : 'Recover to a new branch',
+    createRecoveryBranch: zh ? '\u521b\u5efa\u6062\u590d\u5206\u652f' : 'Create recovery branch',
+    recoveryPreview: (count, retained) => zh
+      ? `将在新分支恢复此前的 ${count} 条消息。之后的 ${retained} 条消息保留在原会话。下面是恢复位置附近的用户消息。继续？`
+      : `Restore the earlier ${count} messages in a new branch. The later ${retained} messages stay in the original session. The nearby user message is shown below. Continue?`,
+    recoveryCreated: zh ? '\u6062\u590d\u5206\u652f\u5df2\u6838\u5b9e\u5e76\u4fdd\u5b58\u3002' : 'Recovery branch verified and saved.',
+    recoveryUnavailable: reason => zh ? `\u65e0\u6cd5\u6062\u590d\uff1a${reason}` : `Recovery is unavailable: ${reason}`,
+    nativeCompactionRecovery: zh ? '\u539f\u751f\u538b\u7f29\u6062\u590d' : 'Native compaction recovery',
+    nativeCompactionCheckpoint: value => zh ? `\u538b\u7f29\u68c0\u67e5\u70b9\uff1a${Number(value)}` : `Compaction checkpoint: ${Number(value)}`,
     activeCondensation: zh ? '\u5df2\u5e94\u7528\u7cbe\u7b80' : 'Applied condensation',
     activeCondensations: zh ? '\u5df2\u5e94\u7528\u7684\u7cbe\u7b80\u6458\u8981' : 'Applied condensations',
     condensationSource: (count, expanded) => zh ? `\u539f\u6587\u8303\u56f4\uff1a${count} \u4e2a\u5355\u5143${expanded ? `（\u81ea\u52a8\u6269\u5c55 ${expanded} \u4e2a）` : ''}` : `Source range: ${count} units${expanded ? ` (${expanded} auto-expanded)` : ''}`,
@@ -102,7 +161,12 @@ export function createHarnessText(locale) {
     restoreAll: zh ? '恢复全部' : 'Restore all',
     undo: zh ? '撤销' : 'Undo',
     running: zh ? 'Agent 运行中：仅可读取和搜索' : 'Agent running: only reading and searching are available',
-    loading: zh ? '正在读取完整会话…' : 'Reading the complete session…',
+    loading: zh ? '正在加载会话…' : 'Loading session…',
+    loadingMore: zh ? '正在加载更多记录…' : 'Loading more history…',
+    unloadedHistory: count => zh ? `中间还有 ${Number(count) || 0} 条未加载记录` : `${Number(count) || 0} history records between these items are not loaded`,
+    loadMoreHistory: (loaded, total) => zh
+      ? `加载更多记录（${Number(loaded) || 0}/${Number(total) || 0}）`
+      : `Load more history (${Number(loaded) || 0}/${Number(total) || 0})`,
     noRecords: zh ? '没有符合当前筛选的可编辑记录。' : 'No editable records match the current filters.',
     edit: zh ? '编辑' : 'Edit',
     edited: zh ? '已编辑' : 'Edited',
@@ -123,6 +187,7 @@ export function createHarnessText(locale) {
         'projection-unavailable': zh ? 'Provider 投影暂不可用' : 'provider projection is unavailable',
         'unsupported-unit-kind': zh ? '该单元类型不支持编辑' : 'this unit type does not support editing',
         'invalid-target': zh ? '原文已变化，无法安全编辑' : 'the canonical text changed and cannot be edited safely',
+        'request-transform-plain-text-only': zh ? '仅支持完整的纯文本消息，不能包含思考、工具、图片或签名' : 'only complete plain text messages without reasoning, tools, images, or signatures are supported',
         'associated-reasoning-unavailable': zh ? '关联的本轮思考或工具链无法安全投影' : 'the associated reasoning or tool chain cannot be projected safely',
         'condensation-active': zh ? '摘要已生效，请先恢复精简前内容' : 'condensation is active; restore it before editing',
       }
@@ -138,5 +203,9 @@ export function createHarnessText(locale) {
     replacementImpactDisabled: reason => zh ? `联动已禁用：${reason}` : `Linked exclusion disabled: ${reason}`,
     replacementImpactConfirm: zh ? '确认保存' : 'Confirm save',
     editFailed: error => zh ? `编辑失败：${error}` : `Edit failed: ${error}`,
+    operationRecovered: zh ? '已从持久化会话核实上次编辑，修改已生效。' : 'The previous edit was verified from durable session history.',
+    operationPending: zh ? '上次编辑尚未写入宿主会话；可重试同一操作完成提交。' : 'The previous edit has no verified host write yet. Retry the same action to finish it.',
+    operationFailed: zh ? '已核实上次操作未写入会话，可重新操作。' : 'The previous operation was confirmed absent from the session. You can try again.',
+    operationUnverified: zh ? '无法核实上次编辑状态，已暂停新的上下文修改。恢复宿主后重新打开面板再检查。' : 'The previous edit could not be verified. New context writes are paused; reopen the panel when the host is available to check again.',
   }
 }

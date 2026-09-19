@@ -1,5 +1,10 @@
 export interface ContextEditorRemote {
   getSnapshot(request: unknown): Promise<unknown>
+  getCompatibility(): Promise<unknown>
+  runCompatibilityCheck(): Promise<unknown>
+  getOperation(request: unknown): Promise<unknown>
+  previewRecovery(request: unknown): Promise<unknown>
+  createRecoveryBranch(request: unknown): Promise<unknown>
   listRecords(request: unknown): Promise<unknown>
   getRecord(request: unknown): Promise<unknown>
   searchRecords(request: unknown): Promise<unknown>
