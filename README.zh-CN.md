@@ -47,10 +47,10 @@ Agent Context Editor 是一个可以手动排除、编辑和选择性压缩 AI �
 
 ### Pi 扩展
 
-从 [Release assets](https://github.com/jermaine123123/agent-context-editor/releases) 下载 `pi-context-editor-0.6.0.tgz`。Pi `0.84.2` 安装本地包目录，不直接安装 `.tgz` 文件。请先解压，使 `package.json` 位于目录根部，然后运行：
+从 [Release assets](https://github.com/jermaine123123/agent-context-editor/releases) 下载 `pi-context-editor-0.6.1.tgz`。Pi `0.84.2` 安装本地包目录，不直接安装 `.tgz` 文件。请先解压，使 `package.json` 位于目录根部，然后运行：
 
 ```sh
-pi install ./pi-context-editor-0.6.0
+pi install ./pi-context-editor-0.6.1
 ```
 
 直接使用本仓库时，可以安装适配器目录：
@@ -63,13 +63,13 @@ pi install ./adapters/pi-extension
 
 ### DeepSeek Harness
 
-从 Release assets 下载 `context-editor-deepseek-harness-0.4.0.tgz`，然后使用 Harness 官方 CLI 安装：
+从 Release assets 下载 `context-editor-deepseek-harness-0.4.10.tgz`，然后使用 Harness 官方 CLI 安装：
 
 ```sh
-dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.4.0.tgz
+dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.4.10.tgz
 ```
 
-当前适配器面向 DeepSeek Harness Developer Preview commit `141eb6fef83422698aef7a981029e843e8161534` 和 `@deepseek-ai/dsh@0.1.0-rc.8`。经过测试的宿主边界见[兼容性文档](adapters/deepseek-harness/COMPATIBILITY.md)。
+当前适配器已在 DeepSeek Harness `0.1.5-rc.1` 和隔离的 `0.1.6-alpha.1` 构建中完成测试。经过测试的宿主边界见[兼容性文档](adapters/deepseek-harness/COMPATIBILITY.md)。
 
 ## 使用方法
 
@@ -84,6 +84,8 @@ dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.4.0.tgz
 ### DeepSeek Harness
 
 打开普通 Chat 视图旁边的 `Context Editor` 标签页。该标签页管理同一个 Session，支持上下文排除、User/Answer 编辑、搜索、筛选、选择、视觉隐藏、恢复和撤销。选中的上下文可以生成可编辑摘要，经预览确认后替换，并可恢复原文。
+
+近期适配器更新进一步改善了新版 DeepSeek Harness 的兼容性，并修复了长回合中夹有其他消息和 Tool 步骤时的精简范围处理问题。
 
 ## 工作方式
 
@@ -100,17 +102,17 @@ Agent Context Editor 读取现有 Session，并在独立管理视图中显示 Us
 - 视觉隐藏不会改变模型输入或减少 Token 使用。
 - 暂无单独的“隐藏全部”操作，但支持恢复全部。
 - AI 精简支持 Pi TUI 与 DeepSeek Harness，暂不支持 Pi Desktop/RPC，也不包含整篇会话的自动清理。
-- DeepSeek Harness 兼容范围限于已经测试的 rc.8 宿主边界。
+- DeepSeek Harness 兼容范围限于[兼容性文档](adapters/deepseek-harness/COMPATIBILITY.md)中记录的已测试宿主边界。
 
 ## 当前版本
 
-当前稳定版为 `v0.4.0`：
+当前稳定版为 `v0.4.3`：
 
-- Pi 扩展：`pi-context-editor@0.6.0`
-- DeepSeek Harness 适配器：`context-editor-deepseek-harness@0.4.0`
+- Pi 扩展：`pi-context-editor@0.6.1`
+- DeepSeek Harness 适配器：`context-editor-deepseek-harness@0.4.10`
 - Pi Context Desktop 社区构建：`context-editor-v0.1.4`
 
-AI 精简的行为、安全边界和验证结果见 [v0.4.0 发布说明](docs/release-notes-v0.4.0.md)。
+当前安装包、兼容性更新和验证结果见 [v0.4.3 发布说明](https://github.com/jermaine123123/agent-context-editor/releases/tag/v0.4.3)。
 
 ## 路线图
 

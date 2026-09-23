@@ -49,10 +49,10 @@ The separate [Pi Context Desktop](https://github.com/jermaine123123/pi-app) comm
 
 ### Pi extension
 
-Download `pi-context-editor-0.6.0.tgz` from the [release assets](https://github.com/jermaine123123/agent-context-editor/releases). Pi `0.84.2` installs a local package directory rather than a `.tgz` file. Extract the archive so that `package.json` is at the package directory root, then run:
+Download `pi-context-editor-0.6.1.tgz` from the [release assets](https://github.com/jermaine123123/agent-context-editor/releases). Pi `0.84.2` installs a local package directory rather than a `.tgz` file. Extract the archive so that `package.json` is at the package directory root, then run:
 
 ```sh
-pi install ./pi-context-editor-0.6.0
+pi install ./pi-context-editor-0.6.1
 ```
 
 When working directly from this repository:
@@ -65,13 +65,13 @@ For Pi Desktop registration, run `adapters/pi-extension/scripts/install-desktop.
 
 ### DeepSeek Harness
 
-Download `context-editor-deepseek-harness-0.4.0.tgz` from the release assets and install it with the official Harness CLI:
+Download `context-editor-deepseek-harness-0.4.10.tgz` from the release assets and install it with the official Harness CLI:
 
 ```sh
-dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.4.0.tgz
+dsh plugin --profile <profile> add ./context-editor-deepseek-harness-0.4.10.tgz
 ```
 
-The adapter targets DeepSeek Harness Developer Preview commit `141eb6fef83422698aef7a981029e843e8161534` and `@deepseek-ai/dsh@0.1.0-rc.8`. See [COMPATIBILITY.md](adapters/deepseek-harness/COMPATIBILITY.md) for the tested host boundary.
+The adapter has been tested with DeepSeek Harness `0.1.5-rc.1` and an isolated `0.1.6-alpha.1` build. See [COMPATIBILITY.md](adapters/deepseek-harness/COMPATIBILITY.md) for the tested host boundaries.
 
 ## Usage
 
@@ -86,6 +86,8 @@ Enter `/ctx` to open the native Context Editor dialogs. This path supports searc
 ### DeepSeek Harness
 
 Open the `Context Editor` tab beside the normal Chat view. The tab manages the same Session and provides context exclusion, User/Answer editing, search, filters, selection, visual hiding, restoration, and undo. Selected context can be condensed into an editable summary, applied after review, and restored later.
+
+Recent adapter updates improve compatibility with newer DeepSeek Harness builds and fix checkpoint-range handling for long turns containing interleaved messages and Tool steps.
 
 ## How it works
 
@@ -102,17 +104,17 @@ Visual changes and model-context changes are stored separately. Visual hiding on
 - Visual hiding does not change model input or reduce token usage.
 - There is no separate hide-all operation; restore-all is available.
 - AI condensation is available in Pi TUI and DeepSeek Harness, but not Pi Desktop/RPC; whole-session automatic cleanup is not included.
-- DeepSeek Harness compatibility is limited to the tested rc.8 host boundary.
+- DeepSeek Harness compatibility is limited to the tested host boundaries documented in [COMPATIBILITY.md](adapters/deepseek-harness/COMPATIBILITY.md).
 
 ## Current release
 
-The current stable project release is `v0.4.0`:
+The current stable project release is `v0.4.3`:
 
-- Pi extension: `pi-context-editor@0.6.0`
-- DeepSeek Harness adapter: `context-editor-deepseek-harness@0.4.0`
+- Pi extension: `pi-context-editor@0.6.1`
+- DeepSeek Harness adapter: `context-editor-deepseek-harness@0.4.10`
 - Pi Context Desktop community build: `context-editor-v0.1.4`
 
-See the [v0.4.0 release notes](docs/release-notes-v0.4.0.md) for AI condensation behavior, safeguards, and verification results.
+See the [v0.4.3 release notes](https://github.com/jermaine123123/agent-context-editor/releases/tag/v0.4.3) for the current packages, compatibility updates, and verification results.
 
 ## Roadmap
 
