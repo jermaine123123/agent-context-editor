@@ -19,6 +19,35 @@ function fixture() {
 }
 
 describe('plugin request profiles', () => {
+  it('restores one checkpoint in place, retains later summaries and edits, and ignores covered checkpoints', () => {
+    const message = original()
+    const checkpoint = { id: 'checkpoint-A', role: 'user', source: { kind: 'plugin' }, content: [{ type: 'text', text: 'summary A' }] }
+    const other = { ...checkpoint, id: 'checkpoint-B', content: [{ type: 'text', text: 'summary B' }] }
+    const profile = { version: 3, changes: [patch(message)], checkpointRestorations: [{ operationId: 'A', checkpointId: checkpoint.id, checkpointFingerprint: messageFingerprint(checkpoint), sourceRootSeqs: [0], messages: [message] }] }
+    const output = transformMessages([checkpoint, other], profile)
+    expect(output.map((value: any) => value.id)).toEqual(['answer', 'checkpoint-B'])
+    expect(output[0].content[0].text).toBe('edited')
+    expect(output[1]).toEqual(other)
+    expect(transformMessages([other], profile)).toEqual([other])
+    expect(() => transformMessages([{ ...checkpoint, content: [] }], profile)).toThrow('CHECKPOINT_CHANGED')
+    expect(() => transformMessages([checkpoint, message], profile)).toThrow('DUPLICATE_MESSAGE_ID')
+  })
+
+  it('keeps the immutable restore mapping when editing a restored message', async () => {
+    const { runtime, session, events, message } = fixture()
+    const checkpoint = { id: 'checkpoint', role: 'user', source: { kind: 'plugin' }, content: [{ type: 'text', text: 'summary' }] }
+    events.push({ seq: 1, type: 'user/message', data: checkpoint })
+    session.deriveMessages = () => [checkpoint] as any
+    const restoration = { operationId: 'A', checkpointId: checkpoint.id, checkpointFingerprint: messageFingerprint(checkpoint), sourceRootSeqs: [0], messages: [message] }
+    const restored = await runtime.prepare(session, 'restore-A', { mutation: 'restore-condensation' }, [], undefined, restoration)
+    runtime.appendSelection(session, restored)
+    expect(restored.profile.version).toBe(3)
+    const edited = await runtime.prepare(session, 'edit-restored', { text: 'edited' }, [{ rootEventSeq: 0, mode: 'replace', message: { ...message, content: [{ type: 'text', text: 'edited' }] } }])
+    expect(edited.profile.checkpointRestorations).toEqual([restoration])
+    expect(transformMessages([checkpoint], edited.profile)[0].content[0].text).toBe('edited')
+    expect(runtime.profile(restored.id).changes).toEqual([])
+  })
+
   it('retains Assistant identity, does not mutate original replay metadata, and preserves unrelated structured messages', () => {
     const message = original(); const before = structuredClone(message)
     const untouched = { id: 'signed', role: 'assistant', content: [{ type: 'reasoning', text: 'thought', signature: 'signature' }, { type: 'tool-call', id: 'call' }] }

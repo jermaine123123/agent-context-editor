@@ -1,8 +1,8 @@
 /** Plugin-owned model profiles. Session logs select a profile; original messages stay intact. */
 import { createHash } from 'node:crypto'
-import { defineDomain, domainTable } from './host-api.js'
+import { defineDomain, domainTable, profileSelectionOf, isProfileSelection, appendModelSelection, SESSION_FORMAT_VERSION, migrateProfileMessage } from './host-api.js'
 import { z } from 'zod'
-import { projectedMessageSource } from './core.js'
+import { projectedMessageSource, buildProjection } from './core.js'
 
 export const REQUEST_PROVIDER = 'context-editor'
 const legacyProfileSchema = z.object({
@@ -21,14 +21,23 @@ const legacyProfileSchema = z.object({
   }).strict()),
   replacementEvents: z.array(z.unknown()),
 }).strict()
-const profileSchema = z.union([legacyProfileSchema, legacyProfileSchema.extend({
+const modernProfileSchema = legacyProfileSchema.extend({
   version: z.literal(2),
   routeState: z.enum(['active', 'released']),
-  operation: z.object({ action: z.string(), unitId: z.string().nullable(), unitIds: z.array(z.string()).nullable() }).optional(),
+  operation: z.object({ action: z.string(), unitId: z.string().nullable(), unitIds: z.array(z.string()).nullable(), targetOperationId: z.string().optional() }).optional(),
+}).strict()
+const profileSchema = z.union([legacyProfileSchema, modernProfileSchema, modernProfileSchema.extend({
+  version: z.literal(3),
+  checkpointRestorations: z.array(z.object({
+    operationId: z.string(), checkpointId: z.string(), checkpointFingerprint: z.string(),
+    sourceRootSeqs: z.array(z.number().int().nonnegative()), messages: z.array(z.unknown()),
+  }).strict()),
 }).strict()])
 
 export function canTransformMessage(message) {
-  if (!Array.isArray(message?.content) || !['user', 'assistant'].includes(message.role)) return false
+  if (!Array.isArray(message?.content) || !['user', 'assistant', 'tool'].includes(message.role)) return false
+  if (message.role === 'tool' && (message.source?.kind !== 'tool' || !message.toolCallId
+    || message.toolCallId !== message.source.callId)) return false
   if (message.source?.signed || message.source?.replayBound) return false
   const replay = message.source?.replayState
   if (replay && (replay.response?.kind !== 'deepseek-messages' || replay.response?.version !== 1
@@ -86,24 +95,64 @@ export function isPlainMessage(message) {
       && Object.keys(block).every(key => key === 'type' || key === 'text'))
 }
 
+/** Verify structural upgrades by exact ID and the pre-migration content fingerprint. */
+export function migrateRequestProfile(profile, messages) {
+  if (SESSION_FORMAT_VERSION !== 4) return profile
+  const originals = new Map([...messages, ...(profile.checkpointRestorations ?? []).flatMap(value => value.messages.map(migrateProfileMessage))].map(message => [message.id, message]))
+  const changes = profile.changes.map(change => {
+    const original = originals.get(change.originalId)
+    let fingerprint = change.originalFingerprint
+    if (original && messageFingerprint(original) !== fingerprint) {
+      if (original.role !== 'tool') throw new Error('CONTEXT_EDITOR_PROFILE_MIGRATION_IDENTITY_UNVERIFIED')
+      const wrapper = { type: 'tool-result', toolCallId: original.toolCallId, content: original.content,
+        ...(original.isError === undefined ? {} : { isError: original.isError }) }
+      const previous = { ...original, role: 'user', content: [wrapper] }
+      if (messageFingerprint(previous) !== fingerprint) throw new Error('CONTEXT_EDITOR_PROFILE_MIGRATION_IDENTITY_UNVERIFIED')
+      fingerprint = messageFingerprint(original)
+    }
+    return { ...change, originalFingerprint: fingerprint,
+      ...(change.message ? { message: migrateProfileMessage(change.message) } : {}) }
+  })
+  const restorations = profile.checkpointRestorations?.map(restoration => ({ ...restoration, messages: restoration.messages.map(migrateProfileMessage) }))
+  const upgraded = { ...profile, changes, ...(restorations ? { checkpointRestorations: restorations } : {}) }
+  return requestFingerprint(upgraded) === requestFingerprint(profile) ? profile : upgraded
+}
+
 /** Applies only to exact message identities; absent compacted messages are never reinserted. */
-export function transformMessages(messages, profile) {
-  const patches = new Map(profile.changes.map(change => [change.originalId, change]))
+export function expandCheckpointMessages(messages, profile) {
+  const restorations = new Map((profile?.checkpointRestorations ?? []).map(value => [value.checkpointId, value]))
   const seen = new Set()
   return messages.flatMap(message => {
+    const restoration = restorations.get(message.id)
+    if (restoration && messageFingerprint(message) !== restoration.checkpointFingerprint) throw new Error('CONTEXT_EDITOR_CHECKPOINT_CHANGED')
+    const expanded = restoration ? structuredClone(restoration.messages) : [message]
+    for (const value of expanded) {
+      if (seen.has(value.id)) throw new Error('CONTEXT_EDITOR_DUPLICATE_MESSAGE_ID')
+      seen.add(value.id)
+    }
+    return expanded
+  })
+}
+
+export function transformMessages(messages, profile) {
+  profile = migrateRequestProfile(profile, messages)
+  const patches = new Map(profile.changes.map(change => [change.originalId, change]))
+  const seen = new Set()
+  return expandCheckpointMessages(messages, profile).flatMap(message => {
     const change = patches.get(message.id)
     if (!change) return [message]
     if (seen.has(message.id)) throw new Error('CONTEXT_EDITOR_DUPLICATE_MESSAGE_ID')
     seen.add(message.id)
     if (messageFingerprint(message) !== change.originalFingerprint) throw new Error('CONTEXT_EDITOR_MESSAGE_CHANGED')
-    if (profile.version !== 2 && !isPlainMessage(message)) throw new Error('CONTEXT_EDITOR_PLAIN_TEXT_REQUIRED')
-    if (profile.version === 2 && !canTransformMessage(message)) throw new Error('CONTEXT_EDITOR_UNSUPPORTED_MESSAGE_CONTRACT')
+    const modern = profile.version === 2 || profile.version === 3
+    if (!modern && !isPlainMessage(message)) throw new Error('CONTEXT_EDITOR_PLAIN_TEXT_REQUIRED')
+    if (modern && !canTransformMessage(message)) throw new Error('CONTEXT_EDITOR_UNSUPPORTED_MESSAGE_CONTRACT')
     if (change.mode === 'remove') return []
-    if ((profile.version !== 2 && !isPlainMessage(change.message)) || change.message.id !== message.id || change.message.role !== message.role) {
+    if ((!modern && !isPlainMessage(change.message)) || change.message.id !== message.id || change.message.role !== message.role) {
       throw new Error('CONTEXT_EDITOR_INVALID_PROFILE_MESSAGE')
     }
     const replacement = structuredClone(change.message)
-    if (profile.version === 2) {
+    if (modern) {
       validateReplacement(message, replacement)
       replacement.source = projectedMessageSource(message, replacement.content)
       return [replacement]
@@ -144,7 +193,7 @@ export class RequestTransformRuntime {
     // A later ordinary route does not silently clear an earlier committed editing profile.
     for (let index = events.length - 1; index >= 0; index--) {
       const event = events[index]
-      const route = event.type === 'request/header' ? event.data?.header?.config : undefined
+      const route = profileSelectionOf(event)
       if (route?.provider === REQUEST_PROVIDER) return { id: route.model, profile: this.profile(route.model) }
     }
     return undefined
@@ -163,9 +212,9 @@ export class RequestTransformRuntime {
     for (; index.seq < count; index.seq++) {
       const event = events ? events[index.seq] : session.eventAt(index.seq)
       index.events.push(event)
-      const config = event?.type === 'request/header' ? event.data.header.config : undefined
+      const config = profileSelectionOf(event)
       if (event?.type === 'model/selection') index.pendingSelection = { ...event.data, seq: event.seq }
-      if (config && index.pendingSelection?.provider === config.provider && index.pendingSelection.model === config.model
+      if (event?.type === 'request/header' && config && index.pendingSelection?.provider === config.provider && index.pendingSelection.model === config.model
         && index.pendingSelection.reasoningEffort === config.reasoningEffort) index.pendingSelection = undefined
       if (config?.provider === REQUEST_PROVIDER) index.selected = { id: config.model, profile: this.profile(config.model) }
     }
@@ -183,29 +232,97 @@ export class RequestTransformRuntime {
     const pending = this.sessionIndexes.get(session)?.pendingSelection
     if (route.provider === REQUEST_PROVIDER || (!pending && route.provider === selected.profile.upstream.provider && route.model === selected.profile.upstream.model)) return selected
     await this.ctx.llm.resolveModelInfo(route.provider, route.model)
-    const profile = profileSchema.parse({ ...selected.profile, version: 2, routeState: 'active',
+    const profile = profileSchema.parse({ ...selected.profile, version: selected.profile.version === 3 ? 3 : 2, routeState: 'active',
       operation: { action: 'model-rebind', unitId: null, unitIds: null },
       previous: selected.id, upstream: { provider: route.provider, model: route.model },
       operationId: 'model-' + requestFingerprint([session.id, session.header.createdAt, selected.id, route.provider, route.model, pending?.seq ?? null]) })
-    const id = `ce2-${requestFingerprint(profile)}`
+    const id = `ce${profile.version}-${requestFingerprint(profile)}`
     await this.profiles.put(id, profile)
     await this.operations.put(operationKey(session, profile.operationId), { profileId: id, requestFingerprint: requestFingerprint(route), status: 'pending' })
     try {
-      const header = session.requestHeader()
       // Resolve the user's upstream choice to the actual registered Provider.
       // Leaving the ordinary selection pending would bypass this route when the plugin is absent.
-      if (pending) session.append('model/selection', { provider: REQUEST_PROVIDER, model: id, ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: route.reasoningEffort }) })
-      session.append('request/header', { header: { ...header, config: { ...header.config, ...route, provider: REQUEST_PROVIDER, model: id } }, reason: 'change' })
+      if (pending && SESSION_FORMAT_VERSION < 4) session.append('model/selection', { ...route, provider: REQUEST_PROVIDER, model: id })
+      const event = appendModelSelection(session, { ...route, provider: REQUEST_PROVIDER, model: id })
       await this.ctx.sessions.flush(session)
       const handle = await this.ctx.sessionPersistence.open(session.id, 'read')
       try {
-        const page = await handle.read(session.seq - 1, 1)
-        if (!page.events?.some(event => event.type === 'request/header' && event.data.header.config.model === id)) throw new Error('CONTEXT_EDITOR_MODEL_SELECTION_UNVERIFIED')
+        const page = await handle.read(event.seq, 1)
+        if (!page.events?.some(value => isProfileSelection(value, REQUEST_PROVIDER, id))) throw new Error('CONTEXT_EDITOR_MODEL_SELECTION_UNVERIFIED')
       } finally { await handle.close() }
       await this.settle(session, profile.operationId, 'persisted-and-verified')
     } catch (error) {
       await this.settle(session, profile.operationId, 'unverified', String(error?.message ?? error))
       throw error
+    }
+    return { id, profile }
+  }
+
+  async upgradeProfile(session, selected) {
+    if (SESSION_FORMAT_VERSION !== 4) return selected
+    const normalized = migrateRequestProfile(selected.profile, session.deriveMessages())
+    const needsRebase = normalized.origin.id !== session.id || normalized.origin.createdAt !== session.header.createdAt
+    if (normalized === selected.profile && !needsRebase) return selected
+    let replacementEvents = normalized.replacementEvents
+    let changes = normalized.changes
+    if (needsRebase) {
+      const events = session.snapshotEvents()
+      const roots = new Map()
+      changes = changes.map(change => {
+        const event = events.find(value => (value.type === 'user/message' ? value.data : value.data?.message)?.id === change.originalId)
+        if (!event) return change // Covered originals are not restored by rebasing.
+        roots.set(change.rootEventSeq, event.seq)
+        return { ...change, rootEventSeq: event.seq }
+      })
+      const projection = buildProjection({ id: session.id, createdAt: session.header.createdAt, ...(session.header.cwd ? { cwd: session.header.cwd } : {}) }, events, {})
+      const units = projection.records.flatMap(record => record.units)
+      const previousProjection = buildProjection({ id: normalized.origin.id, createdAt: normalized.origin.createdAt, ...(session.header.cwd ? { cwd: session.header.cwd } : {}) }, events, {})
+      const reboundUnits = new Map()
+      const rebaseRef = ref => {
+        const seq = roots.get(Number(ref.sourceRef.entryId)) ?? Number(ref.sourceRef.entryId)
+        const atom = projection.atoms.find(value => Number(value.sourceRef.entryId) === seq && value.sourceRef.blockIndex === ref.sourceRef.blockIndex && value.fingerprint === ref.fingerprint)
+        if (!atom) throw new Error('CONTEXT_EDITOR_PROFILE_UPGRADE_REFERENCE_UNVERIFIED')
+        return { atomId: atom.id, sourceRef: atom.sourceRef, fingerprint: atom.fingerprint }
+      }
+      const rebaseUnit = id => {
+        if (reboundUnits.has(id)) return reboundUnits.get(id)
+        const oldUnit = previousProjection.records.flatMap(record => record.units).find(value => value.id === id)
+        if (!oldUnit) throw new Error('CONTEXT_EDITOR_PROFILE_UPGRADE_REFERENCE_UNVERIFIED')
+        const refs = oldUnit.atoms.map(rebaseRef)
+        const unit = units.find(value => value.kind === oldUnit.kind && refs.length > 0 && refs.every(ref => value.atoms.some(atom => atom.id === ref.atomId)))
+        if (!unit) throw new Error('CONTEXT_EDITOR_PROFILE_UPGRADE_REFERENCE_UNVERIFIED')
+        reboundUnits.set(id, unit.id)
+        return unit.id
+      }
+      replacementEvents = replacementEvents.map(event => {
+        const linked = event.linkedExclusion ? { linkedExclusion: { ...event.linkedExclusion,
+          unitIds: event.linkedExclusion.unitIds.map(rebaseUnit),
+          atomChanges: event.linkedExclusion.atomChanges.map(change => ({ ...change, ...rebaseRef(change) })) } } : {}
+        if (event.action === 'undo') return { ...event, unitId: rebaseUnit(event.unitId), ...linked }
+        const refs = event.atomRefs.map(rebaseRef)
+        const unit = units.find(value => value.kind === event.unitKind && refs.every(ref => value.atoms.some(atom => atom.id === ref.atomId)))
+        if (!unit) throw new Error('CONTEXT_EDITOR_PROFILE_UPGRADE_REFERENCE_UNVERIFIED')
+        reboundUnits.set(event.unitId, unit.id)
+        return { ...event, unitId: unit.id, atomRefs: refs, ...linked }
+      })
+    }
+    const profile = profileSchema.parse({ ...normalized, version: normalized.checkpointRestorations ? 3 : 2,
+      routeState: normalized.routeState ?? 'active', previous: selected.id,
+      origin: { id: session.id, createdAt: session.header.createdAt }, changes, replacementEvents,
+      operationId: 'format-v4-' + selected.id, operation: { action: 'format-upgrade', unitId: null, unitIds: null } })
+    const id = `ce${profile.version}-${requestFingerprint(profile)}`
+    await this.profiles.put(id, profile)
+    await this.operations.put(operationKey(session, profile.operationId), { profileId: id, requestFingerprint: requestFingerprint(profile), status: 'pending' })
+    try {
+      const event = appendModelSelection(session, { ...session.requestHeader()?.config, provider: REQUEST_PROVIDER, model: id })
+      await this.ctx.sessions.flush(session)
+      const reader = await this.ctx.sessionPersistence.open(session.id, 'read')
+      try {
+        if (!(await reader.read(event.seq, 1)).events?.some(value => isProfileSelection(value, REQUEST_PROVIDER, id))) throw new Error('CONTEXT_EDITOR_PROFILE_UPGRADE_UNVERIFIED')
+      } finally { await reader.close() }
+      await this.settle(session, profile.operationId, 'persisted-and-verified')
+    } catch (error) {
+      await this.settle(session, profile.operationId, 'unverified', String(error?.message ?? error)); throw error
     }
     return { id, profile }
   }
@@ -234,12 +351,13 @@ export class RequestTransformRuntime {
     this.disposers.push(this.ctx.on('agent/pre-step', async ({ agent }, next) => {
       const decision = await next()
       if (decision.kind !== 'enter' || !owner.fromSession(agent.session) || owner.fromSession(agent.session).profile.routeState === 'released') return decision
-      return { ...decision, messages: decision.messages.filter(message => message.source?.plugin !== 'model-selection') }
+      return { ...decision, messages: decision.messages.filter(message => message.source?.plugin !== 'model-selection' && message.source?.kind !== 'model-selection') }
     }, { global: true, prepend: true }))
     this.disposers.push(this.ctx.on('agent/request', async ({ agent }, next) => {
       const route = await next()
       let selected = owner.fromSession(agent.session)
       if (!selected) return route
+      selected = await owner.upgradeProfile(agent.session, selected)
       if (selected.profile.routeState === 'released') return route.provider === REQUEST_PROVIDER ? { ...route, ...selected.profile.upstream } : route
       selected = await owner.rebind(agent.session, selected, route)
       return { ...route, provider: REQUEST_PROVIDER, model: selected.id }
@@ -264,7 +382,7 @@ export class RequestTransformRuntime {
   async *stream(options, profile, alreadyEffective = false) {
     if (this.closed) throw new Error('CONTEXT_EDITOR_DISPOSING')
     // Title generators can concatenate original text into a new message; identity filtering cannot cover it.
-    if (options.purpose === 'session-title' && profile.changes.length) {
+    if (options.purpose === 'session-title' && (profile.changes.length || profile.checkpointRestorations?.length)) {
       const session = this.ctx.sessions.get(options.sessionId)
       this.fromSession(session)
       const events = this.sessionIndexes.get(session)?.events ?? []
@@ -312,7 +430,7 @@ export class RequestTransformRuntime {
     return undefined
   }
 
-  async prepare(session, operationId, request, changes, replacementEvent) {
+  async prepare(session, operationId, request, changes, replacementEvent, checkpointRestoration) {
     if (this.availabilityReason()) throw new Error('CONTEXT_EDITOR_COMPACTION_ROUTE_UNSUPPORTED')
     const requestHash = requestFingerprint(request)
     const prior = this.operation(session, operationId)
@@ -320,7 +438,8 @@ export class RequestTransformRuntime {
       if (prior.requestFingerprint !== requestHash) throw new Error('CONTEXT_EDITOR_OPERATION_REUSED')
       return { id: prior.profileId, profile: this.profile(prior.profileId), existing: true }
     }
-    const selected = this.fromSession(session)
+    const priorSelected = this.fromSession(session)
+    const selected = priorSelected ? { ...priorSelected, profile: migrateRequestProfile(priorSelected.profile, session.deriveMessages()) } : undefined
     const config = session.requestHeader()?.config
     const upstream = selected && selected.profile.routeState !== 'released'
       ? selected.profile.upstream
@@ -329,11 +448,13 @@ export class RequestTransformRuntime {
     const patches = new Map((selected?.profile.changes ?? []).map(change => [change.rootEventSeq, change]))
     const events = session.snapshotEvents()
     const messages = session.deriveMessages()
+    const checkpointRestorations = [...(selected?.profile.checkpointRestorations ?? []), ...(checkpointRestoration ? [checkpointRestoration] : [])]
+    const editableMessages = expandCheckpointMessages(messages, { checkpointRestorations })
     for (const change of changes) {
       const originalEvent = events[change.rootEventSeq]
       const source = originalEvent?.type === 'user/message' ? originalEvent.data : originalEvent?.data?.message
       const previous = patches.get(change.rootEventSeq)
-      const raw = messages.find(message => message.id === (previous?.originalId ?? source?.id))
+      const raw = editableMessages.find(message => message.id === (previous?.originalId ?? source?.id))
       if (!raw || !canTransformMessage(raw)) throw new Error('CONTEXT_EDITOR_UNSUPPORTED_MESSAGE_CONTRACT')
       if (change.mode === 'clear') { patches.delete(change.rootEventSeq); continue }
       const message = change.mode === 'replace' ? { ...structuredClone(raw), content: structuredClone(change.message.content) } : undefined
@@ -345,8 +466,9 @@ export class RequestTransformRuntime {
       })
     }
     const profile = profileSchema.parse({
-      version: 2, routeState: 'active', upstream, origin: { id: session.id, createdAt: session.header.createdAt },
-      operation: { action: (request.mutation === 'context' ? request.action : request.mutation) ?? 'context', unitId: request.unitId ?? null, unitIds: request.unitIds ?? null },
+      version: checkpointRestorations.length ? 3 : 2, routeState: 'active', upstream, origin: { id: session.id, createdAt: session.header.createdAt },
+      ...(checkpointRestorations.length ? { checkpointRestorations } : {}),
+      operation: { action: (request.mutation === 'context' ? request.action : request.mutation) ?? 'context', unitId: request.unitId ?? null, unitIds: request.unitIds ?? null, ...(request.targetOperationId ? { targetOperationId: request.targetOperationId } : {}) },
       previous: selected?.id ?? null, operationId,
       baseline: requestFingerprint({ messages, header: session.requestHeader() }),
       changes: [...patches.values()].sort((a, b) => a.rootEventSeq - b.rootEventSeq),
@@ -354,17 +476,16 @@ export class RequestTransformRuntime {
     })
     transformMessages(messages, profile)
     // Unsigned plain responses do not need their old Provider replay envelope after restore.
-    if (!profile.changes.length && !messages.some(message => message.source?.provider === REQUEST_PROVIDER
+    if (!profile.checkpointRestorations?.length && !profile.changes.length && !messages.some(message => message.source?.provider === REQUEST_PROVIDER
       && (!canTransformMessage(message) || message.content.some(block => block.type !== 'text')))) profile.routeState = 'released'
-    const id = `ce2-${requestFingerprint(profile)}`
+    const id = `ce${profile.version}-${requestFingerprint(profile)}`
     await this.profiles.put(id, profile)
     await this.operations.put(operationKey(session, operationId), { profileId: id, requestFingerprint: requestHash, status: 'pending' })
     return { id, profile, existing: false }
   }
 
   appendSelection(session, prepared) {
-    const prior = session.snapshotEvents().find(event => event.type === 'request/header'
-      && event.data.header.config.provider === REQUEST_PROVIDER && event.data.header.config.model === prepared.id)
+    const prior = session.snapshotEvents().find(event => isProfileSelection(event, REQUEST_PROVIDER, prepared.id))
     if (prior) return prior
     if (prepared.profile.baseline !== requestFingerprint({ messages: session.deriveMessages(), header: session.requestHeader() })) {
       throw new Error('CONTEXT_EDITOR_CONTEXT_CHANGED_BEFORE_PROFILE_SELECTION')
@@ -372,10 +493,8 @@ export class RequestTransformRuntime {
     const header = session.requestHeader()
     if (!header) throw new Error('CONTEXT_EDITOR_MODEL_ROUTE_REQUIRED')
     // This is an actual Provider/model selection, not a custom operation smuggled into another event.
-    const event = session.append('request/header', {
-      header: { ...header, config: { ...header.config, provider: REQUEST_PROVIDER, model: prepared.id } }, reason: 'change',
-    })
-    if (prepared.profile.routeState === 'released') session.append('request/header', { header: { ...header, config: { ...header.config, ...prepared.profile.upstream } }, reason: 'change' })
+    const event = appendModelSelection(session, { ...header.config, provider: REQUEST_PROVIDER, model: prepared.id })
+    if (prepared.profile.routeState === 'released') appendModelSelection(session, { ...header.config, ...prepared.profile.upstream })
     return event
   }
 

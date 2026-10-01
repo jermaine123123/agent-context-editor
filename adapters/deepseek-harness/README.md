@@ -2,6 +2,26 @@
 
 Context Editor adds a searchable view for the current Harness session. Each open view keeps its own search, selection, and summary draft. Views of the same session share committed edits and refresh after a write.
 
+## 0.6.0: official Desktop / Harness 0.2.0-rc.2
+
+The v4 adapter saves the next request through the official `model/selection` event. Normal Agent execution creates its own `request/header`; edits and exclusions saved before a restart remain selected. Plugin messages use the producer source `context-editor`. Detached checkpoint candidates pass the official v4 format and relationship validator before append, flush and persistence readback.
+
+First-class tool messages retain their call identity and error flag. Image attachments and known signed reasoning remain protected. Restore A preserves summary B, existing edits and later messages. A checkpoint covered by another checkpoint or native compaction requires recovery to a new branch. Ranges cannot cross an unselected System snapshot in the active host Surface; select a contiguous complete turn or regenerate the selection.
+
+Request profile formats 1/2/3 remain readable. When a v4 conversion is necessary, the plugin verifies original message identities, writes a new immutable profile, and checks its persisted selection. Historical profiles are never overwritten. Keep session logs and both plugin storage domains together; the plugin remains required while a profile depends on it.
+
+Some old plugin logs contain a `request/header` outside an open turn. The official v3→v4 importer rejects those logs. The repository helper `scripts/upgrade-deepseek-legacy-session.mjs` creates a separate validated session while preserving the original file. It accepts standalone uncompressed v3 logs and config-only plugin headers; seeded sessions, catalog/delivery markers and other header changes are refused. Back up the complete isolated profile and stop it before using this recovery helper.
+
+The exact release archive is installed through the official plugin manager without version exemptions. Integration uses the Harness actually bundled in the verified Desktop installer; Desktop window checks are recorded separately from local model request tests and real cloud smoke. Diagnostics distinguish interface recognition, memory checks, persistent replay and external acceptance. Unknown formats or missing v4 validators disable writes with an explicit reason. Only `0.2.0-rc.2` has been added to the peer range; future releases require fresh acceptance. See [COMPATIBILITY.md](./COMPATIBILITY.md).
+
+Build the archive with the commands below. For repeatable isolated acceptance, use `scripts/verify-deepseek-060.ps1` in the repository, supplying the prepared Desktop root, exact archive and optional installed old Harness / Playwright paths. Cloud tests are opt-in and retain the cumulative eight-request limit for this task.
+
+## Historical 0.5.0: restore an individual summary
+
+**Restore this summary** expands one active checkpoint back into its original messages in the same session. Other summaries, existing edits and later conversation remain in place. The result persists through restart and model changes. **Recover to a new branch** remains available separately; use it when a checkpoint has been absorbed by later condensation or native compaction.
+
+Individual restoration uses immutable request profile format 3, preserving original message roles, identities and replay metadata. Existing formats 1 and 2 remain readable without migration. The plugin must remain installed while restored checkpoints depend on this request mapping. Do not downgrade such sessions to 0.4.x; use a complete pre-upgrade profile backup for rollback in a separate directory.
+
 ## 0.4.10: interrupted-turn checkpoint selection
 
 Checkpoint ranges follow active Surface order and close over complete turn/tool identities. A plugin or user message inserted during a long AI turn no longer stops discovery of the remaining tool results. Intervening messages appear in the expanded-source confirmation, with a scrollable list for long tool chains. Generation and commit use the same closure algorithm; old incomplete drafts must be regenerated.
@@ -70,7 +90,7 @@ New-Item -ItemType Directory -Force .\release | Out-Null
 npm pack --workspace adapters/deepseek-harness --pack-destination .\release
 ```
 
-Install the generated `context-editor-deepseek-harness-0.4.5.tgz` into a disposable profile for host acceptance:
+Install the generated `context-editor-deepseek-harness-0.6.0.tgz` into a disposable profile for host acceptance:
 
 ```powershell
 $env:DSH_HOME = '<isolated-harness-home>'

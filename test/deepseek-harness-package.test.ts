@@ -17,7 +17,7 @@ describe('DeepSeek Harness installable bundle', () => {
       dsh?: { bundle?: { patch?: string }; client?: { platform?: string } }
     }
     expect(manifest.name).toBe('context-editor-deepseek-harness')
-    expect(manifest.version).toBe('0.4.10')
+    expect(manifest.version).toBe('0.6.0')
     expect(manifest.dsh?.bundle?.patch).toBe('./cordis.patch.yml')
     expect(manifest.dsh?.client?.platform).toBe('web')
     expect(manifest.files).toContain('host-compat.js')
@@ -67,9 +67,9 @@ describe('DeepSeek Harness installable bundle', () => {
     const lock = JSON.parse(readFileSync(resolve(root, '..', '..', 'package-lock.json'), 'utf8')) as {
       packages: Record<string, { version?: string; peerDependencies?: Record<string, string>; dependencies?: Record<string, string> }>
     }
-    const expected = '>=0.1.0-rc.8 <0.2.0-0 || >=0.1.6-alpha.1 <0.1.6'
+    const expected = '>=0.1.0-rc.8 <0.2.0-0 || >=0.1.6-alpha.1 <0.1.6 || 0.2.0-rc.2'
     const harnessPeers = Object.entries(manifest.peerDependencies)
-      .filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
+      .filter(([name]) => name.startsWith('@deepseek-ai/dsh-') && name !== '@deepseek-ai/dsh-session-format-v3-to-v4')
     expect(harnessPeers.length).toBeGreaterThan(0)
     expect(harnessPeers.every(([, range]) => range === expected)).toBe(true)
     expect(lock.packages['adapters/deepseek-harness']).toMatchObject({

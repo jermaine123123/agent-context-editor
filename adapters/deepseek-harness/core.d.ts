@@ -288,7 +288,7 @@ export interface CondensationEvent {
 export interface CondensationValidation { ok: boolean; summary: string; metrics: CondensationMetrics; warnings: string[]; error?: 'empty-summary' | 'truncated-summary' | 'not-smaller' }
 export function condensationUnitText(unit: ContextEditableUnit, projectionStates?: ReadonlyMap<string, ContextEditableUnitProjectionState | 'unavailable'>): string
 export function selectCondensationRange(records: readonly ContextRecord[], requestedUnitIds: readonly string[], projectionStates?: ReadonlyMap<string, ContextEditableUnitProjectionState | 'unavailable'>, options?: { expandRelated?: boolean }): CondensationRange
-export function selectCheckpointCondensationRange(projection: { records: readonly ContextRecord[]; activeSurfaceSeqs?: readonly number[]; projectionStates?: ReadonlyMap<string, ContextEditableUnitProjectionState | 'unavailable'> }, requestedUnitIds: readonly string[]): CondensationRange
+export function selectCheckpointCondensationRange(projection: { records: readonly ContextRecord[]; activeSurfaceSeqs?: readonly number[]; surfaceRootGroups?: readonly (readonly number[])[]; projectionStates?: ReadonlyMap<string, ContextEditableUnitProjectionState | 'unavailable'> }, requestedUnitIds: readonly string[]): CondensationRange
 export function validateCondensationSummary(summary: string, beforeTokens: number, options?: { summaryTokens?: number; truncated?: boolean }): CondensationValidation
 export function frameCondensationSummary(summary: string): string
 export function estimateCondensationTokens(value: string): number

@@ -43,7 +43,7 @@ function readPendingReplacement(sessionId) {
   try {
     const value = JSON.parse(globalThis.localStorage?.getItem(pendingReplacementStorageKey(sessionId)) ?? 'null')
     if (!value || typeof value.operationId !== 'string' || typeof value.unitId !== 'string'
-      || !['replace', 'restore', 'undo', 'exclude'].includes(value.action)) return null
+      || !['replace', 'restore', 'undo', 'exclude', 'restore-condensation'].includes(value.action)) return null
     return { operationId: value.operationId, unitId: value.unitId, action: value.action }
   } catch {
     return null
@@ -398,11 +398,12 @@ export class ContextEditorController {
     })
   }
 
-  async restoreCondensation(operationId, baseRevision) {
+  async restoreCondensation(operationId, baseRevision, restoreOperationId) {
     return this.callMutation('commitContext', {
       action: 'restore-condensation',
       operationId,
       baseRevision,
+      ...(restoreOperationId ? { restoreOperationId } : {}),
     })
   }
 
@@ -1422,6 +1423,39 @@ export function ContextEditorView({ sessionId, controller, useSession, openSessi
     }
   }
 
+  const restoreOneCondensation = async item => {
+    if (readOnly || loaded.snapshot === null || contextMutating) return
+    const origin = String(sessionId)
+    const operationId = replacementOperationId('restore-condensation', item.operationId)
+    setContextMutating(true)
+    setNotice('')
+    rememberPendingReplacement('restore-condensation', item.operationId, operationId)
+    try {
+      const result = await controller.restoreCondensation(item.operationId, loaded.snapshot.contextRevision ?? loaded.snapshot.revision, operationId)
+      if (currentSessionIdRef.current !== origin) return
+      if (result?.commit?.status === 'persisted-and-verified' || result?.commit?.status === 'no-op') {
+        clearTrackedReplacement(operationId)
+        replacementOperationIds.current.delete(`restore-condensation:${item.operationId}`)
+        await refresh(true)
+      } else if (['pending', 'unverified'].includes(result?.commit?.status)) {
+        await resolvePendingReplacement(operationId)
+      } else {
+        clearTrackedReplacement(operationId)
+        replacementOperationIds.current.delete(`restore-condensation:${item.operationId}`)
+        setNotice(result?.conflict ? text.condensationConflict : text.inlineRecoveryUnavailable)
+        await refresh(true)
+      }
+    } catch {
+      if (currentSessionIdRef.current === origin) {
+        const status = await resolvePendingReplacement(operationId)
+        if (status === 'missing' || status === 'failed') {
+          replacementOperationIds.current.delete(`restore-condensation:${item.operationId}`)
+          setNotice(text.inlineRecoveryUnavailable)
+        }
+      }
+    } finally { if (currentSessionIdRef.current === origin) setContextMutating(false) }
+  }
+
   const toggleCondensationContext = async item => {
     if (readOnly || loaded.snapshot === null) return
     const summaryUnitId = (item.sourceUnits ?? []).find(source => source.included !== false)?.id
@@ -1495,7 +1529,7 @@ export function ContextEditorView({ sessionId, controller, useSession, openSessi
     const status = operation.status ?? operation.commit?.status
     if (status === 'persisted-and-verified') {
       clearPendingReplacement(sessionId, operationId)
-      replacementOperationIds.current.delete(`${operation.action}:${operation.unitId}`)
+      replacementOperationIds.current.delete(`${operation.action}:${operation.targetOperationId ?? operation.unitId}`)
       setOperationRecoveryPending(false)
       setOperationUnverified(false)
       setNotice('')
@@ -1503,6 +1537,11 @@ export function ContextEditorView({ sessionId, controller, useSession, openSessi
       return status
     }
     if (status === 'pending') {
+      if (operation.action === 'restore-condensation' && operation.targetOperationId) {
+        replacementOperationIds.current.set(`${operation.action}:${operation.targetOperationId}`, {
+          id: String(operation.operationId ?? operationId), fingerprint: '',
+        })
+      }
       if (operation.unitId && ['replace', 'restore', 'undo'].includes(operation.action)) {
         replacementOperationIds.current.set(`${operation.action}:${operation.unitId}`, {
           id: String(operation.operationId ?? operationId),
@@ -1712,6 +1751,7 @@ export function ContextEditorView({ sessionId, controller, useSession, openSessi
     return h('article', { key: item.operationId, className: 'context-editor__condensation-card', 'data-condensation-operation-id': item.operationId },
       h('div', { className: 'context-editor__condensation-card-header' },
         h('strong', null, text.activeCondensation),
+        h('button', { type: 'button', disabled: readOnly || contextMutating || !item.inlineRecovery?.available, title: !item.inlineRecovery?.available ? text.inlineRecoveryUnavailable : undefined, onClick: () => void restoreOneCondensation(item) }, text.restoreOneCondensation),
         h('button', { type: 'button', disabled: readOnly || !contextAvailable, title: !contextAvailable ? text.featureUnavailable(contextUnavailableReason) : undefined, onClick: () => void toggleCondensationContext(item) }, item.contextExcluded === true ? text.restoreContext : text.excludeContext),
         h('button', { type: 'button', disabled: readOnly || !item.recovery?.available, title: restoreBlocked ? text.recoveryUnavailable(item.recovery?.reason ?? 'recovery-boundary-unavailable') : undefined, onClick: () => void createRecovery({ kind: 'condensation', operationId: item.operationId }) }, text.restoreCondensation),
       ),

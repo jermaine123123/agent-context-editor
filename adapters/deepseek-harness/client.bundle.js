@@ -2110,6 +2110,8 @@ window.__ModuleLoader__.load({
 				condensationConflict: zh ? "上下文已变化，已刷新。请确认选区后重新生成精简。" : "The context changed and has been refreshed. Check your selection and generate again.",
 				condensationExpandRelated: zh ? "同步精简 AI 思考和工具输出" : "Also condense AI reasoning and tool outputs",
 				condensationExpandedNotice: (count) => zh ? `为保留完整回合，本次精简还包含以下 ${count} 项。应用即确认此范围。` : `To keep complete turns, this summary also includes the following ${count} items. Apply confirms this range.`,
+				restoreOneCondensation: zh ? "恢复这一项" : "Restore this summary",
+				inlineRecoveryUnavailable: zh ? "当前无法单独恢复；若已被后续精简或压缩覆盖，可恢复到精简前的新分支。" : "Individual restore is unavailable. If covered by later condensation or compaction, recover to a pre-summary branch.",
 				generateCondensation: zh ? "生成精简" : "Generate summary",
 				condensationModelPicker: zh ? "精简模型" : "Condensation model",
 				condenseSelected: (count) => zh ? `AI \u7cbe\u7b80${count ? `\uff08${count}\uff09` : ""}` : `AI condense${count ? ` (${count})` : ""}`,
@@ -2412,7 +2414,8 @@ window.__ModuleLoader__.load({
 					"replace",
 					"restore",
 					"undo",
-					"exclude"
+					"exclude",
+					"restore-condensation"
 				].includes(value.action)) return null;
 				return {
 					operationId: value.operationId,
@@ -2712,11 +2715,12 @@ window.__ModuleLoader__.load({
 					summary
 				});
 			}
-			async restoreCondensation(operationId, baseRevision) {
+			async restoreCondensation(operationId, baseRevision, restoreOperationId) {
 				return this.callMutation("commitContext", {
 					action: "restore-condensation",
 					operationId,
-					baseRevision
+					baseRevision,
+					...restoreOperationId ? { restoreOperationId } : {}
 				});
 			}
 			async previewRecovery(request) {
@@ -3759,6 +3763,39 @@ window.__ModuleLoader__.load({
 					setContextMutating(false);
 				}
 			};
+			const restoreOneCondensation = async (item) => {
+				if (readOnly || loaded.snapshot === null || contextMutating) return;
+				const origin = String(sessionId);
+				const operationId = replacementOperationId("restore-condensation", item.operationId);
+				setContextMutating(true);
+				setNotice("");
+				rememberPendingReplacement("restore-condensation", item.operationId, operationId);
+				try {
+					const result = await controller.restoreCondensation(item.operationId, loaded.snapshot.contextRevision ?? loaded.snapshot.revision, operationId);
+					if (currentSessionIdRef.current !== origin) return;
+					if (result?.commit?.status === "persisted-and-verified" || result?.commit?.status === "no-op") {
+						clearTrackedReplacement(operationId);
+						replacementOperationIds.current.delete(`restore-condensation:${item.operationId}`);
+						await refresh(true);
+					} else if (["pending", "unverified"].includes(result?.commit?.status)) await resolvePendingReplacement(operationId);
+					else {
+						clearTrackedReplacement(operationId);
+						replacementOperationIds.current.delete(`restore-condensation:${item.operationId}`);
+						setNotice(result?.conflict ? text.condensationConflict : text.inlineRecoveryUnavailable);
+						await refresh(true);
+					}
+				} catch {
+					if (currentSessionIdRef.current === origin) {
+						const status = await resolvePendingReplacement(operationId);
+						if (status === "missing" || status === "failed") {
+							replacementOperationIds.current.delete(`restore-condensation:${item.operationId}`);
+							setNotice(text.inlineRecoveryUnavailable);
+						}
+					}
+				} finally {
+					if (currentSessionIdRef.current === origin) setContextMutating(false);
+				}
+			};
 			const toggleCondensationContext = async (item) => {
 				if (readOnly || loaded.snapshot === null) return;
 				const summaryUnitId = (item.sourceUnits ?? []).find((source) => source.included !== false)?.id;
@@ -3833,7 +3870,7 @@ window.__ModuleLoader__.load({
 				const status = operation.status ?? operation.commit?.status;
 				if (status === "persisted-and-verified") {
 					clearPendingReplacement(sessionId, operationId);
-					replacementOperationIds.current.delete(`${operation.action}:${operation.unitId}`);
+					replacementOperationIds.current.delete(`${operation.action}:${operation.targetOperationId ?? operation.unitId}`);
 					setOperationRecoveryPending(false);
 					setOperationUnverified(false);
 					setNotice("");
@@ -3841,6 +3878,10 @@ window.__ModuleLoader__.load({
 					return status;
 				}
 				if (status === "pending") {
+					if (operation.action === "restore-condensation" && operation.targetOperationId) replacementOperationIds.current.set(`${operation.action}:${operation.targetOperationId}`, {
+						id: String(operation.operationId ?? operationId),
+						fingerprint: ""
+					});
 					if (operation.unitId && [
 						"replace",
 						"restore",
@@ -4065,6 +4106,11 @@ window.__ModuleLoader__.load({
 					className: "context-editor__condensation-card",
 					"data-condensation-operation-id": item.operationId
 				}, h("div", { className: "context-editor__condensation-card-header" }, h("strong", null, text.activeCondensation), h("button", {
+					type: "button",
+					disabled: readOnly || contextMutating || !item.inlineRecovery?.available,
+					title: !item.inlineRecovery?.available ? text.inlineRecoveryUnavailable : void 0,
+					onClick: () => void restoreOneCondensation(item)
+				}, text.restoreOneCondensation), h("button", {
 					type: "button",
 					disabled: readOnly || !contextAvailable,
 					title: !contextAvailable ? text.featureUnavailable(contextUnavailableReason) : void 0,

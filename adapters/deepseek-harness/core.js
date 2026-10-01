@@ -20,10 +20,12 @@ export function selectCheckpointCondensationRange(projection, requestedUnitIds) 
   const requested = [...new Set(requestedUnitIds.map(String))]
   const selected = new Set(requested)
   const positions = new Map((projection.activeSurfaceSeqs ?? []).map((root, index) => [Number(root), index]))
+  const groups = new Map()
+  for (const [index, roots] of (projection.surfaceRootGroups ?? []).entries()) for (const root of roots) groups.set(Number(root), `checkpoint:${index}`)
   const entries = units.map(unit => ({
     unit,
     positions: unit.atoms.map(atom => positions.get(Number(atom.sourceRef?.entryId))).filter(index => index !== undefined),
-    links: unit.atoms.flatMap(atom => [atom.turnId ? `turn:${atom.turnId}` : '', atom.toolCallId ? `call:${atom.toolCallId}` : ''].filter(Boolean)),
+    links: unit.atoms.flatMap(atom => [atom.turnId ? `turn:${atom.turnId}` : '', atom.toolCallId ? `call:${atom.toolCallId}` : '', groups.get(Number(atom.sourceRef?.entryId))].filter(Boolean)),
   }))
   let changed = true
   while (changed) {

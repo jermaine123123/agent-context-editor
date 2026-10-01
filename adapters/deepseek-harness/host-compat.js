@@ -1,11 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import { readFileSync } from 'node:fs'
 import { Context } from '@deepseek-ai/cordis'
-import { Session, SessionStore, foldSurface, hasSurfaceContract } from './host-api.js'
+import { Session, SessionStore, foldSurface, hasSurfaceContract, SESSION_FORMAT_VERSION, hasV4WriteContract, pluginMessageSource } from './host-api.js'
 
-const require = createRequire(import.meta.url)
 const ownPackage = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
 export const PLUGIN_VERSION = String(ownPackage.version ?? 'unknown')
 const pluginBuildFingerprint = createHash('sha256')
@@ -19,7 +18,7 @@ export const READ_ONLY_ADAPTER_ID = 'read-only'
 
 function packageVersion(name) {
   try {
-    let directory = dirname(require.resolve(name))
+    let directory = dirname(fileURLToPath(import.meta.resolve(name)))
     for (;;) {
       const manifestPath = resolve(directory, 'package.json')
       try {
@@ -42,11 +41,32 @@ function objectName(value) {
   return value?.constructor?.name || 'unknown'
 }
 
+function desktopBuildIdentity() {
+  try {
+    let directory = dirname(fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-session')))
+    for (;;) {
+      try {
+        const manifest = JSON.parse(readFileSync(resolve(directory, 'package.json'), 'utf8'))
+        if (manifest.name === '@deepseek-ai/dsh-desktop') return {
+          desktopVersion: manifest.version,
+          buildCommit: manifest.dshBuildCommit ?? null,
+          buildDirty: manifest.dshBuildDirty ?? null,
+        }
+      } catch { /* Optional desktop wrapper. */ }
+      const parent = dirname(directory)
+      if (parent === directory) break
+      directory = parent
+    }
+  } catch { /* CLI hosts have no desktop build identity. */ }
+  return { desktopVersion: null, buildCommit: null, buildDirty: null }
+}
+
 function digest(value) {
   return createHash('sha256').update(value).digest('hex')
 }
 
 export function detectHostAdapter(ctx) {
+  if (SESSION_FORMAT_VERSION >= 4 && !hasV4WriteContract) return READ_ONLY_ADAPTER_ID
   if (typeof Session?.prototype.appendContextProjection === 'function') return LEGACY_ADAPTER_ID
   // The request adapter writes standard Surface events. Optional message-projection
   // registration is needed only by hosts that expose that separate extension API.
@@ -72,20 +92,24 @@ export function createHostIdentity(ctx, pluginVersion, adapter = detectHostAdapt
     '@deepseek-ai/dsh-client-ui-conversation',
   ]
   const components = Object.fromEntries(componentNames.map(name => [name, packageVersion(name)]))
+  const desktop = desktopBuildIdentity()
   const runtime = `node=${process.version};platform=${process.platform};arch=${process.arch}`
   const storageBackend = objectName(ctx?.sessionPersistence)
   const projectionTypes = (ctx?.sessions?.messageProjections ?? []).map(value => String(value?.type ?? '')).sort()
-  const buildFingerprint = digest(JSON.stringify({ components, runtime, storageBackend, projectionTypes, adapter }))
+  const buildFingerprint = digest(JSON.stringify({ components, desktop, runtime, storageBackend, projectionTypes, adapter }))
   return {
     host: 'deepseek-harness',
     version: components['@deepseek-ai/dsh-session'],
     components,
+    ...desktop,
     buildFingerprint,
     pluginVersion: String(pluginVersion ?? 'unknown'),
     pluginBuildFingerprint: PLUGIN_BUILD_FINGERPRINT,
     adapter,
     runtime,
     storageBackend,
+    sessionFormatVersion: SESSION_FORMAT_VERSION || null,
+    writeContract: hasV4WriteContract ? 'session-format-v4-model-selection' : adapter,
   }
 }
 
@@ -100,7 +124,7 @@ function syntheticUser(id, text) {
   return {
     id,
     role: 'user',
-    source: { kind: 'plugin', plugin: 'context-editor-compatibility-check' },
+    source: pluginMessageSource('compatibility-check', 'context-editor-compatibility-check'),
     content: [{ type: 'text', text }],
   }
 }
@@ -187,7 +211,7 @@ export function runSurfaceSelfTest(ctx) {
     appendSurfaceReplacement(session, 'user/message', {
       id: `context-editor-condensation-v1:${encodeURIComponent(sessionId)}:synthetic`,
       role: 'user',
-      source: { kind: 'plugin', plugin: 'context-editor-deepseek-harness', form: 'condensation' },
+      source: pluginMessageSource('condensation'),
       content: [{ type: 'text', text: 'fixed synthetic user checkpoint summary' }],
     }, first.seq, second.seq, [first.seq, second.seq])
     const events = typeof session.snapshotEvents === 'function' ? session.snapshotEvents() : []
@@ -220,20 +244,21 @@ export function runSurfaceSelfTest(ctx) {
       step: 1,
       message: {
         id: 'compat-tool-result',
-        role: 'user',
+        role: SESSION_FORMAT_VERSION === 4 ? 'tool' : 'user',
+        ...(SESSION_FORMAT_VERSION === 4 ? { toolCallId: 'compat-call' } : {}),
         source: { kind: 'tool', callId: 'compat-call' },
-        content: [{ type: 'tool-result', content: 'fixed synthetic output' }],
+        content: SESSION_FORMAT_VERSION === 4 ? [{ type: 'text', text: 'fixed synthetic output' }] : [{ type: 'tool-result', content: 'fixed synthetic output' }],
       },
     }, { surfaceOp: 'append' })
     const redacted = appendSurfaceReplacement(session, 'tool/result', {
       ...result.data,
-      message: { ...result.data.message, content: [{ ...result.data.message.content[0], content: null }] },
+      message: { ...result.data.message, content: SESSION_FORMAT_VERSION === 4 ? [] : [{ ...result.data.message.content[0], content: null }] },
     }, result.seq, result.seq, [result.seq])
     const messages = session.deriveMessages()
     cases.toolResultContentOnly = messages.length === 2
       && messages[0]?.content?.[0]?.id === 'compat-call'
       && messages[1]?.id === result.data.message.id
-      && messages[1]?.content?.[0]?.content === null
+      && (SESSION_FORMAT_VERSION === 4 ? messages[1]?.toolCallId === 'compat-call' && messages[1]?.content?.length === 0 : messages[1]?.content?.[0]?.content === null)
       && redacted.sourceEventSeqs?.includes(result.seq) === true
     if (!cases.toolResultContentOnly) diagnostics.push('Tool-result replacement changed tool correlation or message identity')
     void call
@@ -247,7 +272,7 @@ export function runSurfaceSelfTest(ctx) {
     appendSurfaceReplacement(session, 'user/message', {
       id: 'compat-empty-user',
       role: 'user',
-      source: { kind: 'plugin', plugin: 'context-editor-compatibility-check' },
+      source: pluginMessageSource(undefined, 'context-editor-compatibility-check'),
       content: [],
     }, original.seq, original.seq, [original.seq])
     const messages = session.deriveMessages()
@@ -315,7 +340,7 @@ export function runSurfaceSelfTest(ctx) {
     appendSurfaceReplacement(session, 'user/message', {
       id: 'compat-native-checkpoint',
       role: 'user',
-      source: { kind: 'plugin', plugin: 'compact', compactionId },
+      source: SESSION_FORMAT_VERSION === 4 ? { kind: 'compact-checkpoint', compactionId } : { kind: 'plugin', plugin: 'compact', compactionId },
       content: [{ type: 'text', text: 'fixed synthetic compacted summary' }],
     }, first.seq, second.seq, [start.seq, summary.seq, first.seq, second.seq])
     session.append('compaction/end', { compactionId, turn: 2 })
@@ -421,6 +446,15 @@ export function createCompatibilityReport(ctx, pluginVersion, adapter = detectHo
   return {
     schemaVersion: 1,
     hostIdentity,
+    ...(SESSION_FORMAT_VERSION >= 4 && !hasV4WriteContract ? { writeUnavailableReason: `session-format-${SESSION_FORMAT_VERSION}-write-contract-unavailable` } : {}),
+    validationLayers: {
+      interfaces: 'recognized-by-runtime-probes',
+      memory: selfTest?.status ?? 'not-run',
+      persistentReplay: 'verified-per-operation',
+      actualRequest: 'external-acceptance-evidence-required',
+      desktopUi: 'external-acceptance-evidence-required',
+      cloudSmoke: 'external-acceptance-evidence-required',
+    },
     checkedAt: new Date().toISOString(),
     features,
     ...(selfTest === undefined ? {} : { selfTest }),

@@ -67,6 +67,8 @@ export function createHarnessText(locale) {
     condensationConflict: zh ? '上下文已变化，已刷新。请确认选区后重新生成精简。' : 'The context changed and has been refreshed. Check your selection and generate again.',
     condensationExpandRelated: zh ? '同步精简 AI 思考和工具输出' : 'Also condense AI reasoning and tool outputs',
     condensationExpandedNotice: count => zh ? `为保留完整回合，本次精简还包含以下 ${count} 项。应用即确认此范围。` : `To keep complete turns, this summary also includes the following ${count} items. Apply confirms this range.`,
+    restoreOneCondensation: zh ? '恢复这一项' : 'Restore this summary',
+    inlineRecoveryUnavailable: zh ? '当前无法单独恢复；若已被后续精简或压缩覆盖，可恢复到精简前的新分支。' : 'Individual restore is unavailable. If covered by later condensation or compaction, recover to a pre-summary branch.',
     generateCondensation: zh ? '生成精简' : 'Generate summary',
     condensationModelPicker: zh ? '\u7cbe\u7b80\u6a21\u578b' : 'Condensation model',
     condenseSelected: count => zh ? `AI \u7cbe\u7b80${count ? `\uff08${count}\uff09` : ''}` : `AI condense${count ? ` (${count})` : ''}`,

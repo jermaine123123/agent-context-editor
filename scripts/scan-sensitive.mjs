@@ -2,7 +2,7 @@ import { readdir, readFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
+const root = process.argv[2] ? resolve(process.argv[2]) : resolve(fileURLToPath(new URL('..', import.meta.url)))
 const ignored = new Set(['node_modules', 'pi-app', 'deepseek-harness-latest', '.git', '.npm-cache', '.release-backup-20260818', 'release', 'dist', 'out'])
 const patterns = [
   /[A-Z]:\\Users\\[^\s"']+/i,

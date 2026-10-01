@@ -8,7 +8,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { defineDomain, domainTable, TypertRemoteService, foldSurface, Session, HostHistoryView, restoreSession } from './host-api.js'
+import { defineDomain, domainTable, TypertRemoteService, foldSurface, Session, HostHistoryView, restoreSession, pluginMessageSource, validateSessionCandidate, isProfileSelection } from './host-api.js'
 import { z } from 'zod'
 import { reduceReplacementStates, selectAssociatedReasoningTargets, selectProjectionTargets, selectCondensationRange, validateCondensationSummary, frameCondensationSummary, estimateCondensationTokens, deriveCondensationCoverage } from './core-runtime.js'
 import {
@@ -32,7 +32,7 @@ import {
 } from './core.js'
 import { PACKAGE_NAME } from './typert.js'
 import { HistoryIndex } from './history-index.js'
-import { RequestTransformRuntime, requestTransformDomain, transformMessages, canTransformMessage, REQUEST_PROVIDER, requestFingerprint } from './request-transform.js'
+import { RequestTransformRuntime, requestTransformDomain, transformMessages, expandCheckpointMessages, messageFingerprint, canTransformMessage, REQUEST_PROVIDER, requestFingerprint } from './request-transform.js'
 import {
   compatibilityCacheKey,
   createCompatibilityReport,
@@ -500,9 +500,10 @@ export function nativeCompactionEvidence(sourceEvents) {
   return refs
 }
 
-function activeCondensationEvents(rowEvents, sourceEvents) {
+function activeCondensationEvents(rowEvents, sourceEvents, profile) {
   const applied = new Set()
   const restored = new Set()
+  for (const value of profile?.checkpointRestorations ?? []) restored.add(value.operationId)
   for (const event of Array.isArray(sourceEvents) ? sourceEvents : []) {
     const id = nativeCondensationOperationId(event)
     if (!id) continue
@@ -533,6 +534,7 @@ function condensationSnapshot(event, projection) {
     ? false
     : overlay?.mode === 'remove' || !(overlay?.message?.content ?? []).some(block => block.type === 'text' && block.text === frameCondensationSummary(event.summary))
   return {
+    inlineRecovery: inlineCondensationRecovery(event, projection),
     operationId: event.operationId,
     status: event.status === 'restored' ? 'restored' : 'applied',
     summary: event.summary,
@@ -702,7 +704,7 @@ function buildCondensationChanges(projection, sourceRootSeqs, summary, operation
   const summaryMessage = {
     id: `condensed-context-${operationId}`,
     role: condensationRole(projection, roots, sourceUnits),
-    source: { kind: 'plugin', plugin: PACKAGE_NAME, form: 'condensation' },
+    source: pluginMessageSource('condensation'),
     content: [{ type: 'text', text: frameCondensationSummary(summary) }],
   }
   const selectedAtoms = new Set(sourceUnits.flatMap(unit => unit.atomIds ?? []))
@@ -1112,11 +1114,19 @@ function moveMapEntryToEnd(map, key, value) {
   while (map.size > 16) map.delete(map.keys().next().value)
 }
 
-function activeSurfaceRoots(events, nodes) {
-  return [...new Set((nodes ?? []).map(seq => {
+function activeSurfaceRoots(events, nodes, profile) {
+  const restorations = new Map((profile?.checkpointRestorations ?? []).map(value => [value.checkpointId, value]))
+  return [...new Set((nodes ?? []).flatMap(seq => {
     const event = events[Number(seq)]
-    return parseContextEditorSurfaceMarker(event?.data?.id)?.rootEventSeq ?? Number(seq)
+    return restorations.get(event?.data?.id)?.sourceRootSeqs ?? [parseContextEditorSurfaceMarker(event?.data?.id)?.rootEventSeq ?? Number(seq)]
   }).filter(Number.isSafeInteger))]
+}
+
+function inlineCondensationRecovery(event, projection) {
+  if (!projection?.requestTransform) return { available: false, reason: 'request-transform-unavailable' }
+  if (!Number.isSafeInteger(event.checkpointSeq)) return { available: false, reason: 'checkpoint-unverified' }
+  if (!projection.activeSurfaceSeqs?.includes(event.checkpointSeq)) return { available: false, reason: 'checkpoint-covered' }
+  return { available: true }
 }
 
 function surfaceReplacementId(sessionId, rootEventSeq, operationId) {
@@ -1158,21 +1168,22 @@ function surfaceReplaceOp(host, startSeq, endSeq) {
     : { op: 'replace', start: startSeq, end: endSeq }
 }
 
-function surfaceRangeForRoots(session, roots, projections = []) {
+function surfaceRangeForRoots(session, roots, projections = [], profile) {
   const events = sessionEvents(session)
   const rootSet = new Set(roots.map(Number))
   const eventBySeq = new Map(events.map(event => [Number(event?.seq), event]))
   const nodes = foldSurface(events, projections).nodes.map(seq => {
     const event = eventBySeq.get(Number(seq))
     const marker = parseContextEditorSurfaceMarker(event?.data?.id)
-    return { seq: Number(seq), root: marker?.rootEventSeq ?? Number(seq), event }
+    const restoration = profile?.checkpointRestorations?.find(value => value.checkpointId === event?.data?.id)
+    return { seq: Number(seq), roots: restoration?.sourceRootSeqs ?? [marker?.rootEventSeq ?? Number(seq)], event }
   })
-  const indexes = nodes.flatMap((node, index) => rootSet.has(node.root) ? [index] : [])
+  const indexes = nodes.flatMap((node, index) => node.roots.some(root => rootSet.has(root)) ? [index] : [])
   if (!indexes.length) throw new Error('CONTEXT_EDITOR_CONDENSATION_SURFACE_RANGE_EMPTY')
   const start = indexes[0]
   const end = indexes.at(-1)
   const range = nodes.slice(start, end + 1)
-  if (range.some(node => !rootSet.has(node.root)) || roots.some(root => !range.some(node => node.root === root))) {
+  if (range.some(node => node.roots.some(root => !rootSet.has(root))) || roots.some(root => !range.some(node => node.roots.includes(root)))) {
     throw new Error('CONTEXT_EDITOR_CONDENSATION_SURFACE_RANGE_NON_CONTIGUOUS')
   }
   if (range.some(node => !Number.isSafeInteger(node.seq) || node.seq < 0)) throw new Error('CONTEXT_EDITOR_CONDENSATION_SURFACE_RANGE_INVALID')
@@ -1502,13 +1513,14 @@ export class ContextEditorHost extends TypertRemoteService {
     const reader = samePrefix ? cached.reader : new HostHistoryView(identity.id, events, inspection.meta ?? inspection.header, inspection.inheritedEventCount, projections)
     if (samePrefix && !sameHistory) reader.update(events)
     const surfaceNodes = reader.nodes
-    const activeSurfaceSeqs = activeSurfaceRoots(events, surfaceNodes)
     const profile = this.requestTransform?.selected(events)?.profile
+    const activeSurfaceSeqs = activeSurfaceRoots(events, surfaceNodes, profile)
     this.projectionIndex ??= new HistoryIndex()
     const projection = this.projectionIndex.build(identity, events, row, { activeSurfaceSeqs, committedReplacementEvents: profile?.replacementEvents, requestOverlays: profile?.changes })
     projection.sessionHeader = inspection.meta ?? inspection.header
+    projection.surfaceRootGroups = (profile?.checkpointRestorations ?? []).filter(value => surfaceNodes.some(seq => events[seq]?.data?.id === value.checkpointId)).map(value => value.sourceRootSeqs)
     projection.inheritedEventCount = inspection.inheritedEventCount ?? 0
-    projection.condensationEvents = activeCondensationEvents(row.condensationEvents, events)
+    projection.condensationEvents = activeCondensationEvents(row.condensationEvents, events, profile)
     projection.contextRevision = sameHistory ? cached.projection.contextRevision : this.contextRevisionFromSession(reader)
     this.applyAdapterCapabilities(projection)
     cache.delete(sessionId)
@@ -1522,12 +1534,13 @@ export class ContextEditorHost extends TypertRemoteService {
     const row = this.rowFor(identity)
     const events = sessionEvents(session)
     const surfaceNodes = foldSurface(events, this.ctx.sessions?.messageProjections ?? []).nodes
-    const activeSurfaceSeqs = activeSurfaceRoots(events, surfaceNodes)
     const profile = this.requestTransform?.selected(events)?.profile
+    const activeSurfaceSeqs = activeSurfaceRoots(events, surfaceNodes, profile)
     const projection = buildProjection(identity, events, row, { activeSurfaceSeqs, committedReplacementEvents: profile?.replacementEvents, requestOverlays: profile?.changes })
     projection.sessionHeader = session.header
+    projection.surfaceRootGroups = (profile?.checkpointRestorations ?? []).filter(value => surfaceNodes.some(seq => events[seq]?.data?.id === value.checkpointId)).map(value => value.sourceRootSeqs)
     projection.inheritedEventCount = session.inheritedEventCount ?? 0
-    projection.condensationEvents = activeCondensationEvents(row.condensationEvents, events)
+    projection.condensationEvents = activeCondensationEvents(row.condensationEvents, events, profile)
     projection.contextRevision = this.contextRevisionFromSession(session)
     return this.applyAdapterCapabilities(projection)
   }
@@ -1866,7 +1879,7 @@ export class ContextEditorHost extends TypertRemoteService {
       if (opaque) throw new Error('CONTEXT_EDITOR_CONDENSATION_OPAQUE_CONTENT:' + opaque.id)
       const roots = range.sourceRootSeqs
       if (roots.some(root => !rootEventExists(projection, root))) throw new Error('CONTEXT_EDITOR_CONDENSATION_SOURCE_GONE')
-      if (checkpointRange) surfaceRangeForRoots(session, roots, this.ctx.sessions.messageProjections)
+      if (checkpointRange) surfaceRangeForRoots(session, roots, this.ctx.sessions.messageProjections, this.requestTransform?.fromSession(session)?.profile)
       const overlap = overlappingCondensation(projection, roots)
       if (overlap) throw new Error('CONTEXT_EDITOR_CONDENSATION_OVERLAP:' + overlap.operationId)
       const overlayConflict = conflictingOverlay(projection, roots)
@@ -1877,8 +1890,8 @@ export class ContextEditorHost extends TypertRemoteService {
       const configured = asObject(target.header.config)
       const prefixReused = String(configured.provider ?? '') === target.provider && String(configured.model ?? '') === target.model
       const generationMessages = prefixReused
-        ? [...historyMessages, { id: randomId('condensation-instruction'), role: 'user', source: { kind: 'plugin', plugin: PACKAGE_NAME }, content: [{ type: 'text', text: condensationInstruction(range) }] }]
-        : [{ id: randomId('condensation-instruction'), role: 'user', source: { kind: 'plugin', plugin: PACKAGE_NAME }, content: [{ type: 'text', text: condensationInstruction(range) }] }]
+        ? [...historyMessages, { id: randomId('condensation-instruction'), role: 'user', source: pluginMessageSource('summary-instruction'), content: [{ type: 'text', text: condensationInstruction(range) }] }]
+        : [{ id: randomId('condensation-instruction'), role: 'user', source: pluginMessageSource('summary-instruction'), content: [{ type: 'text', text: condensationInstruction(range) }] }]
       const beforeTokens = range.sourceUnits.filter(source => source.included).reduce((sum, source) => sum + source.approxTokens, 0)
       if (Number(request.maxInputTokens) > 0 && estimateCondensationTokens(JSON.stringify(generationMessages)) > Number(request.maxInputTokens)) {
         throw new Error('CONTEXT_EDITOR_CONDENSATION_INPUT_TOO_LARGE')
@@ -2235,11 +2248,11 @@ export class ContextEditorHost extends TypertRemoteService {
         const beforeEvents = sessionEvents(session)
         const recoveryAnchorSeq = beforeEvents.at(-1)?.seq ?? -1
         const recovery = recoveryPrefixInfo(sessionId, beforeEvents, recoveryAnchorSeq, session.header, session.inheritedEventCount ?? 0, this.ctx.sessions.messageProjections)
-        const surfaceRange = surfaceRangeForRoots(session, roots, this.ctx.sessions.messageProjections)
+        const surfaceRange = surfaceRangeForRoots(session, roots, this.ctx.sessions.messageProjections, this.requestTransform?.fromSession(session)?.profile)
         const checkpointData = {
           id: checkpointId,
           role: 'user',
-          source: { kind: 'plugin', plugin: PACKAGE_NAME, form: 'condensation' },
+          source: pluginMessageSource('condensation'),
           content: [{ type: 'text', text: frameCondensationSummary(summary) }],
         }
         const appendOptions = {
@@ -2248,6 +2261,7 @@ export class ContextEditorHost extends TypertRemoteService {
         }
         const clonedSession = restoreSession(sessionId, beforeEvents, session.header, session.inheritedEventCount ?? 0, this.ctx.sessions.messageProjections)
         clonedSession.append('user/message', checkpointData, appendOptions)
+        validateSessionCandidate(clonedSession)
         const expectedMessages = clonedSession.deriveMessages()
         event = {
           ...event,
@@ -2313,7 +2327,11 @@ export class ContextEditorHost extends TypertRemoteService {
   }
 
   async restoreCondensation(request = {}) {
-    return this.createRecoveryBranch({ ...request, kind: 'condensation' })
+    if (request.mode === 'branch') return this.createRecoveryBranch({ ...request, kind: 'condensation' })
+    if (!this.requestTransform) return { ok: false, commit: { status: 'unsupported', reason: 'request-transform-unavailable' } }
+    const targetOperationId = String(request.operationId ?? '')
+    if (!targetOperationId) throw new Error('CONTEXT_EDITOR_CONDENSATION_OPERATION_ID_REQUIRED')
+    return this.commitRequestMutation({ ...request, action: 'restore-condensation', targetOperationId, operationId: request.restoreOperationId ?? `restore-condensation:${targetOperationId}` }, 'restore-condensation')
   }
 
   async resolveRecoveryPlan(request = {}) {
@@ -2420,11 +2438,9 @@ export class ContextEditorHost extends TypertRemoteService {
       const subject = { id: sessionId, header: projection.sessionHeader }
       const operation = this.requestTransform.operation(subject, operationId)
       if (operation) {
-        const durable = projection.sourceEvents.find(event => event.type === 'request/header'
-          && event.data.header.config.provider === REQUEST_PROVIDER && event.data.header.config.model === operation.profileId)
+        const durable = projection.sourceEvents.find(event => isProfileSelection(event, REQUEST_PROVIDER, operation.profileId))
         const live = this.ctx.sessions.get(sessionId)
-        const inMemory = live?.snapshotEvents().some(event => event.type === 'request/header'
-          && event.data.header.config.provider === REQUEST_PROVIDER && event.data.header.config.model === operation.profileId)
+        const inMemory = live?.snapshotEvents().some(event => isProfileSelection(event, REQUEST_PROVIDER, operation.profileId))
         let status = durable ? 'persisted-and-verified' : inMemory ? 'unverified' : 'failed'
         if (durable) {
           try {
@@ -2810,6 +2826,7 @@ export class ContextEditorHost extends TypertRemoteService {
         const initial = this.projectionFromSession(session)
         const input = {
           mutation, action: request.action ?? null, unitId: request.unitId ?? null,
+          ...(mutation === 'restore-condensation' ? { targetOperationId: request.targetOperationId } : {}),
           unitIds: request.unitIds ?? null, recordIds: request.recordIds ?? null,
           text: request.text ?? null, excludeAssociatedReasoning: Boolean(request.excludeAssociatedReasoning),
         }
@@ -2826,7 +2843,31 @@ export class ContextEditorHost extends TypertRemoteService {
         }
         let changes = []
         let replacementEvent
-        if (!prior && mutation === 'context') {
+        let checkpointRestoration
+        if (!prior && mutation === 'restore-condensation') {
+          const row = this.rowFor(initial.identity)
+          const target = row.condensationEvents.find(value => value.operationId === request.targetOperationId)
+          if (!target) throw new Error('CONTEXT_EDITOR_CONDENSATION_NOT_FOUND')
+          const eligibility = inlineCondensationRecovery(target, initial)
+          if (!eligibility.available) return { ok: false, operationId, commit: { operationId, status: 'unsupported', reason: eligibility.reason, contextVersion: initial.contextRevision } }
+          const checkpoint = initial.sourceEvents[target.checkpointSeq]
+          if (checkpoint?.data?.id !== condensationCheckpointId(sessionId, target.operationId)
+            || textMessageText(checkpoint.data) !== frameCondensationSummary(target.summary)) throw new Error('CONTEXT_EDITOR_CONDENSATION_CHECKPOINT_UNVERIFIED')
+          const prefix = prefixThrough(initial.sourceEvents, target.recoveryAnchorSeq)
+          if (fingerprint(prefix) !== target.recoveryPrefixFingerprint) throw new Error('CONTEXT_EDITOR_RECOVERY_PREFIX_CHANGED')
+          const before = restoreSession(sessionId, prefix, session.header, session.inheritedEventCount ?? 0, this.ctx.sessions.messageProjections)
+          const rawMessages = before.deriveMessages()
+          const messages = (checkpoint.sourceEventSeqs ?? []).map(seq => {
+            const source = messageForRoot(prefix[seq])
+            const message = rawMessages.find(value => value.id === source?.id)
+            if (!message) throw new Error('CONTEXT_EDITOR_RECOVERY_SOURCE_UNAVAILABLE')
+            return message
+          })
+          const restoredMessages = expandCheckpointMessages(messages, this.requestTransform.fromSession(before)?.profile)
+          if (!restoredMessages.length || restoredMessages.some(message => !canTransformMessage(message))) throw new Error('CONTEXT_EDITOR_UNSUPPORTED_MESSAGE_CONTRACT')
+          checkpointRestoration = { operationId: target.operationId, checkpointId: checkpoint.data.id,
+            checkpointFingerprint: messageFingerprint(checkpoint.data), sourceRootSeqs: target.sourceRootSeqs, messages: restoredMessages }
+        } else if (!prior && mutation === 'context') {
           const calculated = buildNativeContextChanges(initial, request.action, { unitIds: request.unitIds, recordIds: request.recordIds, operationId })
           const expectedSelection = request.selectionFingerprint ?? this.contextOperations.get(operationId)?.selectionFingerprint
           if (expectedSelection && expectedSelection !== selectionFingerprint(initial, calculated.selection.effectiveUnitIds)) return { ok: false, conflict: true, operationId, commit: { operationId, status: 'conflict', reason: 'selection-changed', contextVersion: initial.contextRevision } }
@@ -2855,21 +2896,23 @@ export class ContextEditorHost extends TypertRemoteService {
           }
           changes = buildNativeReplacementChanges(initial, replacementEvent, { operationId }).changes
         }
-        if (!prior && !changes.length) return success(this.snapshotOf(initial, false), { operationId, commit: { operationId, status: 'no-op', contextVersion: initial.contextRevision } })
-        const prepared = await this.requestTransform.prepare(session, operationId, input, changes, replacementEvent)
+        if (!prior && !changes.length && !checkpointRestoration) return success(this.snapshotOf(initial, false), { operationId, commit: { operationId, status: 'no-op', contextVersion: initial.contextRevision } })
+        const prepared = await this.requestTransform.prepare(session, operationId, input, changes, replacementEvent, checkpointRestoration)
+        const alreadySelected = session.snapshotEvents().some(value => isProfileSelection(value, REQUEST_PROVIDER, prepared.id))
+        const verificationProfile = alreadySelected ? this.requestTransform.fromSession(session)?.profile ?? prepared.profile : prepared.profile
+        const expectedMessages = transformMessages(session.deriveMessages(), verificationProfile)
         try {
           const event = this.requestTransform.appendSelection(session, prepared)
           await this.ctx.sessions.flush(session)
           this.historyCache.delete(sessionId)
           const persisted = await this.inspect(sessionId)
-          if (!persisted.events.some(value => value.type === 'request/header'
-            && value.data.header.config.provider === REQUEST_PROVIDER && value.data.header.config.model === prepared.id)) {
+          if (!persisted.events.some(value => isProfileSelection(value, REQUEST_PROVIDER, prepared.id))) {
             throw new Error('CONTEXT_EDITOR_COMMIT_VERIFICATION_FAILED:profile-selection-not-persisted')
           }
           const restored = restoreSession(sessionId, persisted.events, persisted.meta, persisted.inheritedEventCount, this.ctx.sessions.messageProjections)
           const latest = this.requestTransform.fromSession(restored)
           if (!latest) throw new Error('CONTEXT_EDITOR_COMMIT_VERIFICATION_FAILED:profile-not-selected')
-          transformMessages(restored.deriveMessages(), latest.profile)
+          if (!sameJson(transformMessages(restored.deriveMessages(), latest.profile), expectedMessages)) throw new Error('CONTEXT_EDITOR_COMMIT_VERIFICATION_FAILED:effective-message-mismatch')
           await this.requestTransform.settle(session, operationId, 'persisted-and-verified')
           this.searchCache.clear()
           const next = await this.readProjection(sessionId)

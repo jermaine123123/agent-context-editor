@@ -17,6 +17,8 @@ export interface HarnessText {
   condensationExpandedNotice(count: number): string
   condensationConflict: string
   restoreCondensation: string
+  restoreOneCondensation: string
+  inlineRecoveryUnavailable: string
   createRecoveryBranch: string
   recoveryPreview(boundary: number, count: number): string
   recoveryCreated: string

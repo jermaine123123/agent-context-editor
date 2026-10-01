@@ -1,6 +1,22 @@
 # DeepSeek Harness compatibility and acceptance
 
-The current candidate is **0.4.10**. The added target is official npm **0.1.5-rc.1**, with all DSH component versions pinned in its installation lockfile. Existing alpha.1 source commit `0d1f50007f9bca3f52b06e1c3074fa14d5fb0720` retains regression coverage. Neither host requires source changes. This does not certify rc.2 or alpha.2. No scheduled version scan is added.
+The current release is **0.6.0**, targeting the official Windows Desktop **0.2.0-rc.2** and its embedded Harness. Installer SHA-512, Desktop commit `04f392c9ddd144fa426da2045178797da6db6c11` (dirty=false), embedded component versions and exact candidate SHA-256 are recorded in the accompanying release evidence. The GitHub tag is used for analysis only. Official npm **0.1.5-rc.1** receives separate regression tests. The host is not modified and no validation or version exemption is used.
+
+## 0.6.0 v4 adapter and evidence boundary
+
+v4 selects immutable request profiles using `model/selection`; only ordinary Agent execution writes request headers. Checkpoint candidates use the official v4 format and relationship validator before persistence. Plugin-generated sources use `context-editor`. The adapter supports independent tool roles, error results and host-generated unfinished-call repairs, while preserving call pairs, image attachments and known signatures. Unsupported formats or missing validator interfaces disable write features.
+
+Acceptance layers are independent: contract detection, memory self-check, persisted replay, official Provider requests to a synthetic local endpoint, actual Desktop window operations, and a small cloud smoke. A capability self-check does not certify persistence, UI or cloud behavior. Exact archive files are compared byte-for-byte with the installed candidate before each release acceptance. Raw event fingerprints and synthetic requests are retained; report evidence and final archive checksums live outside the archive.
+
+The local suite covers edit/exclude/undo/restore, model and reasoning-effort selection, restart before the next request, A/B individual restoration, repeated condensation, native compaction coverage, branch recovery and continuation, normal/failed tool pairs, host `TOOL_NOT_STARTED` repair, images, signed reasoning, four commit interruption points, idempotency and stale revisions. Separate tests verify immutable profile formats 1/2/3 with official persistence, missing validator and future-format refusal. Missing/corrupt profiles fail explicitly. A real-model smoke covers only the operations listed in its evidence; it does not replace the synthetic fault and structured-content matrix.
+
+An older plugin's out-of-turn request headers are rejected by the official v3→v4 importer. The optional offline recovery helper creates a NEW standalone v4 session, converts only proven config-only headers to selection records, validates with the official codec and verifies persistence without changing the source file. Original profile rows remain immutable. This helper refuses seeded sessions, catalog/delivery markers and unsupported header differences. Back up session logs and plugin storage together; do not downgrade a session dependent on newer profile semantics.
+
+Single-item restore cannot expand a checkpoint that has been covered by later replacement or native compaction; the UI offers branch recovery. Active Surface selections cannot cross an unselected System snapshot. Image-containing condensation, direct edits to signed thoughts, unknown replay formats and custom native-compaction providers remain unsupported. A newer Desktop release is not certified by this peer range.
+
+## Historical 0.5.0 and earlier acceptance
+
+0.5.0 adds individual checkpoint restoration through immutable version-3 request profiles. An exact active checkpoint expands to its proven original messages before existing edit/exclusion patches are applied. Missing or compacted checkpoints never reinsert their originals. The UI offers individual restoration and branch recovery separately. Versions 1/2 stay unchanged; downgrading an active v3 session to 0.4.x is unsupported. A complete pre-upgrade profile backup is required for rollback.
 
 0.4.10 fixes a further case missed by 0.4.9: mid-turn injected messages split the UI record adjacency while the grouped answer continues across later tools. Checkpoints now close over active Surface positions plus turn/call identities, expose intervening inputs in the confirmation, and use the same closure for stale-draft validation. Tests exercise both answer-only and answer-plus-thought selection with interleaved plugin input and multiple tool steps.
 

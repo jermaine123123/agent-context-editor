@@ -1,17 +1,31 @@
 {
   "name": "context-editor-deepseek-harness",
-  "version": "0.4.10",
+  "version": "0.6.0",
   "description": "Context Editor with verified User Surface edits and checkpoint recovery for DeepSeek Harness",
   "type": "module",
-  "engines": { "node": ">=22.19.0" },
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "main": "index.js",
   "types": "index.d.ts",
   "exports": {
-    ".": { "types": "./index.d.ts", "default": "./index.js" },
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
     "./client": "./client.bundle.js",
-    "./remote": { "types": "./remote.d.ts", "default": "./remote.js" },
-    "./typert": { "types": "./typert.d.ts", "default": "./typert.js" },
-    "./core": { "types": "./core.d.ts", "default": "./core.js" },
+    "./remote": {
+      "types": "./remote.d.ts",
+      "default": "./remote.js"
+    },
+    "./typert": {
+      "types": "./typert.d.ts",
+      "default": "./typert.js"
+    },
+    "./core": {
+      "types": "./core.d.ts",
+      "default": "./core.js"
+    },
     "./client.css": "./client.css",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
@@ -63,16 +77,22 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.1 <5",
-    "@deepseek-ai/dsh-api-remotes": ">=0.1.0-rc.8 <0.2.0-0 || >=0.1.6-alpha.1 <0.1.6",
-    "@deepseek-ai/dsh-client-runtime": ">=0.1.0-rc.8 <0.2.0-0 || >=0.1.6-alpha.1 <0.1.6",
-    "@deepseek-ai/dsh-client-ui-conversation": ">=0.1.0-rc.8 <0.2.0-0 || >=0.1.6-alpha.1 <0.1.6",
-    "@deepseek-ai/dsh-session-persistence": ">=0.1.0-rc.8 <0.2.0-0 || >=0.1.6-alpha.1 <0.1.6",
-    "@deepseek-ai/dsh-storage-domain": ">=0.1.0-rc.8 <0.2.0-0 || >=0.1.6-alpha.1 <0.1.6",
-    "@deepseek-ai/dsh-session": ">=0.1.0-rc.8 <0.2.0-0 || >=0.1.6-alpha.1 <0.1.6",
-    "@deepseek-ai/dsh-typert-protocol": ">=0.1.0-rc.8 <0.2.0-0 || >=0.1.6-alpha.1 <0.1.6",
-    "react": "^18.2.0"
+    "@deepseek-ai/dsh-api-remotes": ">=0.1.0-rc.8 <0.2.0-0 || >=0.1.6-alpha.1 <0.1.6 || 0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-runtime": ">=0.1.0-rc.8 <0.2.0-0 || >=0.1.6-alpha.1 <0.1.6 || 0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-conversation": ">=0.1.0-rc.8 <0.2.0-0 || >=0.1.6-alpha.1 <0.1.6 || 0.2.0-rc.2",
+    "@deepseek-ai/dsh-session-persistence": ">=0.1.0-rc.8 <0.2.0-0 || >=0.1.6-alpha.1 <0.1.6 || 0.2.0-rc.2",
+    "@deepseek-ai/dsh-storage-domain": ">=0.1.0-rc.8 <0.2.0-0 || >=0.1.6-alpha.1 <0.1.6 || 0.2.0-rc.2",
+    "@deepseek-ai/dsh-session": ">=0.1.0-rc.8 <0.2.0-0 || >=0.1.6-alpha.1 <0.1.6 || 0.2.0-rc.2",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.1.0-rc.8 <0.2.0-0 || >=0.1.6-alpha.1 <0.1.6 || 0.2.0-rc.2",
+    "react": "^18.2.0",
+    "@deepseek-ai/dsh-session-format-v3-to-v4": "0.2.0-rc.2"
   },
   "dependencies": {
     "zod": "4.4.3"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-session-format-v3-to-v4": {
+      "optional": true
+    }
   }
 }
